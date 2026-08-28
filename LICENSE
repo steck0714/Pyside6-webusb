@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 steck0714
+Copyright (c) 2026 pyside6-webusb contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------
+
+This project's runtime dependency on Qt's qwebchannel.js (loaded dynamically
+from your PySide6/Qt installation at runtime, not redistributed in this
+repository -- see pyside6_webusb/polyfill.py) is separately licensed by The Qt
+Company under the terms of the BSD 3-Clause License. No Qt source is included
+in this repository.

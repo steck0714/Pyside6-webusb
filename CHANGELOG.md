@@ -2,6 +2,143 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4]
+
+A bug-fix and spec-compliance-audit release. Started from a user-reported symptom (the device
+chooser dialog not appearing), confirmed the diagnosis, and used the same audit to look for
+other gaps between this implementation and the spec / the real `pyusb`/PySide6 it sits on top
+of. All five fixes below were verified against real installed sources or a real `QWebChannel`
+round-trip, not assumed.
+
+### Fixed
+
+- **Chooser dialog silently losing its parent window (user-reported).**
+  `requestDeviceChooser()` resolved the dialog's parent purely via
+  `QApplication.activeWindow()`, ignoring `self.browser_window` even though `__init__()` /
+  `install()` already threaded it all the way through to the bridge. `activeWindow()`'s value
+  depends on the OS/window manager correctly propagating focus-activation state to Qt, which an
+  async JS→Python `QWebChannel` call (arriving via a nested event loop, triggered from inside a
+  `QWebEngineView`'s own native compositor surface) doesn't reliably keep in sync on every
+  platform — when it returns `None`, the dialog opens as an independent, unparented top-level
+  window, which can end up behind the browser window, on a different desktop/workspace, or
+  otherwise easy to lose track of, even though it's technically open and modal the whole time.
+  Added `_resolve_chooser_parent_window()`: prefers `browser_window` (only when it's actually a
+  `QWidget` — see below), falls back to `activeWindow()`, then to the first visible top-level
+  widget, in that order. Also added explicit `dlg.show()` / `raise_()` / `activateWindow()`
+  before `exec()` as defense in depth. `examples/minimal_browser.py` and the README's
+  `browser_window` documentation were both updated to demonstrate and describe this —
+  `browser_window` was previously documented purely as a settings-storage duck-typed parameter
+  (`.settings` attribute), so this is a backward-compatible broadening of what it's used for,
+  not a new required argument or a breaking change to what could be passed there before.
+  Covered by three new `test_bridge.py` cases:
+  `test_resolve_chooser_parent_window_prefers_browser_window_widget`,
+  `test_resolve_chooser_parent_window_ignores_non_widget_browser_window` (confirms passing the
+  old-style non-`QWidget` settings-holder still works and doesn't get used as a parent), and
+  `test_requestDeviceChooser_passes_browser_window_to_dialog_as_parent` (end-to-end through the
+  real `requestDeviceChooser()` call path, not just the resolver in isolation).
+
+- **`device.close()` never actually closed anything.** `closeDevice(handle_id,
+  frame_token="")` has been `@Slot(int, str)` (2 required parameters) since `frame_token` was
+  threaded through every origin-sensitive method in `0.0.3b0` — but the polyfill's `close()`,
+  the one call site that doesn't go through the `callBridge()` helper (since it doesn't need a
+  return value), was never updated to match, and still called `bridge.closeDevice(this._handle)`
+  with a single argument. Confirmed with a real `QWebChannel` round-trip (a throwaway probe
+  `QObject` with a `@Slot(int, str)` method, invoked from JS both with and without the second
+  argument) that this isn't a "missing argument defaults to empty string" situation:
+  **QWebChannel silently drops the call entirely** when the JS caller supplies fewer arguments
+  than the registered slot signature requires — the Python method never runs at all, no
+  exception, no console warning. So every `device.close()` call was a complete no-op: the
+  `pyusb`/libusb device handle was never disposed, the entry in `_open_devices` was never
+  removed, and the underlying device stayed exclusively claimed by the process for as long as
+  the page/bridge lived. Fixed by passing `_frameToken()` as the second argument, matching
+  every other bridge call site. `tests/test_polyfill.js` gained a dedicated case that opens a
+  device, closes it, and asserts `closeDevice` was invoked with exactly `(handle, frame_token)`
+  — confirmed this fails against the pre-fix code and passes against the fix before finalizing it.
+
+- **Isochronous transfers passed the wrong value as the backend's interface-number
+  parameter.** Read directly from the installed `pyusb`'s `usb/backend/libusb1.py`:
+  `iso_read(self, dev_handle, ep, intf, buff, timeout)` / `iso_write(self, dev_handle, ep,
+  intf, data, timeout)` — the third parameter is an interface number (this is also exactly what
+  `Device.read()`/`write()`'s own internal dispatch passes, via `Context.setup_request()`'s
+  `intf.bInterfaceNumber` — confirmed by reading that code path too). `isochronousTransferIn`/
+  `Out` here were passing the raw endpoint number instead, discarding the real interface number
+  that `_endpoint_available_or_error()` already computes and returns (previously captured as
+  `_owner` and thrown away). Currently a no-op at runtime — the installed `pyusb` (`1.3.1`)'s
+  `_IsoTransferHandler` accepts `intf` but never reads it, confirmed from source — but
+  semantically wrong, reliant on that being true forever, and a landmine for any future `pyusb`
+  release that starts using it. Fixed to pass the real interface number through in both
+  directions. `test_isochronousTransfer_success_path_with_fake_backend` gained assertions on
+  this; a new `test_isochronousTransfer_passes_interface_number_not_endpoint_number_as_intf`
+  uses a deliberately-different interface number (`7`) and endpoint numbers (`3`/`4`) so the
+  assertion can't accidentally pass just because both happened to be the same small integer.
+
+- **`selectConfiguration()` didn't reset per-handle claimed-interface tracking.** The spec
+  requires `[[claimedInterface]]` to be cleared for every interface on a successful
+  configuration switch — a given interface *number* can mean something completely different
+  under a different configuration. The implementation called `dev.set_configuration()` but left
+  the handle's `claimed_interfaces` set untouched, so an interface number claimed under the old
+  configuration stayed "claimed" (and therefore usable for transfers / `selectAlternateInterface
+  ()`) under the new one, despite never actually being claimed there. `selectConfiguration()`
+  had *no* test coverage at all before this version — `tests/test_bridge.py`'s `FakeDevice`
+  didn't even implement `set_configuration()` — so this was found by reading the spec's
+  algorithm against the implementation line by line, not from a symptom report.
+  `FakeDevice.set_configuration()` / `get_active_configuration()` were extended in the test
+  fakes (previously `get_active_configuration()` unconditionally returned the fixture's
+  first/only configuration, since no existing test used more than one) so configuration
+  switches can actually be exercised. New test:
+  `test_selectConfiguration_resets_claimed_interfaces`.
+
+- **`bulkTransferIn`/`Out` accepted isochronous endpoints.** The spec's `transferIn`/
+  `transferOut` algorithm requires `InvalidAccessError` when the target endpoint's actual type
+  isn't bulk or interrupt — this project already enforced the *reverse* direction
+  (`isochronousTransferIn`/`Out` rejecting non-isochronous endpoints, since `0.0.2b0`), but not
+  this one. `pyusb`'s `Device.read()`/`write()` auto-dispatches to the correct backend call
+  (`bulk_read`/`intr_read`/`iso_read`, confirmed from `usb/core.py`'s `fn_map`) purely from the
+  endpoint descriptor's declared type, so the transfer would actually go through and "succeed"
+  against a real isochronous endpoint via the bulk-named methods — this only ever surfaced as a
+  spec/permissions violation, never a runtime error, which is presumably why it went unnoticed.
+  `_endpoint_available_or_error()`'s `required_type` parameter now accepts a tuple of allowed
+  types (previously exactly one); `bulkTransferIn`/`Out` pass `("bulk", "interrupt")`. New test:
+  `test_bulkTransferIn_and_Out_reject_isochronous_endpoint`.
+
+### Verified against the spec / real sources — no change needed
+Things this audit specifically checked and found already correct, recorded here rather than
+silently passed over:
+- `hardening.py`'s `KNOWN_SECURITY_KEY_BLOCKLIST` (43 entries) matches WICG's own
+  `blocklist.txt` (fetched live from `github.com/WICG/webusb`, `main` branch) exactly — same 43
+  entries both directions, and neither source currently has any `bcdDevice`-qualified entries
+  (a form this implementation's blocklist can't represent, since it's vendor/product-ID only —
+  worth re-checking on a future audit, but not a gap today). This cross-checks against a
+  *different* canonical source than the `0.0.1a0` entry's comparison against Chromium's
+  `usb_blocklist.cc`; both agree.
+- `PROTECTED_INTERFACE_CLASSES` (`0x01, 0x03, 0x08, 0x09, 0x0B, 0x0E, 0x10, 0xE0`) matches the
+  spec's "has a protected interface class" table exactly, entry for entry.
+- Every `pyusb` `Device` method call site in `bridge.py` (`read`, `write`, `ctrl_transfer`,
+  `set_interface_altsetting`, `set_configuration`, `get_active_configuration`, `reset`,
+  `clear_halt`, `is_kernel_driver_active`, `detach_kernel_driver`) checked argument-by-argument
+  against the actual installed `pyusb` source's method signatures — all correct.
+- Every `@Slot`-decorated method's declared argument count checked against every JS call site
+  that invokes it (whether via the `callBridge()` helper or a direct call) — `closeDevice`
+  (Fixed, above) was the only mismatch found.
+- `Configuration.__iter__` / `Interface.__iter__` (confirmed from the installed `usb/core.py`)
+  yield one `Interface` object per alternate setting, not one per interface number — matches
+  how `build_configurations_tree()` already grouped them by interface number.
+
+### Project metadata
+- Version bumped to `0.0.4`.
+- Verified against Python `3.14.4` (the latest available; Ubuntu 24.04's system package manager
+  only offers `3.12.x`, so this used `uv python install` to get a real up-to-date interpreter)
+  and `PySide6-Essentials`/`PySide6-Addons` `6.11.2` (latest on PyPI as of this release — up
+  from `6.11.1`, confirmed current as of the `0.0.3` entry). The full test suite (Python +
+  `tests/test_polyfill.js`) passes unmodified on both. Also compiled every file touched in this
+  release under Python `3.9.24` (the floor of `requires-python`) to confirm no accidental
+  reliance on newer syntax snuck in.
+- One pre-existing, unrelated `DeprecationWarning` observed under Python 3.14, from `pyusb`'s
+  own `usb/backend/libusb0.py` (`ctypes.Structure` subclasses using `_pack_` without
+  `_layout_`, which 3.14's `ctypes` now warns about ahead of a future Python version making it
+  an error). This lives entirely inside `pyusb`, isn't triggered by anything this project's own
+  code does, and isn't something this project can fix — noted here rather than silently ignored.
+
 ## [0.0.3b0]
 
 Implemented the per-frame origin attribution design that `0.0.3`/`0.0.3a0` researched but
