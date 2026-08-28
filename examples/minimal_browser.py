@@ -7,7 +7,14 @@ A ~60-line runnable demo showing the entire integration surface of pyside6-webus
     view = QWebEngineView()
     install(view.page())
 
-That's the whole API. Everything else below is just enough browser chrome (address bar,
+That's the whole API. (`install()` also accepts an optional `browser_window=` --
+see DemoWindow.__init__ below -- which is recommended whenever your app's
+QWebEngineView lives inside a QMainWindow/QWidget: it's used as the parent for
+the native device-chooser dialog. Without it, the dialog falls back to
+QApplication.activeWindow(), which some window managers / embedding setups
+don't keep in sync with an async JS->Python call, so the dialog can end up
+opening without a parent -- still functional, but easy to lose track of behind
+other windows.) Everything else below is just enough browser chrome (address bar,
 back/forward) to make it a usable window, plus a small self-contained HTML/JS test page
 (DEMO_HTML) so you can try navigator.usb.getDevices() / requestDevice() immediately
 without depending on any particular external website.
@@ -74,7 +81,12 @@ class DemoWindow(QMainWindow):
         self.setCentralWidget(self.view)
 
         # This is the entire integration: one function call.
-        install(self.view.page())
+        # browser_window=self is passed so the device-chooser dialog is always
+        # parented to *this* window (reliable positioning/stacking/focus),
+        # instead of falling back to QApplication.activeWindow() -- which can
+        # be None by the time the JS->Python call lands, depending on the
+        # platform/window manager (see the module docstring above).
+        install(self.view.page(), browser_window=self)
 
         toolbar = QToolBar()
         self.addToolBar(toolbar)
