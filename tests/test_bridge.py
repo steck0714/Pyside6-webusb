@@ -111,13 +111,25 @@ class FakeDevice:
         return iter(self._configurations)
 
     def get_active_configuration(self):
-        # 🛡️ 実pyusbのDevice.get_active_configuration()を模倣。このテストファイルの
-        #    フィクスチャは常にconfigurationを1つしか構築しないため、単純に先頭を返す
-        #    (test_hardening.py側のFakeDeviceのように「未設定なら例外」という
-        #    より作り込んだ挙動は、このファイルでは今のところ不要)。
+        # 🛡️ 実pyusbのDevice.get_active_configuration()を模倣。set_configuration()で
+        #    切り替えていればそれを、まだ一度も呼ばれていなければ先頭を返す。
         if not self._configurations:
             raise ValueError("no active configuration")
-        return self._configurations[0]
+        return getattr(self, "_active_configuration", None) or self._configurations[0]
+
+    def set_configuration(self, configuration=None):
+        # 🛡️ selectConfiguration()のclaimed_interfacesリセット確認テスト向け。
+        #    実pyusbのDevice.set_configuration()を模倣し、bConfigurationValueが
+        #    一致するconfigurationをアクティブにする(0/Noneは「先頭を選ぶ」という
+        #    実仕様の挙動をそのまま模す)。
+        if configuration is None or configuration == 0:
+            self._active_configuration = self._configurations[0]
+            return
+        for cfg in self._configurations:
+            if cfg.bConfigurationValue == configuration:
+                self._active_configuration = cfg
+                return
+        raise ValueError(f"Configuration {configuration} not found")
 
     def read(self, endpoint, length, timeout=None):
         # 🛡️ pyusb実物のDevice.read()を模倣: endpointはbEndpointAddress(方向ビット込み)
@@ -206,11 +218,13 @@ class FakeChooserDialog:
     last_devices_info = None  # ダイアログへ実際に渡された(=絞り込み後の)一覧を記録しておく
     last_origin = None
     last_refresh_callback = None
+    last_parent = None  # 🛡️ v0.0.4: 実際に渡されたparent(親ウィジェット)を記録しておく
 
     def __init__(self, devices_info, parent, strings=None, origin=None, refresh_callback=None):
         FakeChooserDialog.last_devices_info = devices_info
         FakeChooserDialog.last_origin = origin
         FakeChooserDialog.last_refresh_callback = refresh_callback
+        FakeChooserDialog.last_parent = parent
         self.devices_info = devices_info
         idx = FakeChooserDialog.SELECT_INDEX
         self.selected_device = devices_info[idx] if (idx is not None and idx < len(devices_info)) else None
@@ -218,10 +232,22 @@ class FakeChooserDialog:
     def exec(self):
         return self.DialogCode.Accepted if self.selected_device is not None else self.DialogCode.Rejected
 
+    # 実QDialog(=QWidgetのサブクラス)には常に存在するメソッド群。v0.0.4で
+    # bridge.py側がダイアログを確実に前面へ出すためexec()の前に呼ぶようになった
+    # ため、フェイクにも(no-opでよいので)用意しておく。
+    def show(self):
+        pass
 
-def make_bridge(devices):
+    def raise_(self):
+        pass
+
+    def activateWindow(self):
+        pass
+
+
+def make_bridge(devices, browser_window=None):
     """QWebChannel配線なしで、pyusb部分だけをフェイクに差し替えたWebUSBBridgeを作る。"""
-    bridge = WebUSBBridge()
+    bridge = WebUSBBridge(browser_window=browser_window)
     bridge._pyusb = lambda: (FakeUsbCore(devices), FakeUsbUtil())
     bridge._load_known_devices = lambda: []
     bridge._record_device_usage = lambda *a, **kw: None
@@ -316,6 +342,64 @@ def test_origin_is_passed_to_the_dialog(monkeypatch):
     bridge.requestDeviceChooser(json.dumps({"filters": [{}]}))
     assert FakeChooserDialog.last_origin == "https://example.test"
     print("test_origin_is_passed_to_the_dialog: OK")
+
+
+def test_resolve_chooser_parent_window_prefers_browser_window_widget():
+    """🛡️ バグ修正(v0.0.4, ユーザー報告): 旧実装はQApplication.activeWindow()だけで
+    チューザーダイアログの親を決めており、コンストラクタ/install()経由で
+    browser_windowを受け取り self.browser_window へ保存していたにもかかわらず、
+    実際の親解決では一切参照していなかった(QWebEngineView経由の非同期コール
+    バックではactiveWindow()がOS/ウィンドウマネージャのフォーカス伝播に依存して
+    Noneになりやすく、結果としてダイアログが親を持たない独立ウィンドウとして
+    開かれ、ブラウザ本体の裏に隠れる等の理由で「画面が出ない」ように見える、
+    という実際の不具合報告があった)。browser_windowに実際のQWidgetを渡した
+    場合、それが最優先で返ることを確認する。"""
+    from PySide6.QtWidgets import QWidget
+    window = QWidget()
+    try:
+        bridge = WebUSBBridge(browser_window=window)
+        assert bridge._resolve_chooser_parent_window() is window
+    finally:
+        window.deleteLater()
+    print("test_resolve_chooser_parent_window_prefers_browser_window_widget: OK")
+
+
+def test_resolve_chooser_parent_window_ignores_non_widget_browser_window():
+    """browser_windowは元々「.settingsを持つオブジェクトなら何でもよい」という
+    ダックタイピングで文書化されており(READMEの設定永続化用途)、必ずしも
+    QWidgetとは限らない。QWidgetではないbrowser_windowを渡した既存ユーザーの
+    挙動を壊さないよう、その場合はbrowser_windowそのものではなく、
+    (QApplication.activeWindow()や可視なトップレベルウィジェットへの)
+    フォールバックへ正しく進むことを確認する。"""
+    class SettingsHolder:
+        class settings:
+            pass
+
+    holder = SettingsHolder()
+    bridge = WebUSBBridge(browser_window=holder)
+    resolved = bridge._resolve_chooser_parent_window()
+    assert resolved is not holder
+    print("test_resolve_chooser_parent_window_ignores_non_widget_browser_window: OK")
+
+
+def test_requestDeviceChooser_passes_browser_window_to_dialog_as_parent(monkeypatch):
+    """_resolve_chooser_parent_window()単体ではなく、requestDeviceChooser()の
+    実際の呼び出し経路を通しても、ダイアログのparentへbrowser_windowが正しく
+    渡っていることを確認する(=配線の最後の一箇所まで繋がっていることの
+    統合テスト)。"""
+    from PySide6.QtWidgets import QWidget
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [])])
+    window = QWidget()
+    try:
+        bridge = make_bridge([dev_a], browser_window=window)
+        monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
+        FakeChooserDialog.SELECT_INDEX = 0
+        result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+        assert result["cancelled"] is False, result
+        assert FakeChooserDialog.last_parent is window
+    finally:
+        window.deleteLater()
+    print("test_requestDeviceChooser_passes_browser_window_to_dialog_as_parent: OK")
 
 
 def test_refresh_callback_reflects_newly_plugged_device(monkeypatch):
@@ -551,6 +635,37 @@ def test_bulk_transfer_rejects_out_of_range_endpoint_number():
     print("test_bulk_transfer_rejects_out_of_range_endpoint_number: OK")
 
 
+def test_bulkTransferIn_and_Out_reject_isochronous_endpoint():
+    """WebUSB仕様のtransferIn/transferOutアルゴリズムは、対象endpointのtypeが
+    bulkでもinterruptでもなければInvalidAccessErrorを返すと定めている
+    (isochronousTransferIn/Outが別メソッドとして独立して用意されているのは
+    このため)。
+    🛡️ バグ修正(v0.0.4): 旧実装はrequired_typeを指定しておらず、isochronous
+    専用のendpointに対してもbulkTransferIn/Out経由でread()/write()できて
+    しまっていた。pyusbのDevice.read()/write()自体はendpoint記述子から
+    転送タイプを自動判別して実際に転送してしまうため、実機を使わないと
+    気づきにくい抜け穴だった。"""
+    ep_iso_in = FakeEndpoint(0x83, 0x01)   # endpoint 3, IN, isochronous
+    ep_iso_out = FakeEndpoint(0x04, 0x01)  # endpoint 4, OUT, isochronous
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_iso_in, ep_iso_out])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    in_result = json.loads(bridge.bulkTransferIn(handle, 3, 4))
+    assert in_result["success"] is False
+    assert in_result["error"].startswith("InvalidAccessError:"), in_result
+    assert not hasattr(dev_a, "last_read_call"), "isochronous endpointへは実機のread()すら呼ばれないべき"
+
+    out_result = json.loads(bridge.bulkTransferOut(handle, 4, "01"))
+    assert out_result["success"] is False
+    assert out_result["error"].startswith("InvalidAccessError:"), out_result
+    assert not hasattr(dev_a, "last_write_call")
+    print("test_bulkTransferIn_and_Out_reject_isochronous_endpoint: OK")
+
+
 def test_isochronousTransfer_without_iso_backend_returns_not_supported():
     """pyusbの公開API(usb.core.Device)にはisochronous転送メソッドが無く、
     このブリッジはlibusb1バックエンドの内部API(iso_read/iso_write)へ
@@ -637,13 +752,44 @@ def test_isochronousTransfer_success_path_with_fake_backend():
     assert len(in_result["packets"]) == 2
     assert all(p["status"] == "ok" for p in in_result["packets"])
     assert fake_backend.iso_read_calls[-1]["ep"] == 0x83, "IN方向ビット(0x80)込みのアドレスで呼ぶべき"
+    # 🛡️ バグ修正(v0.0.4)の回帰テスト: pyusb実ソース(libusb1.py)確認済みの
+    # iso_read(dev_handle, ep, intf, buff, timeout)の第3引数intfには、
+    # エンドポイント番号(3)ではなくインターフェース番号(0)が渡るべき。
+    # 旧実装はここにendpoint番号をそのまま渡していた。
+    assert fake_backend.iso_read_calls[-1]["intf"] == 0, \
+        "第3引数にはエンドポイント番号(3)ではなくインターフェース番号(0)を渡すべき"
 
     out_result = json.loads(bridge.isochronousTransferOut(handle, 4, "0102030405060708", json.dumps([4, 4])))
     assert out_result["success"] is True, out_result
     assert len(out_result["packets"]) == 2
     assert fake_backend.iso_write_calls[-1]["ep"] == 4
     assert fake_backend.iso_write_calls[-1]["data"] == bytes.fromhex("0102030405060708")
+    assert fake_backend.iso_write_calls[-1]["intf"] == 0, \
+        "第3引数にはエンドポイント番号(4)ではなくインターフェース番号(0)を渡すべき"
     print("test_isochronousTransfer_success_path_with_fake_backend: OK")
+
+
+def test_isochronousTransfer_passes_interface_number_not_endpoint_number_as_intf():
+    """前のテストは偶然インターフェース番号が0のため、「常に0を渡す」ような
+    誤実装でも通ってしまいかねない。ここではインターフェース番号(7)と
+    エンドポイント番号(3/4)を明確に異ならせ、backendのintf引数に本当に
+    インターフェース番号が渡っているかを曖昧さなく確認する。"""
+    ep_iso_in = FakeEndpoint(0x83, 0x01)   # endpoint 3, IN
+    ep_iso_out = FakeEndpoint(0x04, 0x01)  # endpoint 4, OUT
+    intf = FakeInterface(7, 0, 0xFF, 0x00, 0x00, [ep_iso_in, ep_iso_out])  # interface number 7
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    fake_backend = dev_a.enable_fake_iso_backend()
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 7))["success"] is True
+
+    json.loads(bridge.isochronousTransferIn(handle, 3, json.dumps([4])))
+    assert fake_backend.iso_read_calls[-1]["intf"] == 7, fake_backend.iso_read_calls[-1]
+
+    json.loads(bridge.isochronousTransferOut(handle, 4, "01020304", json.dumps([4])))
+    assert fake_backend.iso_write_calls[-1]["intf"] == 7, fake_backend.iso_write_calls[-1]
+    print("test_isochronousTransfer_passes_interface_number_not_endpoint_number_as_intf: OK")
 
 
 def test_selectAlternateInterface_requires_claimed_interface():
@@ -687,6 +833,46 @@ def test_claimInterface_and_releaseInterface_require_configuration_selected():
     assert release_result["success"] is False
     assert release_result["error"].startswith("InvalidStateError:"), release_result
     print("test_claimInterface_and_releaseInterface_require_configuration_selected: OK")
+
+
+def test_selectConfiguration_resets_claimed_interfaces():
+    """WebUSB仕様(USBDevice.selectConfiguration()): 成功時に[[claimedInterface]]を
+    全てfalseへリセットする(configurationが変われば、同じインターフェース番号でも
+    中身が別物になりうるため)。
+    🛡️ バグ修正(v0.0.4): 旧実装はdev.set_configuration()を呼ぶだけでclaimed_interfaces
+    (状態追跡用のset)を一切リセットしていなかった。config1でinterface 0をclaimした後
+    config2へ切り替えても「interface 0はclaim済み」という古い状態がそのまま残ってしまい、
+    config2上のinterface 0は実際には一度もclaimしていないのに、selectAlternateInterface()
+    等がそれを誤って許可し続けていた。selectConfiguration自体がこれまで一度も
+    テストされていなかったため、あわせてFakeDeviceにも(未実装だった)
+    set_configuration()を追加している。"""
+    intf_cfg1 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    intf_cfg2 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    dev_a = FakeDevice(0x2341, 0x8036, [
+        FakeConfiguration(1, [intf_cfg1]),
+        FakeConfiguration(2, [intf_cfg2]),
+    ])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+    # config1のまま: claim済みなのでselectAlternateInterfaceは通る
+    assert json.loads(bridge.selectAlternateInterface(handle, 0, 0))["success"] is True
+
+    select_result = json.loads(bridge.selectConfiguration(handle, 2))
+    assert select_result["success"] is True, select_result
+    assert dev_a.get_active_configuration().bConfigurationValue == 2
+
+    # config2切り替え後は、config1時代のclaimは引き継がれないはず
+    still_claimed = json.loads(bridge.selectAlternateInterface(handle, 0, 0))
+    assert still_claimed["success"] is False
+    assert still_claimed["error"].startswith("InvalidStateError:"), still_claimed
+
+    # config2側で改めてclaimすれば、もちろん通る
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+    assert json.loads(bridge.selectAlternateInterface(handle, 0, 0))["success"] is True
+    print("test_selectConfiguration_resets_claimed_interfaces: OK")
 
 
 def test_requestDeviceChooser_reentrancy_guard(monkeypatch):

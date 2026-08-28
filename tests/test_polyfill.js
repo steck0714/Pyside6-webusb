@@ -57,6 +57,10 @@ const fakeBridge = {
         cb(JSON.stringify({ device: fakeDevices[0] }));
     },
     openDevice: function(vid, pid, frameToken, cb) { fakeBridgeCalls.push(['openDevice', vid, pid, frameToken]); cb(JSON.stringify(openDeviceResponse)); },
+    // closeDeviceはPython側で@Slot(int, str)(result=無し)として登録されており、
+    // callBridge()を経由しない直接呼び出しのため、他のブリッジ関数と違い
+    // コールバック引数(cb)を取らない。
+    closeDevice: function(h, frameToken) { fakeBridgeCalls.push(['closeDevice', h, frameToken]); },
     selectConfiguration: function(h, cfg, frameToken, cb) { fakeBridgeCalls.push(['selectConfiguration', h, cfg, frameToken]); cb(JSON.stringify({ success: true })); },
     claimInterface: function(h, n, frameToken, cb) { fakeBridgeCalls.push(['claimInterface', h, n, frameToken]); cb(JSON.stringify(claimInterfaceResponse)); },
     releaseInterface: function(h, n, frameToken, cb) { fakeBridgeCalls.push(['releaseInterface', h, n, frameToken]); cb(JSON.stringify({ success: true })); },
@@ -393,6 +397,27 @@ async function main() {
     await new Promise(r => setTimeout(r, 5));
     assert.ok(disconnectViaProperty, 'ondisconnect handler should fire');
     console.log('disconnect event dispatch via ondisconnect property: OK');
+
+    // 🛡️ バグ修正(v0.0.4)の回帰テスト: close()は必ずhandleとframe_tokenの
+    // 両方をブリッジへ渡すべき。closeDeviceはPython側で@Slot(int, str)として
+    // 2引数必須で登録されているため、(修正前のように)handleだけの1引数で
+    // 呼ぶと、QWebChannelはスロット呼び出しごと黙って握りつぶし、
+    // closeDeviceが一切実行されない(=デバイスハンドルが永久にリークする)
+    // ことを実機のQWebChannel往復で確認した実バグの回帰テスト。
+    window.__pyUsbFrameToken = 'close-test-frame-token';
+    const closeDev = await navigator.usb.requestDevice({ filters: [{}] });
+    await closeDev.open();
+    fakeBridgeCalls.length = 0;
+    await closeDev.close();
+    assert.strictEqual(closeDev.opened, false, 'close()後はopened=falseになるべき');
+    const closeCalls = fakeBridgeCalls.filter(c => c[0] === 'closeDevice');
+    assert.strictEqual(closeCalls.length, 1, 'closeDevice()がちょうど1回ブリッジへ渡されるべき');
+    assert.strictEqual(closeCalls[0][1], closeDev._handle, 'closeDeviceへ渡すhandleが正しいはず');
+    assert.strictEqual(closeCalls[0][2], 'close-test-frame-token',
+        'closeDeviceへframe_tokenも渡されるべき(handleのみの1引数呼び出しは' +
+        'QWebChannelにスロット呼び出しごと握りつぶされる実バグがあった)');
+    delete window.__pyUsbFrameToken;
+    console.log('close() forwards (handle, frame_token) to closeDevice -- regression test for v0.0.4 bug: OK');
 
     // 🛡️ frame_origin.FrameOriginTracker がPython側からwindow.__pyUsbFrameToken
     //    へ書き込んだ値が、実際に全てのブリッジ呼び出しの末尾引数として
