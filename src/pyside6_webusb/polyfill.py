@@ -301,7 +301,14 @@ WEBUSB_POLYFILL_JS = r"""
     OpenWebUSBDevice.prototype.close = function() {
         var self = this;
         return _bridgeReady.then(function(bridge) {
-            if (bridge && self._handle != null) bridge.closeDevice(self._handle);
+            // 🛡️ バグ修正(v0.0.4): frame_tokenを渡し忘れていた。closeDevice()は
+            //    Python側で @Slot(int, str) として2引数必須で登録されているため、
+            //    1引数(handleのみ)で呼ぶとQWebChannelがスロット呼び出しを黙って
+            //    dispatchせず(実機のQWebChannel往復で検証済み)、Python側の
+            //    closeDevice()が一度も実行されないままだった。結果としてpyusbの
+            //    デバイスハンドルが実際には一切解放されず(_open_devicesにも
+            //    残り続け)、close()を呼んでも何も起きていなかった。
+            if (bridge && self._handle != null) bridge.closeDevice(self._handle, _frameToken());
             self.opened = false;
         });
     };

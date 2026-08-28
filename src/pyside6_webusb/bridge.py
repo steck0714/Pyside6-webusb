@@ -510,6 +510,59 @@ class WebUSBBridge(QObject):
         finally:
             self._chooser_active = False
 
+    def _resolve_chooser_parent_window(self):
+        """デバイスチューザーダイアログの親ウィンドウを解決する。
+
+        🛡️ バグ修正(v0.0.4, ユーザー報告): 旧実装はQApplication.activeWindow()
+        だけで親を決めていた。これはOS/ウィンドウマネージャが「今アクティブな
+        トップレベルウィンドウ」をQtへどう伝えるかに依存しており、
+        QWebEngineView経由のJS呼び出し(=ネストしたイベントループ経由で非同期に
+        着地するコールバック)ではフォーカス状態が正しく伝播せずNoneになることが
+        ある(実際、コンストラクタは__init__の時点でbrowser_windowを受け取り
+        self.browser_windowへ保存していたにもかかわらず、ここでは一切参照して
+        いなかった)。Noneのまま渡すと、ダイアログは親を持たない独立ウィンドウ
+        として開かれ、ブラウザ本体の裏に隠れる/別ワークスペースに開く/
+        タスクバー上でブラウザと無関係に見える等の理由で、実際には表示されて
+        いても「画面が出ない」ように見えることがある。
+
+        優先順位:
+          1. self.browser_window が実際にQWidgetならそれを使う。ホストアプリが
+             __init__/install()で明示的に渡した「今のブラウザウィンドウ」への
+             確実な参照であり、OSのフォーカス状態に左右されない。
+             (browser_windowは元々「.settingsを持つオブジェクトなら何でもよい」
+             というダックタイピングで文書化されており、必ずしもQWidgetとは
+             限らないため、isinstanceで確認できた場合だけ親として使う。)
+          2. QApplication.activeWindow() -- 多くの環境では正しく動くフォールバック
+             (browser_window省略時のため残してある)。
+          3. 可視なトップレベルウィジェットを1つ拾う(1.も2.も得られない場合の保険)。
+        どれも得られなければNoneを返す(モーダル性そのものはWebUsbDeviceChooserDialog
+        側のsetModal(True)により親の有無と関係なく保たれる)。"""
+        try:
+            from PySide6.QtWidgets import QApplication, QWidget
+        except Exception as e:
+            print(f"[pyside6-webusb] _resolve_chooser_parent_window(import): 例外を無視: {e}")
+            return None
+
+        bw = self.browser_window
+        if isinstance(bw, QWidget):
+            return bw
+
+        try:
+            active = QApplication.activeWindow()
+            if active is not None:
+                return active
+        except Exception as e:
+            print(f"[pyside6-webusb] _resolve_chooser_parent_window(activeWindow): 例外を無視: {e}")
+
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, QWidget) and w.isVisible() and w.isWindow():
+                    return w
+        except Exception as e:
+            print(f"[pyside6-webusb] _resolve_chooser_parent_window(topLevelWidgets): 例外を無視: {e}")
+
+        return None
+
     def _request_device_chooser_impl(self, options_json, frame_token=""):
         """navigator.usb.requestDevice() の実処理本体。実デバイス選択ダイアログを表示し、
         ユーザーが明示的に選んだ場合のみデバイス情報を返す（WebUSB本来のセキュリティ設計を踏襲）。
@@ -555,13 +608,7 @@ class WebUSBBridge(QObject):
                 u_core, u_util = self._pyusb()
                 return self._enumerate_filtered_devices(u_core, u_util, filters, exclusion_filters)
 
-            parent = None
-            try:
-                from PySide6.QtWidgets import QApplication
-                parent = QApplication.activeWindow()
-            except Exception as e:
-                print(f"[pyside6-webusb] requestDeviceChooser(activeWindow): 例外を無視: {e}")
-                parent = None
+            parent = self._resolve_chooser_parent_window()
 
             try:
                 dlg = WebUsbDeviceChooserDialog(
@@ -569,6 +616,14 @@ class WebUSBBridge(QObject):
                     origin=origin,
                     refresh_callback=_refresh,
                 )
+                # 🛡️ parentがNoneの場合はもちろん、parentがあってもプラット
+                #    フォームによっては新規トップレベルウィンドウが前面に来ない
+                #    ことがあるため、明示的にraise_()/activateWindow()して確実に
+                #    前面へ出す(exec()は内部でshow()相当を行うため、ここでの
+                #    明示呼び出しと重複しても無害)。
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
                 result = dlg.exec()
                 accepted = (result == WebUsbDeviceChooserDialog.DialogCode.Accepted)
                 selected = dlg.selected_device if accepted else None
@@ -732,12 +787,24 @@ class WebUSBBridge(QObject):
     def selectConfiguration(self, handle_id, configuration_value, frame_token=""):
         """旧実装はJS側のselectConfiguration()がno-opで、複数コンフィグレーションを
         持つデバイスでは常に(pyusbが自動選択した)最初のコンフィグレーションしか
-        使えなかった。"""
+        使えなかった。
+        🛡️ バグ修正(v0.0.4): 仕様(USBDevice.selectConfiguration())は成功時に
+        [[claimedInterface]]を全てfalseへリセットすると定めている
+        (configurationが変われば、そもそもインターフェース番号の並びごと
+        別物になりうるため)。旧実装はdev.set_configuration()を呼ぶだけで
+        claimed_interfacesを一切リセットしていなかった。この場合、
+        古いconfiguration下でclaimしていたインターフェース番号が新しい
+        configuration下でも「claim済み」として扱われ続け、実際にはclaimして
+        いないインターフェースに対してselectAlternateInterface()やbulk/
+        isochronous転送が誤って許可されてしまう状態追跡バグだった。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
             dev.set_configuration(configuration_value)
+            info = self._open_devices.get(handle_id)
+            if info is not None:
+                info["claimed_interfaces"] = set()
             return json.dumps({"success": True})
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
@@ -806,9 +873,13 @@ class WebUSBBridge(QObject):
         (ほとんどの実機はinterfaceあたりalternateが1つしかないため実害は小さく、
         より許容的になる方向の簡略化なので安全側からは外れない)。
         required_type: 指定した場合、見つかったendpointの実際の転送タイプ
-        ("bulk"/"interrupt"/"isochronous")がこれと一致しないと
-        InvalidAccessErrorにする(spec: isochronousTransferIn/Outが要求する
-        「endpoint.typeがisochronousでなければInvalidAccessError」相当)。
+        ("bulk"/"interrupt"/"isochronous")がこれに含まれないとInvalidAccessError
+        にする。文字列1つ("isochronous"等)、または許可するタイプのタプル/集合
+        (("bulk", "interrupt")等)のどちらでも渡せる。
+        (spec: isochronousTransferIn/Outが要求する「endpoint.typeが
+        isochronousでなければInvalidAccessError」、およびtransferIn/Outが
+        要求する「endpoint.typeがbulkでもinterruptでもなければ
+        InvalidAccessError」の両方に対応する。)
         妥当なら (None, 見つかったInterface番号)、そうでなければ
         (json.dumps済みのエラーレスポンス文字列, None) を返す。"""
         if not (1 <= endpoint_number <= 15):
@@ -864,11 +935,13 @@ class WebUSBBridge(QObject):
                 }.get(ep_type, "unknown")
             except Exception:
                 type_name = "unknown"
-            if type_name != required_type:
+            allowed_types = (required_type,) if isinstance(required_type, str) else tuple(required_type)
+            if type_name not in allowed_types:
+                allowed_word = " or ".join(allowed_types)
                 return json.dumps({
                     "success": False,
                     "error": invalid_access_error(
-                        f"endpoint {endpoint_number} is a {type_name} endpoint, not {required_type}"
+                        f"endpoint {endpoint_number} is a {type_name} endpoint, not {allowed_word}"
                     ),
                 }), None
 
@@ -903,12 +976,21 @@ class WebUSBBridge(QObject):
         ここで変換しなければならない(pyusb公式ドキュメント: 'The endpoint parameter
         corresponds to the bEndpointAddress member' — endpointNumberそのものではない)。
         旧実装はこの変換が丸ごと抜けており、endpoint=1のIN転送がbEndpointAddress=0x01
-        (=同じ番号のOUT側)を叩きにいってしまい、実機相手には常に失敗していた。"""
+        (=同じ番号のOUT側)を叩きにいってしまい、実機相手には常に失敗していた。
+        🛡️ バグ修正(v0.0.4): 仕様のtransferIn()は対象endpointのtypeがbulkでも
+        interruptでもなければInvalidAccessErrorを返すと定めている
+        (isochronousTransferInが別メソッドとして独立して用意されているのはこの
+        ため)。旧実装はrequired_typeを指定しておらず、isochronous専用の
+        endpointに対してもこのメソッド経由でread()できてしまっていた
+        (pyusbのDevice.read()自体はendpoint記述子から転送タイプを自動判別して
+        くれるため実際に転送自体は成功してしまう分、見過ごされやすい)。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
-            validation_error, _owner = self._endpoint_available_or_error(handle_id, dev, True, endpoint)
+            validation_error, _owner = self._endpoint_available_or_error(
+                handle_id, dev, True, endpoint, required_type=("bulk", "interrupt")
+            )
             if validation_error is not None:
                 return validation_error
             endpoint_address = endpoint | 0x80
@@ -928,11 +1010,16 @@ class WebUSBBridge(QObject):
 
     @Slot(int, int, str, str, result=str)
     def bulkTransferOut(self, handle_id, endpoint, data_hex, frame_token=""):
+        """USBDevice.transferOut(endpointNumber, data) 相当。
+        🛡️ バグ修正(v0.0.4): bulkTransferInと同じ理由で、endpointのtypeがbulk/
+        interruptであることを要求する(isochronous endpointへの誤爆を防ぐ)。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
-            validation_error, _owner = self._endpoint_available_or_error(handle_id, dev, False, endpoint)
+            validation_error, _owner = self._endpoint_available_or_error(
+                handle_id, dev, False, endpoint, required_type=("bulk", "interrupt")
+            )
             if validation_error is not None:
                 return validation_error
             try:
@@ -1196,7 +1283,7 @@ class WebUSBBridge(QObject):
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
-            validation_error, _owner = self._endpoint_available_or_error(
+            validation_error, owner_number = self._endpoint_available_or_error(
                 handle_id, dev, True, endpoint, required_type="isochronous"
             )
             if validation_error is not None:
@@ -1210,8 +1297,16 @@ class WebUSBBridge(QObject):
             import array
             buff = array.array("B", bytes(total_length))
             endpoint_address = endpoint | 0x80
+            # 🛡️ バグ修正(v0.0.4): インストール済みpyusbのlibusb1.pyを直接読んで確認した
+            # 実シグネチャは iso_read(self, dev_handle, ep, intf, buff, timeout) であり、
+            # 第3引数はインターフェース番号(高レベルAPIのDevice.read()内部でも
+            # intf.bInterfaceNumberとして渡している値)。旧実装はここにエンドポイント
+            # 番号を渡していた。現行pyusb(1.3.1)の_IsoTransferHandlerはintfを実際には
+            # 参照しないため実害は無いが、意味的に誤った値であり、将来のpyusbが
+            # intfを使い始めた場合の地雷になる。既に_endpoint_available_or_error()が
+            # 正しいインターフェース番号を返しているのでそれを使う。
             try:
-                transferred = backend.iso_read(dev_handle, endpoint_address, endpoint, buff, timeout=5000)
+                transferred = backend.iso_read(dev_handle, endpoint_address, owner_number, buff, timeout=5000)
             except Exception as e:
                 if is_stall_error(e):
                     # 個々のパケット単位でstall/ok を区別する手段がpyusb越しには無いため、
@@ -1243,7 +1338,7 @@ class WebUSBBridge(QObject):
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
-            validation_error, _owner = self._endpoint_available_or_error(
+            validation_error, owner_number = self._endpoint_available_or_error(
                 handle_id, dev, False, endpoint, required_type="isochronous"
             )
             if validation_error is not None:
@@ -1257,8 +1352,10 @@ class WebUSBBridge(QObject):
             import array
             data = bytes.fromhex(data_hex)
             buff = array.array("B", data)
+            # 🛡️ バグ修正(v0.0.4): isochronousTransferInと同じ理由で、第3引数には
+            # エンドポイント番号ではなくインターフェース番号(owner_number)を渡す。
             try:
-                transferred = backend.iso_write(dev_handle, endpoint, endpoint, buff, timeout=5000)
+                transferred = backend.iso_write(dev_handle, endpoint, owner_number, buff, timeout=5000)
             except Exception as e:
                 if is_stall_error(e):
                     packets = [{"status": "stall", "bytesWritten": 0} for _ in packet_lengths]
