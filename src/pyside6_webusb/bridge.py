@@ -23,6 +23,7 @@ or manually::
     # ...then inject qwebchannel.js + polyfill.WEBUSB_POLYFILL_JS as a QWebEngineScript
     # at DocumentCreation time. See polyfill.install() for the full wiring.
 """
+import base64
 import json
 import time
 
@@ -37,16 +38,21 @@ from .errors import (
 )
 from .frame_origin import url_to_origin
 from .hardening import (
+    BULK_TRANSFER_MAX_LENGTH,
+    CONTROL_TRANSFER_MAX_LENGTH,
+    ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH,
     UsbHotplugWatcher,
     build_device_descriptor,
     device_is_fully_blocked,
     device_matches_any_usb_filter,
     interface_class_for,
+    is_babble_error,
     is_blocklisted_device,
     is_protected_interface_class,
     is_stall_error,
     protected_class_name,
     safe_error_str,
+    scaled_transfer_timeout_ms,
 )
 from .chooser_dialog import WebUsbDeviceChooserDialog
 
@@ -983,11 +989,27 @@ class WebUSBBridge(QObject):
         ため)。旧実装はrequired_typeを指定しておらず、isochronous専用の
         endpointに対してもこのメソッド経由でread()できてしまっていた
         (pyusbのDevice.read()自体はendpoint記述子から転送タイプを自動判別して
-        くれるため実際に転送自体は成功してしまう分、見過ごされやすい)。"""
+        くれるため実際に転送自体は成功してしまう分、見過ごされやすい)。
+        🚚 大容量転送対応(v0.0.4a0, WebADB等を想定): (1) lengthに実務上の上限
+        (BULK_TRANSFER_MAX_LENGTH)を設け、行儀の悪い/悪意あるページが巨大な
+        lengthを渡すだけでホスト側に無制限のメモリ確保を強制できないようにする。
+        (2) 固定5秒だったtimeoutを、要求サイズに応じてスケールさせる
+        (scaled_transfer_timeout_ms) — 低速リンクや大容量ペイロードで正当な
+        転送が完了前に打ち切られるのを防ぎつつ、無期限ブロックにはしない。
+        (3) デバイスが要求より多くのデータを返した場合のbabbleステータス
+        (仕様のUSBTransferStatus)を検出する。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
+            if length < 0 or length > BULK_TRANSFER_MAX_LENGTH:
+                return json.dumps({
+                    "success": False,
+                    "error": index_size_error(
+                        f"length {length} is out of range "
+                        f"(must be between 0 and {BULK_TRANSFER_MAX_LENGTH})"
+                    ),
+                })
             validation_error, _owner = self._endpoint_available_or_error(
                 handle_id, dev, True, endpoint, required_type=("bulk", "interrupt")
             )
@@ -995,24 +1017,34 @@ class WebUSBBridge(QObject):
                 return validation_error
             endpoint_address = endpoint | 0x80
             try:
-                data = dev.read(endpoint_address, length, timeout=5000)
+                data = dev.read(endpoint_address, length, timeout=scaled_transfer_timeout_ms(length))
             except Exception as e:
-                # 🛡️ 実仕様: STALLはPromiseのreject対象ではなく、status:'stall'を
-                #    伴う"成功"resolveとして返す(呼び出し側がclearHalt()で解除して
-                #    続行するのが仕様が想定する標準的な流れ)。それ以外の失敗理由は
+                # 🛡️ 実仕様: STALL/babbleはPromiseのreject対象ではなく、
+                #    status:'stall'/'babble'を伴う"成功"resolveとして返す
+                #    (STALLは呼び出し側がclearHalt()で解除して続行するのが
+                #    仕様が想定する標準的な流れ)。それ以外の失敗理由は
                 #    従来どおり外側のexceptでNetworkError相当として扱う。
                 if is_stall_error(e):
                     return json.dumps({"success": True, "status": "stall", "data": ""})
+                if is_babble_error(e):
+                    return json.dumps({"success": True, "status": "babble", "data": ""})
                 raise
-            return json.dumps({"success": True, "status": "ok", "data": bytes(data).hex()})
+            return json.dumps({
+                "success": True, "status": "ok",
+                "data": base64.b64encode(bytes(data)).decode("ascii"),
+            })
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, str, result=str)
-    def bulkTransferOut(self, handle_id, endpoint, data_hex, frame_token=""):
+    def bulkTransferOut(self, handle_id, endpoint, data_b64, frame_token=""):
         """USBDevice.transferOut(endpointNumber, data) 相当。
         🛡️ バグ修正(v0.0.4): bulkTransferInと同じ理由で、endpointのtypeがbulk/
-        interruptであることを要求する(isochronous endpointへの誤爆を防ぐ)。"""
+        interruptであることを要求する(isochronous endpointへの誤爆を防ぐ)。
+        🚚 大容量転送対応(v0.0.4a0): データはbase64で受け取る(旧: hex文字列。
+        base64はhexの2倍膨張に対しおよそ1.33倍で済み、WebADBのような大容量
+        転送でのJSON往復サイズを抑えられる)。timeoutも要求サイズに応じて
+        スケールさせる。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1022,8 +1054,9 @@ class WebUSBBridge(QObject):
             )
             if validation_error is not None:
                 return validation_error
+            data = base64.b64decode(data_b64)
             try:
-                written = dev.write(endpoint, bytes.fromhex(data_hex), timeout=5000)
+                written = dev.write(endpoint, data, timeout=scaled_transfer_timeout_ms(len(data)))
             except Exception as e:
                 if is_stall_error(e):
                     return json.dumps({"success": True, "status": "stall", "bytesWritten": 0})
@@ -1134,25 +1167,50 @@ class WebUSBBridge(QObject):
 
     @Slot(int, int, int, int, int, int, str, result=str)
     def controlTransferIn(self, handle_id, request_type, request, value, index, length, frame_token=""):
+        """USBDevice.controlTransferIn() 相当。
+        🚚 大容量転送対応(v0.0.4a0): 仕様上lengthはWebIDLのunsigned short
+        (0-65535)なので、それを超える値はここで弾く(この実装独自の防御。
+        コントロール転送は仕様上そもそも64KiBが上限なのでBULK_TRANSFER_
+        MAX_LENGTHのような大きな上限は不要、そのまま仕様の型上限を使う)。
+        timeoutは要求サイズに応じてスケールさせ、babbleステータスも検出する。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return json.dumps({"success": False, "error": "Invalid device handle"})
+            if length < 0 or length > CONTROL_TRANSFER_MAX_LENGTH:
+                return json.dumps({
+                    "success": False,
+                    "error": index_size_error(
+                        f"length {length} is out of range "
+                        f"(must be between 0 and {CONTROL_TRANSFER_MAX_LENGTH})"
+                    ),
+                })
             validation_error = self._control_transfer_validation_error(handle_id, dev, request_type, request, index)
             if validation_error is not None:
                 return validation_error
             try:
-                data = dev.ctrl_transfer(request_type, request, value, index, length, timeout=5000)
+                data = dev.ctrl_transfer(
+                    request_type, request, value, index, length,
+                    timeout=scaled_transfer_timeout_ms(length),
+                )
             except Exception as e:
                 if is_stall_error(e):
                     return json.dumps({"success": True, "status": "stall", "data": ""})
+                if is_babble_error(e):
+                    return json.dumps({"success": True, "status": "babble", "data": ""})
                 raise
-            return json.dumps({"success": True, "status": "ok", "data": bytes(data).hex()})
+            return json.dumps({
+                "success": True, "status": "ok",
+                "data": base64.b64encode(bytes(data)).decode("ascii"),
+            })
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, int, int, int, str, str, result=str)
-    def controlTransferOut(self, handle_id, request_type, request, value, index, data_hex, frame_token=""):
+    def controlTransferOut(self, handle_id, request_type, request, value, index, data_b64, frame_token=""):
+        """USBDevice.controlTransferOut() 相当。
+        🚚 大容量転送対応(v0.0.4a0): データはbase64で受け取る(旧: hex文字列)。
+        timeoutも要求サイズに応じてスケールさせる。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1160,8 +1218,12 @@ class WebUSBBridge(QObject):
             validation_error = self._control_transfer_validation_error(handle_id, dev, request_type, request, index)
             if validation_error is not None:
                 return validation_error
+            data = base64.b64decode(data_b64)
             try:
-                written = dev.ctrl_transfer(request_type, request, value, index, bytes.fromhex(data_hex), timeout=5000)
+                written = dev.ctrl_transfer(
+                    request_type, request, value, index, data,
+                    timeout=scaled_transfer_timeout_ms(len(data)),
+                )
             except Exception as e:
                 if is_stall_error(e):
                     return json.dumps({"success": True, "status": "stall", "bytesWritten": 0})
@@ -1272,13 +1334,24 @@ class WebUSBBridge(QObject):
     #    不正)とパケット分割の算術だけはテスト済み。実配線での検証は別途必要。
     @Slot(int, int, str, str, result=str)
     def isochronousTransferIn(self, handle_id, endpoint, packet_lengths_json, frame_token=""):
-        """USBDevice.isochronousTransferIn(endpointNumber, packetLengths) 相当。"""
+        """USBDevice.isochronousTransferIn(endpointNumber, packetLengths) 相当。
+        🚚 大容量転送対応(v0.0.4a0): packetLengths合計に上限を設け(この実装
+        独自の防御)、timeoutを合計サイズに応じてスケールさせ、babbleステータス
+        (デバイスが要求より多くのデータを返した場合)も検出する。"""
         try:
             packet_lengths, error = self._validate_packet_lengths(packet_lengths_json)
             if error is not None:
                 return error
             packet_length = packet_lengths[0]
             total_length = packet_length * len(packet_lengths)
+            if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
+                return json.dumps({
+                    "success": False,
+                    "error": index_size_error(
+                        f"total packetLengths {total_length} exceeds the maximum of "
+                        f"{ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH} bytes"
+                    ),
+                })
 
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1306,12 +1379,18 @@ class WebUSBBridge(QObject):
             # intfを使い始めた場合の地雷になる。既に_endpoint_available_or_error()が
             # 正しいインターフェース番号を返しているのでそれを使う。
             try:
-                transferred = backend.iso_read(dev_handle, endpoint_address, owner_number, buff, timeout=5000)
+                transferred = backend.iso_read(
+                    dev_handle, endpoint_address, owner_number, buff,
+                    timeout=scaled_transfer_timeout_ms(total_length),
+                )
             except Exception as e:
                 if is_stall_error(e):
                     # 個々のパケット単位でstall/ok を区別する手段がpyusb越しには無いため、
                     # 安全側に倒して全パケットstall扱いにする。
                     packets = [{"status": "stall", "data": ""} for _ in packet_lengths]
+                    return json.dumps({"success": True, "packets": packets})
+                if is_babble_error(e):
+                    packets = [{"status": "babble", "data": ""} for _ in packet_lengths]
                     return json.dumps({"success": True, "packets": packets})
                 raise
 
@@ -1321,19 +1400,30 @@ class WebUSBBridge(QObject):
             for _ in packet_lengths:
                 chunk = received[offset:offset + packet_length]
                 offset += packet_length
-                packets.append({"status": "ok", "data": chunk.hex()})
+                packets.append({"status": "ok", "data": base64.b64encode(chunk).decode("ascii")})
             return json.dumps({"success": True, "packets": packets})
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, str, str, result=str)
-    def isochronousTransferOut(self, handle_id, endpoint, data_hex, packet_lengths_json, frame_token=""):
-        """USBDevice.isochronousTransferOut(endpointNumber, data, packetLengths) 相当。"""
+    def isochronousTransferOut(self, handle_id, endpoint, data_b64, packet_lengths_json, frame_token=""):
+        """USBDevice.isochronousTransferOut(endpointNumber, data, packetLengths) 相当。
+        🚚 大容量転送対応(v0.0.4a0): データはbase64で受け取る(旧: hex文字列)。
+        timeoutもpacketLengths合計に応じてスケールさせる。"""
         try:
             packet_lengths, error = self._validate_packet_lengths(packet_lengths_json)
             if error is not None:
                 return error
             packet_length = packet_lengths[0]
+            total_length = packet_length * len(packet_lengths)
+            if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
+                return json.dumps({
+                    "success": False,
+                    "error": index_size_error(
+                        f"total packetLengths {total_length} exceeds the maximum of "
+                        f"{ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH} bytes"
+                    ),
+                })
 
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1350,12 +1440,15 @@ class WebUSBBridge(QObject):
             backend, dev_handle = iso
 
             import array
-            data = bytes.fromhex(data_hex)
+            data = base64.b64decode(data_b64)
             buff = array.array("B", data)
             # 🛡️ バグ修正(v0.0.4): isochronousTransferInと同じ理由で、第3引数には
             # エンドポイント番号ではなくインターフェース番号(owner_number)を渡す。
             try:
-                transferred = backend.iso_write(dev_handle, endpoint, owner_number, buff, timeout=5000)
+                transferred = backend.iso_write(
+                    dev_handle, endpoint, owner_number, buff,
+                    timeout=scaled_transfer_timeout_ms(len(data)),
+                )
             except Exception as e:
                 if is_stall_error(e):
                     packets = [{"status": "stall", "bytesWritten": 0} for _ in packet_lengths]

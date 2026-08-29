@@ -538,6 +538,47 @@ def is_stall_error(exc) -> bool:
 
 
 # ============================================================
+# 7b) 転送失敗のうち「babble」を仕様どおりUSBTransferStatus('babble')として扱う
+# ============================================================
+# 出典: https://wicg.github.io/webusb/ (WICG/webusb、index.bs直接取得済み)の
+# controlTransferIn()/transferIn()/isochronousTransferIn()各アルゴリズムより:
+# 「"babble", if the device responded with more than |length| bytes of data」
+# (isochronousTransferInは「device sent more than packetLengths[i] bytes of
+# data for this packet」)。stallと同様、Promiseのreject対象ではなく
+# status:'babble'を伴う"成功"resolveとして扱うべきステータス。USBTransferStatus
+# enumは{"ok","stall","babble"}の3値のみ("ok"/"stall"は導入済み)。
+#
+# babbleはIN方向(=デバイスからホストへ、要求より多くのデータが返ってきた)
+# 特有の状態であり、OUT方向のtransferOut()/controlTransferOut()/
+# isochronousTransferOut()にはbabbleという概念自体が存在しない(spec上も
+# 定義されていない)ため、is_babble_errorはIN方向の各メソッドでのみ使う。
+#
+# pyusb(libusb1バックエンド)は、デバイスが要求サイズを超えるデータを返した
+# 場合、libusbのLIBUSB_ERROR_OVERFLOW(-8)を検出してusb.core.USBErrorを送出し、
+# errno=75(Linux上のEOVERFLOW)、メッセージ"Overflow"として報告することを、
+# is_stall_error と全く同じ手法(usb.backend.libusb1.LIBUSB_ERROR_OVERFLOWから
+# 実際にUSBErrorを構築してstr(exc)/.errnoを確認)で実機検証済み:
+# str(exc) == '[Errno 75] Overflow'。
+#
+# ⚠️ 既知の限界: pyusbの同期read API(dev.read()等)は、overflow発生時に
+# 例外を送出するのみで、その例外から「オーバーフロー発生までに実際に何
+# バイト受信できていたか」を取得する手段を提供しない。そのため、この実装が
+# babbleを報告する際のdataは(stallの場合と同様)常に空になる — 仕様が
+# 求める「bytesTransferredぶんの部分データ」の再現はできていない。
+def is_babble_error(exc) -> bool:
+    try:
+        if getattr(exc, "errno", None) == 75:
+            return True
+    except Exception:
+        pass
+    try:
+        msg = str(exc).lower()
+        return "overflow" in msg or "babble" in msg
+    except Exception:
+        return False
+
+
+# ============================================================
 # 8) JSへ返すエラーメッセージの無害化
 # ============================================================
 # pyusb/libusb由来の例外メッセージをそのままJSON化してJS側へ渡していたが、
@@ -558,3 +599,65 @@ def safe_error_str(exc, max_len: int = 500) -> str:
     if len(msg) > max_len:
         msg = msg[:max_len] + "…"
     return msg
+
+
+# ============================================================
+# 9) 大容量データ転送(WebADB等)向けの実務上のガード
+# ============================================================
+# WebUSBは「ADB (Android Debug Bridge) をブラウザから直接叩く」用途
+# (WebADB/Tangoなど)で広く使われている。ADBプロトコルはUSB bulk転送を
+# 使い、1回のtransferOut()/transferIn()で数百KB〜数MBのペイロードを
+# やり取りすることが珍しくない。以下は、そうした「正当な大容量転送は
+# 通したいが、行儀の悪い/悪意あるページが天文学的なサイズを要求してホスト
+# 側プロセスに無制限のメモリ確保・無期限ブロックを強制することは防ぎたい」
+# という要求のための、この実装独自の防御的な仕組み(いずれも仕様が要求する
+# 値ではない — 仕様のtransferIn()のlength引数型はunsigned long、
+# controlTransferIn()はunsigned shortだが、それをそのまま信用してホスト側で
+# 即座にそのサイズのバッファを確保するのは安全ではない)。
+
+# controlTransferIn()のlengthは仕様上 WebIDL の unsigned short (0-65535)。
+CONTROL_TRANSFER_MAX_LENGTH = 0xFFFF
+
+# transferIn()(=bulkTransferIn)のlengthは仕様上unsigned long(最大約42億)
+# だが、実在するUSBデバイスがそれほど巨大な単発readを必要とすることは無い。
+# WebADBのような正当な大容量転送用途(1コールあたり数百KB〜数MB程度)を
+# 十分上回りつつ、暴走を防げる実務上の上限として64MiBを設ける。
+BULK_TRANSFER_MAX_LENGTH = 64 * 1024 * 1024
+
+# isochronousTransferIn()のpacketLengths合計についても同じ理由で上限を
+# 設ける(個々のパケットは通常1〜数KB程度だが、パケット数が多い呼び出しを
+# 積み上げられた場合の保険)。
+ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH = 16 * 1024 * 1024
+
+# バルク/コントロール転送のタイムアウト(ミリ秒)を、転送予定バイト数に応じて
+# スケールさせる。
+#
+# 位置づけ: WebUSBのtransferIn()/transferOut()/controlTransferIn()/
+# controlTransferOut()はいずれも「timeout」という概念自体をJSへ公開して
+# いない(=呼び出し側は「時間がかかっても完了を待つ」ことを期待できる)。
+# この実装は内部的にpyusb(=libusb)へタイムアウト付きで転送を依頼する
+# 都合上、何らかの値を選ばなければならない立場にある。
+#
+# 固定5秒では、低速リンクや大容量ペイロード(WebADBのファイルpush等、
+# 数百KB〜数MB規模になりうる)で、正当な転送が完了前に打ち切られてしまう。
+# かといって無期限ブロック(timeout=None)にすると、この実装の各転送メソッドは
+# Qtのメインスレッド上で同期的に実行される@Slotであるため、デバイスが
+# (切断・フリーズ等で)応答しなくなった際にアプリ全体のUIがフリーズして
+# しまう(これも実際に起こりうるバグ)。両者の折衷として、ベースタイムアウトに
+# 「保守的に見積もった最低速度」で計算した所要時間を加算しつつ、上限もかけて
+# 無期限ブロックにはしない、という現実的なスケーリングを行う。
+_TRANSFER_TIMEOUT_MIN_MS = 5000
+_TRANSFER_TIMEOUT_MAX_MS = 120000
+_TRANSFER_ASSUMED_MIN_THROUGHPUT_BYTES_PER_MS = 100  # 100 KB/s 相当の保守的な下限
+
+
+def scaled_transfer_timeout_ms(payload_size_bytes: int) -> int:
+    """payload_size_bytes バイトの転送に許すタイムアウト(ミリ秒)を返す。
+    小さい転送では最低5秒、大きい転送では100KB/s相当の下限スループットを
+    見積もって加算し、最大120秒で頭打ちにする。"""
+    try:
+        size = max(0, int(payload_size_bytes))
+    except Exception:
+        size = 0
+    scaled = _TRANSFER_TIMEOUT_MIN_MS + (size // _TRANSFER_ASSUMED_MIN_THROUGHPUT_BYTES_PER_MS)
+    return min(scaled, _TRANSFER_TIMEOUT_MAX_MS)

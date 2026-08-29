@@ -173,16 +173,29 @@ WEBUSB_POLYFILL_JS = r"""
         return window.__pyUsbFrameToken || '';
     }
 
-    function bytesToHex(view) {
+    // 🚚 大容量転送対応(v0.0.4a0, WebADB等を想定): 旧実装はhex文字列
+    //    (1バイト→2文字、2倍膨張)でブリッジとやり取りしていたが、base64
+    //    (1バイト→約1.33文字)に切り替えて往復するJSON文字列サイズを抑える。
+    //    ⚠️ チャンク分割が必須: String.fromCharCode.apply(null, bytes)へ配列を
+    //    「分割せず丸ごと」渡すと、各バイトが個別の関数引数として展開される
+    //    ため、エンジンの引数上限(V8実測: 数十万バイト規模で
+    //    'RangeError: Maximum call stack size exceeded')を超えて例外になる。
+    //    WebADBのような数百KB〜数MB級のペイロードは容易にこの閾値を超える
+    //    ため、0x8000バイトずつのチャンクに分けて処理する。
+    function bytesToBase64(view) {
         var arr = view instanceof ArrayBuffer ? new Uint8Array(view) :
                    (view.buffer ? new Uint8Array(view.buffer, view.byteOffset || 0, view.byteLength) : new Uint8Array(view));
-        var out = '';
-        for (var i = 0; i < arr.length; i++) out += arr[i].toString(16).padStart(2, '0');
-        return out;
+        var binary = '';
+        var chunkSize = 0x8000;
+        for (var i = 0; i < arr.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
     }
-    function hexToUint8(hex) {
-        var bytes = new Uint8Array((hex || '').length / 2);
-        for (var i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    function base64ToUint8(b64) {
+        var binary = atob(b64 || '');
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         return bytes;
     }
 
@@ -371,13 +384,13 @@ WEBUSB_POLYFILL_JS = r"""
             // 🛡️ 実仕様(USBTransferStatus): STALLはrejectではなくstatus:'stall'を
             //    伴う成功resolveとして返る。Python側がstall検出時はres.statusに
             //    'stall'を入れてくる(それ以外はres.status==='ok')。
-            var bytes = hexToUint8(res.data || '');
+            var bytes = base64ToUint8(res.data || '');
             return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
         });
     };
     OpenWebUSBDevice.prototype.transferOut = function(endpoint, data) {
-        var hex = bytesToHex(data);
-        return callBridge('bulkTransferOut', this._handle, endpoint, hex, _frameToken()).then(function(res) {
+        var b64 = bytesToBase64(data);
+        return callBridge('bulkTransferOut', this._handle, endpoint, b64, _frameToken()).then(function(res) {
             if (!res.success) throwFromResult(res, 'Transfer failed');
             return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
         });
@@ -425,7 +438,7 @@ WEBUSB_POLYFILL_JS = r"""
                 if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
                 var totalLength = 0;
                 var packetBytes = (res.packets || []).map(function(p) {
-                    var b = hexToUint8(p.data || '');
+                    var b = base64ToUint8(p.data || '');
                     totalLength += b.length;
                     return b;
                 });
@@ -451,8 +464,8 @@ WEBUSB_POLYFILL_JS = r"""
             return Promise.reject(new DOMException(
                 'The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError'));
         }
-        var hex = bytesToHex(data);
-        return callBridge('isochronousTransferOut', this._handle, endpointNumber, hex, JSON.stringify(packetLengths), _frameToken())
+        var b64 = bytesToBase64(data);
+        return callBridge('isochronousTransferOut', this._handle, endpointNumber, b64, JSON.stringify(packetLengths), _frameToken())
             .then(function(res) {
                 if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
                 return { packets: res.packets || [] };
@@ -464,15 +477,15 @@ WEBUSB_POLYFILL_JS = r"""
                       0x80; // Device-to-host
         return callBridge('controlTransferIn', this._handle, reqType, setup.request, setup.value, setup.index, length, _frameToken()).then(function(res) {
             if (!res.success) throwFromResult(res, 'Control transfer failed');
-            var bytes = hexToUint8(res.data || '');
+            var bytes = base64ToUint8(res.data || '');
             return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
         });
     };
     OpenWebUSBDevice.prototype.controlTransferOut = function(setup, data) {
         var reqType = (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
                       (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00);
-        var hex = data ? bytesToHex(data) : '';
-        return callBridge('controlTransferOut', this._handle, reqType, setup.request, setup.value, setup.index, hex, _frameToken()).then(function(res) {
+        var b64 = data ? bytesToBase64(data) : '';
+        return callBridge('controlTransferOut', this._handle, reqType, setup.request, setup.value, setup.index, b64, _frameToken()).then(function(res) {
             if (!res.success) throwFromResult(res, 'Control transfer failed');
             return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
         });
