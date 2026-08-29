@@ -375,6 +375,46 @@ def test_is_stall_error():
     print("test_is_stall_error: OK")
 
 
+# ==================== ここから: babble検出(USBTransferStatus, v0.0.4a0) ====================
+
+def test_is_babble_error():
+    """is_stall_errorと対になる、'babble'(デバイスが要求より多くのデータを
+    返した場合の転送ステータス)検出のテスト。errno=75(EOVERFLOW)は
+    usb.backend.libusb1.LIBUSB_ERROR_OVERFLOWから実際にUSBErrorを構築して
+    確認済み(bridge.pyのis_babble_error docstring参照)。"""
+    class FakeUSBErrorWithErrno(Exception):
+        errno = 75
+    class FakeUSBErrorNoErrno(Exception):
+        pass
+    assert h.is_babble_error(FakeUSBErrorWithErrno("some backend text")) is True
+    assert h.is_babble_error(FakeUSBErrorNoErrno("[Errno 75] Overflow")) is True
+    assert h.is_babble_error(FakeUSBErrorNoErrno("Resource busy")) is False
+    assert h.is_babble_error(FakeUSBErrorNoErrno("device sent more data than requested (babble)")) is True
+    # stallとbabbleは別のerrno/文言のはずなので、お互いを誤検知しないことも確認する
+    assert h.is_babble_error(FakeUSBErrorNoErrno("[Errno 32] Pipe error")) is False
+    assert h.is_stall_error(FakeUSBErrorNoErrno("[Errno 75] Overflow")) is False
+    print("test_is_babble_error: OK")
+
+
+# ==================== ここから: 大容量転送向けタイムアウトスケーリング(v0.0.4a0) ====================
+
+def test_scaled_transfer_timeout_ms():
+    """WebADB等の大容量ペイロードでも正当な転送が完了前に打ち切られないよう、
+    転送予定バイト数に応じてタイムアウトをスケールさせる関数のテスト。"""
+    # 小さい転送は最低5秒を下回らない
+    assert h.scaled_transfer_timeout_ms(0) == 5000
+    assert h.scaled_transfer_timeout_ms(50) == 5000
+    # サイズに応じて増える(100KB/s相当の見積もりで計算)
+    assert h.scaled_transfer_timeout_ms(1_000_000) == 15000
+    # どれだけ大きくても上限(120秒)で頭打ちになり、無期限にはならない
+    assert h.scaled_transfer_timeout_ms(1_000_000_000) == 120000
+    # 単調増加であること(サイズが大きいほどタイムアウトも長いか同じ)
+    assert h.scaled_transfer_timeout_ms(500_000) <= h.scaled_transfer_timeout_ms(2_000_000)
+    # 負値やおかしな入力でも例外を出さず、最低値にフォールバックする
+    assert h.scaled_transfer_timeout_ms(-100) == 5000
+    print("test_scaled_transfer_timeout_ms: OK")
+
+
 # ==================== ここから: activeConfigurationValue ====================
 
 def test_active_configuration_value_reported_when_available():
@@ -415,6 +455,8 @@ if __name__ == "__main__":
     test_device_matches_filter_class_code_via_interface()
     test_device_matches_any_usb_filter_empty_list_matches_nothing()
     test_is_stall_error()
+    test_is_babble_error()
+    test_scaled_transfer_timeout_ms()
     test_active_configuration_value_reported_when_available()
     test_active_configuration_value_none_when_unavailable()
     print("ALL WEBUSB HARDENING TESTS PASSED")

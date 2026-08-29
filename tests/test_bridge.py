@@ -137,10 +137,14 @@ class FakeDevice:
         #    bulkTransferIn()側でIN方向ビット(0x80)が正しく付与されているかを
         #    テストから検証できるようにする。
         self.last_read_call = {"endpoint": endpoint, "length": length, "timeout": timeout}
+        if getattr(self, "read_exception", None) is not None:
+            raise self.read_exception
         return bytes([0xAB]) * min(length, 4)
 
     def write(self, endpoint, data, timeout=None):
         self.last_write_call = {"endpoint": endpoint, "data": bytes(data), "timeout": timeout}
+        if getattr(self, "write_exception", None) is not None:
+            raise self.write_exception
         return len(data)
 
     def ctrl_transfer(self, bmRequestType, bRequest, wValue=0, wIndex=0, data_or_wLength=None, timeout=None):
@@ -149,6 +153,8 @@ class FakeDevice:
             "bmRequestType": bmRequestType, "bRequest": bRequest,
             "wValue": wValue, "wIndex": wIndex, "data_or_wLength": data_or_wLength, "timeout": timeout,
         })
+        if getattr(self, "ctrl_transfer_exception", None) is not None:
+            raise self.ctrl_transfer_exception
         if isinstance(data_or_wLength, int):
             return bytes([0xCD]) * min(data_or_wLength, 4)  # IN: ダミーデータ
         return len(data_or_wLength) if data_or_wLength else 0  # OUT: 書き込みバイト数
@@ -489,7 +495,7 @@ def test_bulkTransferIn_adds_the_in_direction_bit():
         f"だが、実際には {dev_a.last_read_call['endpoint']:#x} だった"
     )
 
-    out_result = json.loads(bridge.bulkTransferOut(handle, 2, "01020304"))
+    out_result = json.loads(bridge.bulkTransferOut(handle, 2, "AQIDBA=="))
     assert out_result["success"] is True, out_result
     assert dev_a.last_write_call["endpoint"] == 2, (
         "OUT方向は方向ビットが無いのが正しいので、endpointNumberはそのまま2で渡るはず"
@@ -596,7 +602,7 @@ def test_bulk_transfer_and_clearHalt_require_claimed_interface():
     assert in_before["success"] is False
     assert in_before["error"].startswith("NotFoundError:"), in_before
 
-    out_before = json.loads(bridge.bulkTransferOut(handle, 2, "01"))
+    out_before = json.loads(bridge.bulkTransferOut(handle, 2, "AQ=="))
     assert out_before["success"] is False
     assert out_before["error"].startswith("NotFoundError:"), out_before
 
@@ -610,9 +616,127 @@ def test_bulk_transfer_and_clearHalt_require_claimed_interface():
     # claimInterface()後は全て通る
     assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
     assert json.loads(bridge.bulkTransferIn(handle, 1, 4))["success"] is True
-    assert json.loads(bridge.bulkTransferOut(handle, 2, "01"))["success"] is True
+    assert json.loads(bridge.bulkTransferOut(handle, 2, "AQ=="))["success"] is True
     assert json.loads(bridge.clearHalt(handle, "in", 1))["success"] is True
     print("test_bulk_transfer_and_clearHalt_require_claimed_interface: OK")
+
+
+def test_bulk_and_control_transfer_in_report_babble_status():
+    """🆕 v0.0.4a0: WebUSB仕様のUSBTransferStatusは{"ok","stall","babble"}の3値。
+    babble(デバイスが要求より多くのデータを返した場合)は、stallと同じく
+    Promiseのreject対象ではなくstatus:'babble'を伴う"成功"resolveとして
+    返るべき。pyusbのLIBUSB_ERROR_OVERFLOW(errno=75)相当の例外をFakeDeviceに
+    仕込んで確認する。"""
+    ep_in = FakeEndpoint(0x81, 0x02)  # bulk IN
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    class FakeOverflowError(Exception):
+        errno = 75
+    dev_a.read_exception = FakeOverflowError("[Errno 75] Overflow")
+
+    bulk_result = json.loads(bridge.bulkTransferIn(handle, 1, 4))
+    assert bulk_result["success"] is True, bulk_result
+    assert bulk_result["status"] == "babble", bulk_result
+
+    dev_a.ctrl_transfer_exception = FakeOverflowError("[Errno 75] Overflow")
+    ctrl_result = json.loads(bridge.controlTransferIn(handle, 0xA1, 1, 0, 0, 4))
+    assert ctrl_result["success"] is True, ctrl_result
+    assert ctrl_result["status"] == "babble", ctrl_result
+    print("test_bulk_and_control_transfer_in_report_babble_status: OK")
+
+
+def test_bulk_and_control_transfer_timeout_scales_with_length():
+    """🆕 v0.0.4a0: 固定5秒だったtimeoutが、要求サイズに応じてスケールされ、
+    実際にpyusbへ渡っていることを確認する(WebADB等の大容量ペイロードでも
+    早期タイムアウトで打ち切られないようにするための修正)。"""
+    from pyside6_webusb.hardening import scaled_transfer_timeout_ms
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    big_length = 2_000_000  # 2MB相当のIN転送(WebADBのファイル転送規模を想定)
+    assert json.loads(bridge.bulkTransferIn(handle, 1, big_length))["success"] is True
+    assert dev_a.last_read_call["timeout"] == scaled_transfer_timeout_ms(big_length)
+    assert dev_a.last_read_call["timeout"] > 5000, "旧来の固定5秒より長くなっているはず"
+
+    assert json.loads(bridge.controlTransferIn(handle, 0xA1, 1, 0, 0, 60000))["success"] is True
+    assert dev_a.ctrl_transfer_calls[-1]["timeout"] == scaled_transfer_timeout_ms(60000)
+    print("test_bulk_and_control_transfer_timeout_scales_with_length: OK")
+
+
+def test_bulk_and_control_transfer_reject_absurdly_large_length():
+    """🆕 v0.0.4a0: 行儀の悪い/悪意あるページが天文学的なlengthを渡すだけで
+    ホスト側に無制限のメモリ確保を強制できないよう、実務上の上限を設けた。
+    (仕様上の型はbulk=unsigned long、control=unsigned shortだが、素直に
+    信用してすぐさまその場でバッファを確保するのは安全ではない。)"""
+    from pyside6_webusb.hardening import BULK_TRANSFER_MAX_LENGTH, CONTROL_TRANSFER_MAX_LENGTH
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    too_big_bulk = json.loads(bridge.bulkTransferIn(handle, 1, BULK_TRANSFER_MAX_LENGTH + 1))
+    assert too_big_bulk["success"] is False
+    assert too_big_bulk["error"].startswith("IndexSizeError:"), too_big_bulk
+    assert not hasattr(dev_a, "last_read_call"), "上限超過時はpyusbのread()すら呼ばれないべき"
+
+    too_big_ctrl = json.loads(bridge.controlTransferIn(handle, 0xA1, 1, 0, 0, CONTROL_TRANSFER_MAX_LENGTH + 1))
+    assert too_big_ctrl["success"] is False
+    assert too_big_ctrl["error"].startswith("IndexSizeError:"), too_big_ctrl
+    print("test_bulk_and_control_transfer_reject_absurdly_large_length: OK")
+
+
+def test_isochronous_transfer_rejects_oversized_total_packet_lengths():
+    """🆕 v0.0.4a0: isochronousTransferIn/Outにも、packetLengths合計に対する
+    実務上の上限を追加した。"""
+    from pyside6_webusb.hardening import ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH
+    ep_iso_in = FakeEndpoint(0x83, 0x01)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_iso_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    huge_packet = ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH // 2 + 1
+    result = json.loads(bridge.isochronousTransferIn(handle, 3, json.dumps([huge_packet, huge_packet])))
+    assert result["success"] is False
+    assert result["error"].startswith("IndexSizeError:"), result
+    print("test_isochronous_transfer_rejects_oversized_total_packet_lengths: OK")
+
+
+def test_bulk_transfer_large_payload_round_trip_via_base64():
+    """🆕 v0.0.4a0: hexからbase64への移行後も、WebADB規模(ここでは300KB)の
+    ペイロードがブリッジを一往復しても欠落・破損しないことを、Python側の
+    経路(base64.b64encode/decode)でも確認する(JS側の大容量往復は
+    test_polyfill.jsで別途、チャンク分割の落とし穴込みで検証済み)。"""
+    import base64
+    ep_in = FakeEndpoint(0x81, 0x02)
+    ep_out = FakeEndpoint(0x02, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in, ep_out])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    payload = bytes((i * 7 + 3) % 256 for i in range(300_000))
+    out_result = json.loads(bridge.bulkTransferOut(handle, 2, base64.b64encode(payload).decode("ascii")))
+    assert out_result["success"] is True, out_result
+    assert dev_a.last_write_call["data"] == payload, "300KBのペイロードが1バイトも欠落・破損せず届くはず"
+    print("test_bulk_transfer_large_payload_round_trip_via_base64: OK")
 
 
 def test_bulk_transfer_rejects_out_of_range_endpoint_number():
@@ -659,7 +783,7 @@ def test_bulkTransferIn_and_Out_reject_isochronous_endpoint():
     assert in_result["error"].startswith("InvalidAccessError:"), in_result
     assert not hasattr(dev_a, "last_read_call"), "isochronous endpointへは実機のread()すら呼ばれないべき"
 
-    out_result = json.loads(bridge.bulkTransferOut(handle, 4, "01"))
+    out_result = json.loads(bridge.bulkTransferOut(handle, 4, "AQ=="))
     assert out_result["success"] is False
     assert out_result["error"].startswith("InvalidAccessError:"), out_result
     assert not hasattr(dev_a, "last_write_call")
@@ -759,7 +883,7 @@ def test_isochronousTransfer_success_path_with_fake_backend():
     assert fake_backend.iso_read_calls[-1]["intf"] == 0, \
         "第3引数にはエンドポイント番号(3)ではなくインターフェース番号(0)を渡すべき"
 
-    out_result = json.loads(bridge.isochronousTransferOut(handle, 4, "0102030405060708", json.dumps([4, 4])))
+    out_result = json.loads(bridge.isochronousTransferOut(handle, 4, "AQIDBAUGBwg=", json.dumps([4, 4])))
     assert out_result["success"] is True, out_result
     assert len(out_result["packets"]) == 2
     assert fake_backend.iso_write_calls[-1]["ep"] == 4
@@ -787,7 +911,7 @@ def test_isochronousTransfer_passes_interface_number_not_endpoint_number_as_intf
     json.loads(bridge.isochronousTransferIn(handle, 3, json.dumps([4])))
     assert fake_backend.iso_read_calls[-1]["intf"] == 7, fake_backend.iso_read_calls[-1]
 
-    json.loads(bridge.isochronousTransferOut(handle, 4, "01020304", json.dumps([4])))
+    json.loads(bridge.isochronousTransferOut(handle, 4, "AQIDBA==", json.dumps([4])))
     assert fake_backend.iso_write_calls[-1]["intf"] == 7, fake_backend.iso_write_calls[-1]
     print("test_isochronousTransfer_passes_interface_number_not_endpoint_number_as_intf: OK")
 

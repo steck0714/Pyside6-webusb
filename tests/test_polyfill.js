@@ -37,11 +37,11 @@ let fakeDevices = [{
 
 let openDeviceResponse = { success: true, handle: 1 };
 let claimInterfaceResponse = { success: true };
-let bulkTransferInResponse = { success: true, status: 'ok', data: '00' };
+let bulkTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
 let bulkTransferOutResponse = { success: true, status: 'ok', bytesWritten: 1 };
-let controlTransferInResponse = { success: true, status: 'ok', data: '00' };
+let controlTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
 let controlTransferOutResponse = { success: true, status: 'ok', bytesWritten: 1 };
-let isochronousTransferInResponse = { success: true, packets: [{ status: 'ok', data: '0102' }, { status: 'ok', data: '0304' }] };
+let isochronousTransferInResponse = { success: true, packets: [{ status: 'ok', data: 'AQI=' }, { status: 'ok', data: 'AwQ=' }] };
 let isochronousTransferOutResponse = { success: true, packets: [{ status: 'ok', bytesWritten: 2 }, { status: 'ok', bytesWritten: 2 }] };
 
 function makeSignal() {
@@ -69,11 +69,11 @@ const fakeBridge = {
     forgetGrantedDevice: function(vid, pid, frameToken, cb) { fakeBridgeCalls.push(['forgetGrantedDevice', vid, pid, frameToken]); cb(JSON.stringify({ success: true })); },
     selectAlternateInterface: function(h, n, alt, frameToken, cb) { fakeBridgeCalls.push(['selectAlternateInterface', h, n, alt, frameToken]); cb(JSON.stringify({ success: true })); },
     bulkTransferIn: function(h, ep, len, frameToken, cb) { fakeBridgeCalls.push(['bulkTransferIn', h, ep, len, frameToken]); cb(JSON.stringify(bulkTransferInResponse)); },
-    bulkTransferOut: function(h, ep, dataHex, frameToken, cb) { fakeBridgeCalls.push(['bulkTransferOut', h, ep, dataHex, frameToken]); cb(JSON.stringify(bulkTransferOutResponse)); },
+    bulkTransferOut: function(h, ep, dataB64, frameToken, cb) { fakeBridgeCalls.push(['bulkTransferOut', h, ep, dataB64, frameToken]); cb(JSON.stringify(bulkTransferOutResponse)); },
     controlTransferIn: function(h, rt, req, val, idx, len, frameToken, cb) { fakeBridgeCalls.push(['controlTransferIn', h, rt, req, val, idx, len, frameToken]); cb(JSON.stringify(controlTransferInResponse)); },
-    controlTransferOut: function(h, rt, req, val, idx, dataHex, frameToken, cb) { fakeBridgeCalls.push(['controlTransferOut', h, rt, req, val, idx, dataHex, frameToken]); cb(JSON.stringify(controlTransferOutResponse)); },
+    controlTransferOut: function(h, rt, req, val, idx, dataB64, frameToken, cb) { fakeBridgeCalls.push(['controlTransferOut', h, rt, req, val, idx, dataB64, frameToken]); cb(JSON.stringify(controlTransferOutResponse)); },
     isochronousTransferIn: function(h, ep, packetLengthsJson, frameToken, cb) { fakeBridgeCalls.push(['isochronousTransferIn', h, ep, packetLengthsJson, frameToken]); cb(JSON.stringify(isochronousTransferInResponse)); },
-    isochronousTransferOut: function(h, ep, dataHex, packetLengthsJson, frameToken, cb) { fakeBridgeCalls.push(['isochronousTransferOut', h, ep, dataHex, packetLengthsJson, frameToken]); cb(JSON.stringify(isochronousTransferOutResponse)); },
+    isochronousTransferOut: function(h, ep, dataB64, packetLengthsJson, frameToken, cb) { fakeBridgeCalls.push(['isochronousTransferOut', h, ep, dataB64, packetLengthsJson, frameToken]); cb(JSON.stringify(isochronousTransferOutResponse)); },
 };
 
 global.qt = { webChannelTransport: {} };
@@ -306,7 +306,7 @@ async function main() {
     }
 
     // 正常系: IN方向(endpoint 3, isochronous)
-    isochronousTransferInResponse = { success: true, packets: [{ status: 'ok', data: '0102' }, { status: 'ok', data: '030405' }] };
+    isochronousTransferInResponse = { success: true, packets: [{ status: 'ok', data: 'AQI=' }, { status: 'ok', data: 'AwQF' }] };
     const isoInResult = await isoDev.isochronousTransferIn(3, [2, 3]);
     assert.ok(fakeBridgeCalls.some(c => c[0] === 'isochronousTransferIn' && c[2] === 3 && c[3] === JSON.stringify([2, 3])),
         'ブリッジへ (handle, endpointNumber, packetLengthsのJSON) が正しく渡っているはず');
@@ -319,13 +319,14 @@ async function main() {
     // 正常系: OUT方向(endpoint 4, isochronous)
     isochronousTransferOutResponse = { success: true, packets: [{ status: 'ok', bytesWritten: 2 }, { status: 'ok', bytesWritten: 2 }] };
     const isoOutResult = await isoDev.isochronousTransferOut(4, new Uint8Array([1, 2, 3, 4]), [2, 2]);
-    assert.ok(fakeBridgeCalls.some(c => c[0] === 'isochronousTransferOut' && c[2] === 4 && c[3] === '01020304' && c[4] === JSON.stringify([2, 2])));
+    assert.ok(fakeBridgeCalls.some(c => c[0] === 'isochronousTransferOut' && c[2] === 4 && c[3] === 'AQIDBA==' && c[4] === JSON.stringify([2, 2])),
+        'base64(1,2,3,4)=AQIDBA== がブリッジへ渡っているはず(v0.0.4a0: hexからbase64へ移行)');
     assert.strictEqual(isoOutResult.packets.length, 2);
     assert.strictEqual(isoOutResult.packets[0].bytesWritten, 2);
     console.log('isochronousTransferOut success: packets[] が正しく組み立てられる: OK');
 
     // 🛡️ 転送(bulk/control)の正常系はstatus:'ok'で返る。
-    bulkTransferInResponse = { success: true, status: 'ok', data: '0102ff' };
+    bulkTransferInResponse = { success: true, status: 'ok', data: 'AQL/' };
     const inResult = await dev.transferIn(1, 64);
     assert.strictEqual(inResult.status, 'ok');
     assert.strictEqual(inResult.data.byteLength, 3);
@@ -348,12 +349,12 @@ async function main() {
     bulkTransferOutResponse = { success: true, status: 'stall', bytesWritten: 0 };
     const stallOut = await dev.transferOut(2, new Uint8Array([9]));
     assert.strictEqual(stallOut.status, 'stall');
-    bulkTransferInResponse = { success: true, status: 'ok', data: '00' };
+    bulkTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
     bulkTransferOutResponse = { success: true, status: 'ok', bytesWritten: 1 };
     console.log('transferIn/transferOut STALL surfaces as status:"stall" (not a rejection): OK');
 
     const setup = { requestType: 'vendor', recipient: 'device', request: 1, value: 0, index: 0 };
-    controlTransferInResponse = { success: true, status: 'ok', data: 'aa' };
+    controlTransferInResponse = { success: true, status: 'ok', data: 'qg==' };
     const ctrlIn = await dev.controlTransferIn(setup, 1);
     assert.strictEqual(ctrlIn.status, 'ok');
     assert.strictEqual(ctrlIn.data.getUint8(0), 0xaa);
@@ -437,6 +438,36 @@ async function main() {
     assert.strictEqual(fakeBridgeCalls[0][1], 'test-frame-token-xyz', 'window.__pyUsbFrameTokenの値がそのまま送られるはず');
     console.log('frame token is forwarded to the bridge when window.__pyUsbFrameToken is set: OK');
     delete window.__pyUsbFrameToken;
+
+    // 🚚 大容量転送対応(v0.0.4a0)の回帰テスト: WebADB等が送るような大きな
+    // ペイロード(ここでは500KB。旧hex実装でも壊れなかったであろう閾値より
+    // 十分大きく、base64移行時にString.fromCharCode.apply()を分割せず丸ごと
+    // 配列へ適用する誤実装だとRangeErrorで確実に落ちるサイズ)を実際に
+    // transferOut()->transferIn()相当の往復にかけ、チャンク分割済みの
+    // bytesToBase64()/base64ToUint8()がクラッシュせず、内容も欠落・破損
+    // しないことを確認する。
+    const bigSize = 500 * 1024;
+    const bigPayload = new Uint8Array(bigSize);
+    for (let i = 0; i < bigSize; i++) bigPayload[i] = i % 256;
+
+    let capturedB64 = null;
+    bulkTransferOutResponse = { success: true, status: 'ok', bytesWritten: bigSize };
+    await dev.transferOut(2, bigPayload);
+    const bigOutCall = fakeBridgeCalls.filter(c => c[0] === 'bulkTransferOut').pop();
+    capturedB64 = bigOutCall[3];
+    assert.ok(capturedB64.length > bigSize, 'base64文字列は元のバイト数より長いはず(約1.33倍)');
+
+    // ブリッジが送り返してくる側(IN方向)も同じ大きさのデータで往復させる
+    bulkTransferInResponse = { success: true, status: 'ok', data: capturedB64 };
+    const bigInResult = await dev.transferIn(1, bigSize);
+    const roundTripped = new Uint8Array(bigInResult.data.buffer, bigInResult.data.byteOffset, bigInResult.data.byteLength);
+    assert.strictEqual(roundTripped.length, bigSize, '往復後もサイズが変わらないはず');
+    let matches = true;
+    for (let i = 0; i < bigSize; i++) { if (roundTripped[i] !== bigPayload[i]) { matches = false; break; } }
+    assert.ok(matches, '500KB往復後もバイト列が完全一致するはず(1バイトも欠落・破損しない)');
+    bulkTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
+    bulkTransferOutResponse = { success: true, status: 'ok', bytesWritten: 1 };
+    console.log('500KB payload round-trip via chunked base64 encode/decode (WebADB-scale transfer): OK');
 
     console.log('ALL WEBUSB POLYFILL JS TESTS PASSED');
 }
