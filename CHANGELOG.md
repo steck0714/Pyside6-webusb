@@ -2,6 +2,119 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4a0]
+
+Feature/hardening release on top of `0.0.4`: one previously-unimplemented piece of the
+`USBTransferStatus` enum, a round of hardening specifically aimed at large-payload transfers
+(WebADB — Android Debug Bridge over WebUSB — being the motivating example, though anything
+moving substantial bulk data applies), and TypeScript type declarations. Marked `a0` (alpha)
+rather than a plain patch bump since, unlike `0.0.4`, this adds behavior rather than only
+fixing it — same reasoning as `0.0.1a0`/`0.0.2b0`/`0.0.3a0`/`0.0.3b0` before it.
+
+### Added
+
+- **`USBTransferStatus: 'babble'`.** The spec's `USBTransferStatus` enum has three values —
+  `"ok"`, `"stall"`, `"babble"` — and only the first two were ever produced. Re-read the
+  `controlTransferIn`/`transferIn`/`isochronousTransferIn` algorithms in the spec source
+  specifically looking for the third: babble means the device responded with *more* data than
+  the host requested, and is IN-direction-only (there's no OUT-direction equivalent — confirmed
+  by checking all three occurrences in the spec text, all under `*In` methods). Detected from
+  `pyusb`'s `LIBUSB_ERROR_OVERFLOW`, the same way stall is detected from `LIBUSB_ERROR_PIPE`:
+  confirmed by constructing a real `usb.core.USBError` directly from
+  `usb.backend.libusb1.LIBUSB_ERROR_OVERFLOW` and checking what it actually reports
+  (`errno=75`, `"[Errno 75] Overflow"`) rather than assuming. `is_babble_error()` in
+  `hardening.py` mirrors `is_stall_error()`'s existing shape. Wired into `bulkTransferIn`,
+  `controlTransferIn`, and `isochronousTransferIn`. As with stall, this implementation can't
+  recover partial data from an overflow via `pyusb`'s synchronous read API, so (like stall)
+  `data` comes back empty — noted in the docstring rather than silently overclaimed.
+  Cross-checked the full `USBDevice` WebIDL against what's implemented while in there: every
+  other attribute/method (including `forget()`, which was already wired to
+  `OpenWebUSBDevice.prototype.forget()` in the polyfill) was already present — babble was the
+  one real gap.
+- **TypeScript type declarations** (`types/webusb-polyfill.d.ts`) for the `navigator.usb`
+  surface this polyfill installs — `declare global` ambient types, not a module, since that's
+  how the polyfill actually attaches itself. Transcribed directly from the WebIDL blocks in the
+  spec source (fetched fresh, not written from memory) rather than approximated. Checked with
+  `tsc --strict`: a full-surface usage sample (device selection with filters/exclusionFilters,
+  open/configure/claim/transfer/reset/close/forget, control and isochronous transfers, the
+  `'babble'` status, connection events) compiles clean, and a separate `@ts-expect-error` file
+  (wrong status string, wrong `clearHalt` direction, wrong filter field type) confirms invalid
+  usage is actually rejected, not just nominally typed. Documented in a new README section,
+  including that `@types/w3c-web-usb` is a reasonable alternative if you'd rather have the bare
+  spec types without this project's framing.
+
+### Changed — large-transfer hardening (WebADB and similar)
+
+- **Wire encoding switched from hex to base64** between the JS polyfill and the Python bridge,
+  for every transfer method (`bulkTransferIn`/`Out`, `controlTransferIn`/`Out`,
+  `isochronousTransferIn`/`Out`). This is a pure internal-implementation-detail change — the
+  public `transferIn`/`transferOut`/etc. surface still takes/returns plain
+  `ArrayBuffer`/`DataView` exactly as before and as spec requires. Hex was a 2x size expansion
+  per byte; base64 is ~1.33x, meaningfully smaller for the multi-hundred-KB-to-multi-MB payload
+  sizes a WebADB-style client routinely moves through a single `transferIn`/`transferOut` call.
+  **Found a real crash risk while implementing this, not just a size concern**: the standard
+  `String.fromCharCode.apply(null, byteArray)` trick for building the base64 input string
+  throws `RangeError: Maximum call stack size exceeded` once the array is large enough, because
+  each byte becomes a separate function argument and JS engines cap how many of those a single
+  call can take. Confirmed directly in Node (same V8 family as QtWebEngine's Chromium): fine at
+  100 KB, throws by 300 KB — squarely inside normal WebADB payload territory, so shipping the
+  naive version would have made large transfers *more* fragile than the hex implementation it
+  was replacing. Fixed by chunking the array into `0x8000`-byte pieces before each
+  `fromCharCode.apply()` call. Verified both the crash and the fix directly (temporarily
+  reverted to the unchunked version, confirmed the new 500 KB round-trip test in
+  `test_polyfill.js` fails with exactly that `RangeError`, then restored the fix and confirmed
+  it passes) rather than trusting the fix by inspection alone.
+- **Transfer timeouts now scale with payload size** (`scaled_transfer_timeout_ms()` in
+  `hardening.py`) instead of a flat, hardcoded 5000ms, for `bulkTransferIn`/`Out`,
+  `controlTransferIn`/`Out`, and `isochronousTransferIn`/`Out`. The spec doesn't expose a
+  timeout concept to JS for any of these methods at all — a caller is entitled to expect a
+  slow-but-legitimate transfer to simply take as long as it takes. But this implementation
+  still has to give `pyusb` *some* finite value, and a flat 5s risked cutting off a real
+  large-payload transfer on a slow link. The other extreme — no timeout, blocking indefinitely
+  — isn't safe either: these are synchronous `@Slot` methods running on the Qt main thread, so
+  a device that stops responding mid-transfer would freeze the whole app's UI, not just the one
+  pending JS promise. Compromise: 5s minimum, scaling at a conservative assumed 100 KB/s, capped
+  at 120s so a truly stuck device can't hang the UI forever either.
+- **Requested transfer lengths are now capped** before a buffer is allocated for them: 64 MiB
+  for `transferIn` (spec type is `unsigned long`, effectively ~4 GB, which a buggy/malicious
+  page could otherwise use to force an enormous host-side allocation with one call), the spec's
+  own 65535-byte `unsigned short` ceiling for `controlTransferIn` (enforced explicitly rather
+  than left to whatever happens to occur further down the call chain), and 16 MiB total for
+  `isochronousTransferIn`'s summed `packetLengths`. All three limits are this implementation's
+  own defensive choice, not a spec requirement, and comfortably above realistic single-call
+  WebADB-style payload sizes.
+
+### Tests
+- `test_hardening.py`: `test_is_babble_error`, `test_scaled_transfer_timeout_ms`.
+- `test_bridge.py`: `test_bulk_and_control_transfer_in_report_babble_status`,
+  `test_bulk_and_control_transfer_timeout_scales_with_length`,
+  `test_bulk_and_control_transfer_reject_absurdly_large_length`,
+  `test_isochronous_transfer_rejects_oversized_total_packet_lengths`,
+  `test_bulk_transfer_large_payload_round_trip_via_base64` (300 KB, Python-side path).
+  `FakeDevice.read()`/`write()`/`ctrl_transfer()` gained optional configurable exceptions
+  (`read_exception`/`write_exception`/`ctrl_transfer_exception`, all `None` by default — no
+  effect on any pre-existing test) so babble could actually be exercised end to end instead of
+  only unit-tested in isolation.
+- `test_polyfill.js`: a 500 KB payload round-tripped through `transferOut`→`transferIn` (chunked
+  base64 encode/decode), confirmed byte-for-byte, with the chunking fix's necessity confirmed by
+  temporarily reverting it (see above). Every hex literal in the fake bridge's canned responses
+  and assertions was replaced with the precise base64 encoding of the same intended bytes
+  (computed programmatically, not hand-converted) so the tests keep checking the same actual
+  byte values, not just "some string."
+- `types/webusb-polyfill.d.ts` checked with `tsc --strict` against both a positive usage sample
+  and a negative `@ts-expect-error` sample (see "Added," above) — not part of the pytest/Node
+  suites (no `typescript` dependency added to the package), but documented as a manual/CI-of-
+  your-choice check in the README's Testing section.
+
+### Project metadata
+- Version: `0.0.4a0`. (Written as the full normalized form up front — `packaging.version
+  .Version("0.0.4a")` parses fine and normalizes to `0.0.4a0` automatically, but this project's
+  own convention has always been to write versions pre-normalized, so that's what's in
+  `pyproject.toml`/`__init__.py`.)
+- Same verified environment as `0.0.4`: Python `3.14.4`, `PySide6-Essentials`/`PySide6-Addons`
+  `6.11.2`, `pyusb` `1.3.1`. Full suite (Python + `test_polyfill.js`) re-verified green after
+  every change in this entry, not just at the end.
+
 ## [0.0.4]
 
 A bug-fix and spec-compliance-audit release. Started from a user-reported symptom (the device
