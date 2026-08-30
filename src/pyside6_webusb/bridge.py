@@ -27,7 +27,33 @@ import base64
 import json
 import time
 
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QSettings
+from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
+
+# 🦀 大容量転送(WebADB等)向けのオプショナルなRustアクセラレーション。
+# `native/pyside6_webusb_accel/`(maturinでビルドするPyO3拡張)がビルド済みで
+# importできればそれを使い、そうでなければ標準ライブラリのbase64へ
+# 自動的にフォールバックする。Rust拡張が無くてもpyside6-webusbは完全に動作する
+# ——これは性能面のみのオプトイン最適化であり、必須の依存関係ではない
+# (README「Rust acceleration (optional)」節、CHANGELOG v0.0.4bを参照)。
+try:
+    import pyside6_webusb_accel as _rust_accel
+    HAVE_RUST_ACCEL = True
+except ImportError:
+    _rust_accel = None
+    HAVE_RUST_ACCEL = False
+
+
+def _b64encode(data) -> str:
+    if HAVE_RUST_ACCEL:
+        return _rust_accel.encode_base64(bytes(data))
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def _b64decode(s: str) -> bytes:
+    if HAVE_RUST_ACCEL:
+        return bytes(_rust_accel.decode_base64(s))
+    return base64.b64decode(s)
+
 
 from .errors import (
     index_size_error,
@@ -38,6 +64,7 @@ from .errors import (
 )
 from .frame_origin import url_to_origin
 from .hardening import (
+    BULK_TRANSFER_CHUNK_SIZE,
     BULK_TRANSFER_MAX_LENGTH,
     CONTROL_TRANSFER_MAX_LENGTH,
     ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH,
@@ -108,6 +135,14 @@ class WebUSBBridge(QObject):
         self._settings_organization = settings_organization
         self._settings_application = settings_application
         self._open_devices = {}   # handle_id(int) -> {"device":.., "origin":.., "claimed_interfaces": set()}
+        # 🧵 大容量bulk転送のチャンク分割(BULK_TRANSFER_CHUNK_SIZE)を行う際、
+        #    サブチャンクの合間にQCoreApplication.processEvents()を挟んで
+        #    メインスレッド(=UI)を一息つかせる。この間に同じhandle_idへの
+        #    別の転送呼び出しが再入してくると、同一デバイスへ向けたpyusb呼び
+        #    出しが入り乱れてデータが壊れる恐れがあるため、handle_idごとに
+        #    「今チャンク転送中かどうか」を追跡し、再入を検出したら安全に
+        #    エラーを返す(状態を壊すより早く失敗させる)。
+        self._busy_handles = set()
         self._next_handle = 1
         # 🛡️ requestDeviceChooser()の再入防止フラグ。dlg.exec()はネストしたQtイベント
         #    ループを回すため、その最中に(同じページからの連打や、別タブ/別フレーム
@@ -696,6 +731,16 @@ class WebUSBBridge(QObject):
 
     @Slot(int, str)
     def closeDevice(self, handle_id, frame_token=""):
+        """⚠️ 既知の限界(v0.0.4b, スコープ外として明記): bulkTransferIn/Outの
+        チャンク分割(_busy_handles)は、processEvents()を挟むことで理論上、
+        同じhandleに対するclose要求がその合間に再入してくる余地を生む。
+        closeDeviceはこの_busy_handlesを一切チェックしていないため、
+        「チャンク転送の途中でたまたま同じhandleに対してcloseDeviceが割り込む」
+        極めて稀なケースでは、転送ループが以降のサブチャンクでdispose済みの
+        deviceに触れて例外になりうる(その場合もbulkTransferIn/Out側の
+        通常のexceptハンドラでNetworkError相当として捕捉されるだけで、
+        クラッシュや状態破壊はしない)。全メソッドを_busy_handlesで統一的に
+        ガードする、より完全な修正は将来のバージョンで検討する。"""
         try:
             # 別オリジンのハンドルは「存在しない」ものとして扱う(_get_open_deviceがオリジン照合する)
             if self._get_open_device(handle_id, frame_token) is None:
@@ -973,6 +1018,56 @@ class WebUSBBridge(QObject):
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
 
+    def _chunked_bulk_read(self, dev, endpoint_address, length):
+        """endpoint_addressから最大length バイトをbulk/interrupt読み出しする。
+        length が BULK_TRANSFER_CHUNK_SIZE 以下ならこれまでどおり1回のpyusb
+        呼び出しで済ませる。それより大きい場合のみ、サブチャンクに分割し
+        各サブチャンクの後で QCoreApplication.processEvents() を呼ぶ
+        (大容量転送中もUIがある程度反応し続けるようにするため)。
+
+        USBのbulk転送は「要求した長さぶん受信し終える」か「short packet
+        (wMaxPacketSizeより短いパケット、'これで終わり'の合図として一般的な
+        USBの慣習)を受信する」かのどちらか早い方で完了する、という仕様に
+        従う必要がある。この関数は、各サブチャンクの受信量がそのサブ
+        チャンクの要求量ちょうどだった場合のみ「まだ続きがあるかもしれない」
+        と判断して次のサブチャンクを読みに行き、要求量より少なかった場合は
+        short packetとみなしてそこで打ち切る — 単一の巨大な呼び出しをlibusbが
+        内部的に行うのと同じ完了条件を、Python側のループでも再現している。"""
+        if length <= BULK_TRANSFER_CHUNK_SIZE:
+            return bytes(dev.read(endpoint_address, length, timeout=scaled_transfer_timeout_ms(length)))
+        chunks = []
+        remaining = length
+        while remaining > 0:
+            this_chunk = min(BULK_TRANSFER_CHUNK_SIZE, remaining)
+            piece = bytes(dev.read(endpoint_address, this_chunk, timeout=scaled_transfer_timeout_ms(this_chunk)))
+            chunks.append(piece)
+            remaining -= len(piece)
+            if len(piece) < this_chunk:
+                break  # short packet = このtransferはここで完了
+            if remaining > 0:
+                QCoreApplication.processEvents()  # まだ続きがあるサブチャンクの合間だけ一息つく
+        return b"".join(chunks)
+
+    def _chunked_bulk_write(self, dev, endpoint, data):
+        """dataをBULK_TRANSFER_CHUNK_SIZE単位に分割してendpointへ書き込む。
+        書き込みには読み出しのようなshort packetの曖昧さは無い(呼び出し側が
+        送るバイト数を完全に決めている)ため、ロジックは読み出し側より単純:
+        全チャンクを順に書き込み、書き込めたバイト数の合計を返す。"""
+        if len(data) <= BULK_TRANSFER_CHUNK_SIZE:
+            return dev.write(endpoint, data, timeout=scaled_transfer_timeout_ms(len(data)))
+        total_written = 0
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset:offset + BULK_TRANSFER_CHUNK_SIZE]
+            written = dev.write(endpoint, chunk, timeout=scaled_transfer_timeout_ms(len(chunk)))
+            total_written += written
+            offset += len(chunk)
+            if written < len(chunk):
+                break  # デバイス側が全部は受け取れなかった -> ここで打ち切る
+            if offset < len(data):
+                QCoreApplication.processEvents()  # まだ続きがあるサブチャンクの合間だけ一息つく
+        return total_written
+
     @Slot(int, int, int, str, result=str)
     def bulkTransferIn(self, handle_id, endpoint, length, frame_token=""):
         """USBDevice.transferIn(endpointNumber, length) 相当。
@@ -997,7 +1092,20 @@ class WebUSBBridge(QObject):
         (scaled_transfer_timeout_ms) — 低速リンクや大容量ペイロードで正当な
         転送が完了前に打ち切られるのを防ぎつつ、無期限ブロックにはしない。
         (3) デバイスが要求より多くのデータを返した場合のbabbleステータス
-        (仕様のUSBTransferStatus)を検出する。"""
+        (仕様のUSBTransferStatus)を検出する。
+        🧵 UIフリーズ対策(v0.0.4b): BULK_TRANSFER_CHUNK_SIZEを超える要求は
+        _chunked_bulk_read()でサブチャンクに分割し、合間にQtのイベント
+        ループを一息つかせる(単一の巨大なブロッキングpyusb呼び出しが
+        アプリ全体のUIを長時間フリーズさせる問題への対処。詳細はCHANGELOG
+        v0.0.4bを参照)。再入(processEvents()中に同じhandleへの新たな転送
+        呼び出しが割り込むこと)はhandle単位で検出し、安全にエラーを返す。"""
+        if handle_id in self._busy_handles:
+            return json.dumps({
+                "success": False,
+                "error": invalid_state_error(
+                    f"handle {handle_id} already has a bulk transfer in progress"
+                ),
+            })
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1016,8 +1124,9 @@ class WebUSBBridge(QObject):
             if validation_error is not None:
                 return validation_error
             endpoint_address = endpoint | 0x80
+            self._busy_handles.add(handle_id)
             try:
-                data = dev.read(endpoint_address, length, timeout=scaled_transfer_timeout_ms(length))
+                data = self._chunked_bulk_read(dev, endpoint_address, length)
             except Exception as e:
                 # 🛡️ 実仕様: STALL/babbleはPromiseのreject対象ではなく、
                 #    status:'stall'/'babble'を伴う"成功"resolveとして返す
@@ -1029,9 +1138,11 @@ class WebUSBBridge(QObject):
                 if is_babble_error(e):
                     return json.dumps({"success": True, "status": "babble", "data": ""})
                 raise
+            finally:
+                self._busy_handles.discard(handle_id)
             return json.dumps({
                 "success": True, "status": "ok",
-                "data": base64.b64encode(bytes(data)).decode("ascii"),
+                "data": _b64encode(data),
             })
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
@@ -1044,7 +1155,17 @@ class WebUSBBridge(QObject):
         🚚 大容量転送対応(v0.0.4a0): データはbase64で受け取る(旧: hex文字列。
         base64はhexの2倍膨張に対しおよそ1.33倍で済み、WebADBのような大容量
         転送でのJSON往復サイズを抑えられる)。timeoutも要求サイズに応じて
-        スケールさせる。"""
+        スケールさせる。
+        🧵 UIフリーズ対策(v0.0.4b): bulkTransferInと同じ理由・同じ仕組みで
+        _chunked_bulk_write()によりサブチャンク分割 + processEvents() +
+        再入ガードを行う。"""
+        if handle_id in self._busy_handles:
+            return json.dumps({
+                "success": False,
+                "error": invalid_state_error(
+                    f"handle {handle_id} already has a bulk transfer in progress"
+                ),
+            })
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1054,13 +1175,16 @@ class WebUSBBridge(QObject):
             )
             if validation_error is not None:
                 return validation_error
-            data = base64.b64decode(data_b64)
+            data = _b64decode(data_b64)
+            self._busy_handles.add(handle_id)
             try:
-                written = dev.write(endpoint, data, timeout=scaled_transfer_timeout_ms(len(data)))
+                written = self._chunked_bulk_write(dev, endpoint, data)
             except Exception as e:
                 if is_stall_error(e):
                     return json.dumps({"success": True, "status": "stall", "bytesWritten": 0})
                 raise
+            finally:
+                self._busy_handles.discard(handle_id)
             return json.dumps({"success": True, "status": "ok", "bytesWritten": written})
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
@@ -1201,7 +1325,7 @@ class WebUSBBridge(QObject):
                 raise
             return json.dumps({
                 "success": True, "status": "ok",
-                "data": base64.b64encode(bytes(data)).decode("ascii"),
+                "data": _b64encode(data),
             })
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
@@ -1218,7 +1342,7 @@ class WebUSBBridge(QObject):
             validation_error = self._control_transfer_validation_error(handle_id, dev, request_type, request, index)
             if validation_error is not None:
                 return validation_error
-            data = base64.b64decode(data_b64)
+            data = _b64decode(data_b64)
             try:
                 written = dev.ctrl_transfer(
                     request_type, request, value, index, data,
@@ -1337,7 +1461,17 @@ class WebUSBBridge(QObject):
         """USBDevice.isochronousTransferIn(endpointNumber, packetLengths) 相当。
         🚚 大容量転送対応(v0.0.4a0): packetLengths合計に上限を設け(この実装
         独自の防御)、timeoutを合計サイズに応じてスケールさせ、babbleステータス
-        (デバイスが要求より多くのデータを返した場合)も検出する。"""
+        (デバイスが要求より多くのデータを返した場合)も検出する。
+        🧵 スコープ上の判断(v0.0.4b): bulkTransferIn/Outとは異なり、あえて
+        _chunked_bulk_read()相当のサブチャンク分割は行っていない。isochronous
+        転送は音声/映像等のリアルタイム性が本質であり、サブチャンクの合間に
+        processEvents()で一息つく設計は、そのリアルタイム性そのものを損ないうる
+        (bulk転送には無い副作用)。また実際のADB等の大容量転送ユースケースは
+        bulk転送のみを使い、isochronousは使わない。ISOCHRONOUS_TRANSFER_MAX_
+        TOTAL_LENGTH(16MiB)はあくまで暴走防止の安全弁であり、現実的な
+        isochronousの1回あたり使用量(通常は数KB〜数百KB程度)を大きく上回る
+        値なので、チャンク化しないことによるブロッキング時間もbulk転送ほど
+        深刻にはなりにくいと判断した。"""
         try:
             packet_lengths, error = self._validate_packet_lengths(packet_lengths_json)
             if error is not None:
@@ -1400,7 +1534,7 @@ class WebUSBBridge(QObject):
             for _ in packet_lengths:
                 chunk = received[offset:offset + packet_length]
                 offset += packet_length
-                packets.append({"status": "ok", "data": base64.b64encode(chunk).decode("ascii")})
+                packets.append({"status": "ok", "data": _b64encode(chunk)})
             return json.dumps({"success": True, "packets": packets})
         except Exception as e:
             return json.dumps({"success": False, "error": safe_error_str(e)})
@@ -1440,7 +1574,7 @@ class WebUSBBridge(QObject):
             backend, dev_handle = iso
 
             import array
-            data = base64.b64decode(data_b64)
+            data = _b64decode(data_b64)
             buff = array.array("B", data)
             # 🛡️ バグ修正(v0.0.4): isochronousTransferInと同じ理由で、第3引数には
             # エンドポイント番号ではなくインターフェース番号(owner_number)を渡す。

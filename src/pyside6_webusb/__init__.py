@@ -32,4 +32,4 @@ __all__ = [
     "WEBUSB_POLYFILL_JS",
 ]
 
-__version__ = "0.0.4a0"
+__version__ = "0.0.4b0"
