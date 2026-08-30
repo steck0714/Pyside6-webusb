@@ -1,0 +1,17 @@
+[package]
+name = "pyside6_webusb_accel"
+version = "0.1.0"
+edition = "2021"
+description = "Optional Rust acceleration for pyside6-webusb: fast base64 for large WebUSB transfers, and ADB (Android Debug Bridge) wire-protocol message framing helpers for building realistic WebADB-style test fixtures. Pure convenience/perf layer -- pyside6-webusb works fully without this being built; see the package README."
+license = "MIT"
+
+[lib]
+name = "pyside6_webusb_accel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "=0.27.2", features = ["extension-module"] }
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
