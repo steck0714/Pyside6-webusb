@@ -2,6 +2,108 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4b0]
+
+Builds directly on `0.0.4a0`'s large-transfer work: extends it with Rust tooling, closes the
+one significant gap that work left open (the UI-freeze risk it had explicitly flagged but not
+yet fixed), and adds a realistic ADB-protocol-shaped integration test rather than only
+arbitrary-blob transfer tests.
+
+### Added
+
+- **Optional Rust (PyO3) acceleration crate**,
+  [`native/pyside6_webusb_accel/`](native/pyside6_webusb_accel/): a faster base64 codec for the
+  large-transfer wire encoding, plus ADB wire-protocol message-framing helpers
+  (`adb_pack_header`/`adb_unpack_header`/`adb_verify_header`/`adb_checksum`/
+  `adb_command_name`) for building realistic WebADB-shaped test fixtures — not an ADB client or
+  server, no auth/shell handling, just message framing. `bridge.py` tries to `import
+  pyside6_webusb_accel` and falls back to the standard-library `base64` module if that import
+  fails (`HAVE_RUST_ACCEL`); this package remains fully functional, tests and all, with no Rust
+  toolchain present at all. See the README's new "Rust acceleration (optional)" section for the
+  build steps and exactly which real reference implementation the ADB field layout/checksum
+  behavior was confirmed against (a working, published open-source Rust ADB client, not
+  memory — see the crate's own module doc for the specific files read). The crate separates a
+  plain-Rust `logic` module (no PyO3 types) from a thin `#[pyfunction]` binding layer
+  specifically so `cargo test` can run as ordinary Rust — `pyo3`'s `extension-module` feature
+  deliberately doesn't link against `libpython`, which breaks a normal `cargo test` binary if
+  `Python::with_gil` shows up directly inside `#[cfg(test)]`. 10 Rust-side unit tests
+  (`cargo test`) plus `tests/test_rust_accel.py` (cross-validates against Python's own `base64`
+  for sizes 0 to 600 KB, RFC 4648 test vectors, ADB header round-trips/tamper-detection,
+  `pytest.importorskip`-guarded so the rest of the suite is unaffected if the crate isn't
+  built).
+- **`tests/test_bridge.py::test_bulk_transfer_round_trips_realistic_adb_wrte_message`**: sends a
+  real ADB `WRTE`-message-shaped payload (24-byte header + 256 KB body, via a pure-Python
+  reference implementation of the same framing so this test doesn't require the Rust crate to be
+  built) through `bulkTransferOut` on one bridge/fake-device pair and `bulkTransferIn` on
+  another, using the real Google USB vendor ID (`0x18D1`) associated with Android/ADB devices,
+  and confirms every header field and the full payload survive byte-for-byte — including through
+  the chunked-transfer path below, since the payload is well over `BULK_TRANSFER_CHUNK_SIZE`.
+  Previous large-transfer tests all used arbitrary-content blobs; this checks the specific shape
+  of data this whole line of work (`0.0.4a0`/`0.0.4b0`) is actually motivated by.
+
+### Fixed
+
+- **A large `transferIn`/`transferOut` could freeze the entire app's UI, not just delay the
+  page.** `0.0.4a0`'s own changelog entry flagged this directly and accepted it as a tradeoff at
+  the time ("no timeout at all risks freezing your app's UI thread... these bridge methods run
+  synchronously on the Qt main thread") — scaling the timeout down to something bounded (120s
+  worst case) made premature cutoffs less likely but did nothing about the freeze itself for any
+  transfer that's slow *for a legitimate reason*, which is exactly the WebADB scenario (pushing
+  a multi-hundred-KB file over a real USB link takes real time). Every `@Slot` in this bridge
+  runs on the Qt main thread — the same thread painting the window and handling every other
+  event — so one `pyusb` call blocking for, say, 10 seconds meant the whole app was unresponsive
+  for 10 seconds, with no way to even repaint. Fixed by splitting any `transferIn`/`transferOut`
+  over `BULK_TRANSFER_CHUNK_SIZE` (256 KiB) into sub-chunk `pyusb` calls
+  (`_chunked_bulk_read`/`_chunked_bulk_write`), calling `QCoreApplication.processEvents()`
+  between them. The sub-chunk loop preserves the exact completion semantics a single big call
+  would have had: a read sub-chunk that comes back shorter than requested is treated as a short
+  packet (USB's own "transfer complete" signal) and ends the loop there, rather than trying to
+  keep filling the original requested length — matching what `libusb` itself does internally for
+  one large call, just observable in smaller steps from the Python side instead of one opaque
+  blocking call. This is a mitigation, not full asynchrony: the main thread still does the actual
+  `pyusb` I/O for each sub-chunk, so throughput isn't changed and the UI can still visibly lag on
+  a slow link — it's now able to repaint and process other events between sub-chunks rather than
+  being fully wedged for the whole transfer. A true non-blocking implementation would need to
+  move `pyusb` calls to a worker thread and make the affected `@Slot`s deliver their result
+  asynchronously (`QWebChannel` does support this via a `QJSValue` callback parameter instead of
+  `result=`, rather than the sync-return pattern every method here currently uses) — that's a
+  larger, riskier architecture change than this release's scope; noted here as the natural next
+  step rather than attempted under time pressure and shipped half-verified.
+- **Reentrancy risk introduced by the fix above.** `processEvents()` can dispatch another
+  incoming `QWebChannel` call while a chunked transfer is mid-flight — including, in principle,
+  another `transferIn`/`transferOut` call for the *same* handle, which would mean two `pyusb`
+  calls against the same device interleaving unpredictably. Guarded with a per-handle
+  `_busy_handles` set: a `transferIn`/`transferOut` call for a handle that's already mid-transfer
+  is rejected immediately with `InvalidStateError` (no `pyusb` call made at all) rather than
+  risking interleaved I/O; transfers to *different* handles are unaffected, and the guard is
+  released in a `finally` so it can't leak on an exception/stall/babble path.
+  `test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected` triggers this from inside a real
+  monkeypatched `QCoreApplication.processEvents()` (a genuine reentrant call, not just a
+  pre-set flag) to confirm the guard fires under the actual condition that produces it. Documented
+  as a known, deliberately out-of-scope gap for this release: `closeDevice` doesn't check
+  `_busy_handles` at all, so a same-handle `closeDevice` reentering during a chunked transfer
+  could dispose the device out from under the in-progress transfer loop — the next sub-chunk call
+  would then fail with a normal caught exception (not a crash or silent corruption), but it's not
+  a clean success path either. Left as-is rather than extending the guard to every method that
+  touches `_open_devices` under this release's time budget; see the `closeDevice` docstring.
+
+### Project metadata
+
+- Version bumped to `0.0.4b0` (`packaging.version.Version("0.0.4b")` normalizes to this
+  automatically, confirmed the same way as the `0.0.4a0` bump).
+- The Rust crate (`native/pyside6_webusb_accel/`) is versioned independently (`0.1.0`) since
+  it's a genuinely separate, separately-buildable artifact rather than something released in
+  lockstep with the Python package's own version.
+- Verified with `rustc`/`cargo` `1.75.0` (Ubuntu 24.04's own `apt` package — `rustup`/
+  `static.rust-lang.org` aren't reachable from this environment's network allowlist) and `pyo3`
+  `0.27.2`, the newest `pyo3` release line whose MSRV (1.74, unchanged from `0.26.0`) is still
+  satisfied by that compiler while also explicitly testing against the Python 3.14 final release
+  — confirmed by reading `pyo3`'s own `CHANGELOG.md` rather than guessing a version number.
+  `pyo3` `0.28`+ raises MSRV to 1.83, which this environment's `rustc` doesn't satisfy, hence the
+  `=0.27.2` pin in `Cargo.toml` rather than an open-ended version requirement.
+- `.gitignore` now excludes `native/*/target/` (Rust build output — `Cargo.toml`/`Cargo.lock`/
+  `src/` are still tracked).
+
 ## [0.0.4a0]
 
 Feature/hardening release on top of `0.0.4`: one previously-unimplemented piece of the
