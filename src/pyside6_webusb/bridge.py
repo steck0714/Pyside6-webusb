@@ -55,6 +55,37 @@ def _b64decode(s: str) -> bytes:
     return base64.b64decode(s)
 
 
+def _json_dumps(obj) -> str:
+    """json.dumps()のラッパー。区切り文字からデフォルトの空白
+    (', ' / ': ')を落としたコンパクト形式で出力する。JSON.parse()する側
+    (polyfill.py)には空白の有無は一切関係しない(JSONの構文上、空白は常に
+    無視される)ため純粋な転送量削減であり、Rustアクセラレーション版
+    (format_transfer_in_success_json、空白を入れずに直接組み立てている)と
+    出力形式を揃える意味もある——HAVE_RUST_ACCELの有無でワイヤ上の
+    バイト列が変わってしまわないようにする。"""
+    return json.dumps(obj, separators=(",", ":"))
+
+
+def _format_transfer_success_json(status: str, data) -> str:
+    """{"success":true,"status":<status>,"data":<base64(data)>} 形式の
+    レスポンスJSONを組み立てる。🚚 データ転送最適化(v0.0.4b1): Rustが使える
+    場合は bytes連結→base64エンコード→json.dumps という3段階すべてを
+    Rust側の1回のバッファ構築にまとめたformat_transfer_in_success_json()を
+    使い、大容量ペイロードで発生する中間Pythonオブジェクト(base64文字列・
+    JSON文字列)のコピーを1回分減らす。
+
+    ⚠️ status引数は必ず"ok"/"stall"/"babble"のような、こちら側で完全に
+    把握している固定文字列リテラルのみを渡すこと。Rustパス
+    (format_transfer_in_success_json)はJSON文字列エスケープを一切行わない
+    ため、任意のテキスト(例外メッセージ等)をここに渡すと壊れたJSON、
+    または(理論上は)JSONインジェクションを生みうる。エラーメッセージ等の
+    自由テキストを含むレスポンスには、これまでどおり_json_dumps()を直接
+    使うこと。"""
+    if HAVE_RUST_ACCEL:
+        return _rust_accel.format_transfer_in_success_json(status, bytes(data))
+    return _json_dumps({"success": True, "status": status, "data": _b64encode(data)})
+
+
 from .errors import (
     index_size_error,
     invalid_access_error,
@@ -208,14 +239,14 @@ class WebUSBBridge(QObject):
                     if dev is None:
                         continue
                     info = build_device_descriptor(dev, usb_util, include_configurations=False)
-                    self.deviceConnected.emit(json.dumps(info))
+                    self.deviceConnected.emit(_json_dumps(info))
                 except Exception as e:
                     print(f"[pyside6-webusb] _poll_hotplug(connect): 例外を無視: {e}")
             for vid, pid in disconnected:
                 if not self._is_granted(origin, vid, pid):
                     continue
                 try:
-                    self.deviceDisconnected.emit(json.dumps({"vendorId": vid, "productId": pid}))
+                    self.deviceDisconnected.emit(_json_dumps({"vendorId": vid, "productId": pid}))
                 except Exception as e:
                     print(f"[pyside6-webusb] _poll_hotplug(disconnect): 例外を無視: {e}")
         except Exception as e:
@@ -353,7 +384,7 @@ class WebUSBBridge(QObject):
         if s is None:
             return
         try:
-            s.setValue("webusb_granted_origins", json.dumps(data))
+            s.setValue("webusb_granted_origins", _json_dumps(data))
         except Exception as e:
             print(f"[pyside6-webusb] _save_granted_origins: 例外を無視: {e}")
 
@@ -390,7 +421,7 @@ class WebUSBBridge(QObject):
         if s is None:
             return
         try:
-            s.setValue("webusb_known_devices", json.dumps(devices_list))
+            s.setValue("webusb_known_devices", _json_dumps(devices_list))
         except Exception as e:
             print(f"[pyside6-webusb] _save_known_devices: 例外を無視: {e}")
 
@@ -425,9 +456,9 @@ class WebUSBBridge(QObject):
         try:
             usb_core, _usb_util = self._pyusb()
             usb_core.find()  # バックエンド疎通確認（デバイスの有無は問わない）
-            return json.dumps({"available": True})
+            return _json_dumps({"available": True})
         except Exception as e:
-            return json.dumps({"available": False, "error": safe_error_str(e)})
+            return _json_dumps({"available": False, "error": safe_error_str(e)})
 
     @Slot(str, result=str)
     def listDevices(self, frame_token=""):
@@ -441,7 +472,7 @@ class WebUSBBridge(QObject):
         try:
             origin = self._current_origin(frame_token)
             if not origin:
-                return json.dumps({"devices": []})
+                return _json_dumps({"devices": []})
             usb_core, usb_util = self._pyusb()
             devices = []
             for dev in usb_core.find(find_all=True):
@@ -476,9 +507,9 @@ class WebUSBBridge(QObject):
                     "productName": product,
                     "deviceClass": dev.bDeviceClass,
                 })
-            return json.dumps({"devices": devices})
+            return _json_dumps({"devices": devices})
         except Exception as e:
-            return json.dumps({"devices": [], "error": safe_error_str(e)})
+            return _json_dumps({"devices": [], "error": safe_error_str(e)})
 
     def _enumerate_filtered_devices(self, usb_core, usb_util, filters, exclusion_filters):
         """列挙 + ブロックリスト除外 + filters/exclusionFiltersでの絞り込みを行い、
@@ -541,7 +572,7 @@ class WebUSBBridge(QObject):
         どの return/例外経路を通っても再入状態が残留しないようにしている。
         frame_token: フレーム単位オリジン特定用。"""
         if self._chooser_active:
-            return json.dumps({
+            return _json_dumps({
                 "cancelled": True,
                 "error": invalid_state_error("a device chooser is already open for this page"),
             })
@@ -635,12 +666,12 @@ class WebUSBBridge(QObject):
             try:
                 usb_core, usb_util = self._pyusb()
             except Exception as e:
-                return json.dumps({"cancelled": True, "error": safe_error_str(e)})
+                return _json_dumps({"cancelled": True, "error": safe_error_str(e)})
 
             try:
                 devices_info = self._enumerate_filtered_devices(usb_core, usb_util, filters, exclusion_filters)
             except Exception as e:
-                return json.dumps({"cancelled": True, "error": safe_error_str(e)})
+                return _json_dumps({"cancelled": True, "error": safe_error_str(e)})
 
             def _refresh():
                 # 🛡️ ダイアログが開いている間、新しく挿された/抜かれたデバイスを
@@ -669,7 +700,7 @@ class WebUSBBridge(QObject):
                 accepted = (result == WebUsbDeviceChooserDialog.DialogCode.Accepted)
                 selected = dlg.selected_device if accepted else None
             except Exception as e:
-                return json.dumps({"cancelled": True, "error": f"Dialog error: {e}"})
+                return _json_dumps({"cancelled": True, "error": f"Dialog error: {e}"})
 
             if selected is not None:
                 try:
@@ -698,11 +729,11 @@ class WebUSBBridge(QObject):
                         rich_selected = build_device_descriptor(real_dev, usb_util, include_configurations=True)
                 except Exception as e:
                     print(f"[pyside6-webusb] requestDeviceChooser(rich rebuild): 例外を無視: {e}")
-                return json.dumps({"cancelled": False, "device": rich_selected})
-            return json.dumps({"cancelled": True})
+                return _json_dumps({"cancelled": False, "device": rich_selected})
+            return _json_dumps({"cancelled": True})
         except Exception as e:
             # 最外殻の保険: ここまでの個別try/exceptで拾いきれない想定外の例外も必ず捕捉する
-            return json.dumps({"cancelled": True, "error": f"Unexpected error: {e}"})
+            return _json_dumps({"cancelled": True, "error": f"Unexpected error: {e}"})
 
     @Slot(int, int, str, result=str)
     def openDevice(self, vendor_id, product_id, frame_token=""):
@@ -715,19 +746,19 @@ class WebUSBBridge(QObject):
         try:
             origin = self._current_origin(frame_token)
             if not self._is_granted(origin, vendor_id, product_id):
-                return json.dumps({"success": False, "error": "Permission denied: this origin has not been granted access to this device"})
+                return _json_dumps({"success": False, "error": "Permission denied: this origin has not been granted access to this device"})
             if is_blocklisted_device(vendor_id, product_id):
-                return json.dumps({"success": False, "error": security_error("this device is on the protected security-key blocklist and cannot be accessed via WebUSB")})
+                return _json_dumps({"success": False, "error": security_error("this device is on the protected security-key blocklist and cannot be accessed via WebUSB")})
             usb_core, _usb_util = self._pyusb()
             dev = usb_core.find(idVendor=vendor_id, idProduct=product_id)
             if dev is None:
-                return json.dumps({"success": False, "error": "Device not found"})
+                return _json_dumps({"success": False, "error": "Device not found"})
             handle_id = self._next_handle
             self._next_handle += 1
             self._open_devices[handle_id] = {"device": dev, "origin": origin, "claimed_interfaces": set()}
-            return json.dumps({"success": True, "handle": handle_id})
+            return _json_dumps({"success": True, "handle": handle_id})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, str)
     def closeDevice(self, handle_id, frame_token=""):
@@ -773,11 +804,11 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             try:
                 dev.get_active_configuration()
             except Exception:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": invalid_state_error("the device must have a configuration selected"),
                 })
@@ -786,7 +817,7 @@ class WebUSBBridge(QObject):
             iface_class = interface_class_for(dev, interface_number)
             if is_protected_interface_class(iface_class):
                 name = protected_class_name(iface_class)
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": security_error(
                         f"interface {interface_number} is class '{name}', "
@@ -803,9 +834,9 @@ class WebUSBBridge(QObject):
             usb_util.claim_interface(dev, interface_number)
             if info is not None:
                 info.setdefault("claimed_interfaces", set()).add(interface_number)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, result=str)
     def releaseInterface(self, handle_id, interface_number, frame_token=""):
@@ -817,11 +848,11 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             try:
                 dev.get_active_configuration()
             except Exception:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": invalid_state_error("the device must have a configuration selected"),
                 })
@@ -830,9 +861,9 @@ class WebUSBBridge(QObject):
             usb_util.release_interface(dev, interface_number)
             if info is not None:
                 info.get("claimed_interfaces", set()).discard(interface_number)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, result=str)
     def selectConfiguration(self, handle_id, configuration_value, frame_token=""):
@@ -851,14 +882,14 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             dev.set_configuration(configuration_value)
             info = self._open_devices.get(handle_id)
             if info is not None:
                 info["claimed_interfaces"] = set()
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, int, str, result=str)
     def selectAlternateInterface(self, handle_id, interface_number, alternate_setting, frame_token=""):
@@ -879,18 +910,18 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             info = self._open_devices.get(handle_id) or {}
             claimed = info.get("claimed_interfaces", set())
             if interface_number not in claimed:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": invalid_state_error("the specified interface has not been claimed"),
                 })
             dev.set_interface_altsetting(interface=interface_number, alternate_setting=alternate_setting)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, str, result=str)
     def resetDevice(self, handle_id, frame_token=""):
@@ -898,11 +929,11 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             dev.reset()
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     def _endpoint_available_or_error(self, handle_id, dev, in_transfer, endpoint_number, required_type=None):
         """実Chromeの USBDevice::EnsureEndpointAvailable()
@@ -934,7 +965,7 @@ class WebUSBBridge(QObject):
         妥当なら (None, 見つかったInterface番号)、そうでなければ
         (json.dumps済みのエラーレスポンス文字列, None) を返す。"""
         if not (1 <= endpoint_number <= 15):
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": index_size_error(f"endpoint number {endpoint_number} is out of range (must be 1-15)"),
             }), None
@@ -943,7 +974,7 @@ class WebUSBBridge(QObject):
         try:
             active_cfg = dev.get_active_configuration()
         except Exception:
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": invalid_state_error("the device must have a configuration selected"),
             }), None
@@ -967,7 +998,7 @@ class WebUSBBridge(QObject):
 
         if owner_number is None or owner_number not in claimed:
             direction_word = "IN" if in_transfer else "OUT"
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": not_found_error(
                     f"{direction_word} endpoint {endpoint_number} is not part "
@@ -989,7 +1020,7 @@ class WebUSBBridge(QObject):
             allowed_types = (required_type,) if isinstance(required_type, str) else tuple(required_type)
             if type_name not in allowed_types:
                 allowed_word = " or ".join(allowed_types)
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": invalid_access_error(
                         f"endpoint {endpoint_number} is a {type_name} endpoint, not {allowed_word}"
@@ -1005,7 +1036,7 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             validation_error, _owner = self._endpoint_available_or_error(
                 handle_id, dev, direction == "in", endpoint_number
             )
@@ -1014,9 +1045,9 @@ class WebUSBBridge(QObject):
             _usb_core, usb_util = self._pyusb()
             address = endpoint_number | (0x80 if direction == "in" else 0x00)
             dev.clear_halt(address)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     def _chunked_bulk_read(self, dev, endpoint_address, length):
         """endpoint_addressから最大length バイトをbulk/interrupt読み出しする。
@@ -1100,7 +1131,7 @@ class WebUSBBridge(QObject):
         v0.0.4bを参照)。再入(processEvents()中に同じhandleへの新たな転送
         呼び出しが割り込むこと)はhandle単位で検出し、安全にエラーを返す。"""
         if handle_id in self._busy_handles:
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": invalid_state_error(
                     f"handle {handle_id} already has a bulk transfer in progress"
@@ -1109,9 +1140,9 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             if length < 0 or length > BULK_TRANSFER_MAX_LENGTH:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": index_size_error(
                         f"length {length} is out of range "
@@ -1134,18 +1165,15 @@ class WebUSBBridge(QObject):
                 #    仕様が想定する標準的な流れ)。それ以外の失敗理由は
                 #    従来どおり外側のexceptでNetworkError相当として扱う。
                 if is_stall_error(e):
-                    return json.dumps({"success": True, "status": "stall", "data": ""})
+                    return _format_transfer_success_json("stall", b"")
                 if is_babble_error(e):
-                    return json.dumps({"success": True, "status": "babble", "data": ""})
+                    return _format_transfer_success_json("babble", b"")
                 raise
             finally:
                 self._busy_handles.discard(handle_id)
-            return json.dumps({
-                "success": True, "status": "ok",
-                "data": _b64encode(data),
-            })
+            return _format_transfer_success_json("ok", data)
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, str, result=str)
     def bulkTransferOut(self, handle_id, endpoint, data_b64, frame_token=""):
@@ -1160,7 +1188,7 @@ class WebUSBBridge(QObject):
         _chunked_bulk_write()によりサブチャンク分割 + processEvents() +
         再入ガードを行う。"""
         if handle_id in self._busy_handles:
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": invalid_state_error(
                     f"handle {handle_id} already has a bulk transfer in progress"
@@ -1169,7 +1197,7 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             validation_error, _owner = self._endpoint_available_or_error(
                 handle_id, dev, False, endpoint, required_type=("bulk", "interrupt")
             )
@@ -1181,13 +1209,13 @@ class WebUSBBridge(QObject):
                 written = self._chunked_bulk_write(dev, endpoint, data)
             except Exception as e:
                 if is_stall_error(e):
-                    return json.dumps({"success": True, "status": "stall", "bytesWritten": 0})
+                    return _json_dumps({"success": True, "status": "stall", "bytesWritten": 0})
                 raise
             finally:
                 self._busy_handles.discard(handle_id)
-            return json.dumps({"success": True, "status": "ok", "bytesWritten": written})
+            return _json_dumps({"success": True, "status": "ok", "bytesWritten": written})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     def _control_transfer_validation_error(self, handle_id, dev, request_type, request, index):
         """WebUSB仕様「check the validity of the control transfer parameters」
@@ -1220,7 +1248,7 @@ class WebUSBBridge(QObject):
         }
 
         def _err(name, msg):
-            return json.dumps({"success": False, "error": _ERROR_BUILDERS[name](msg)})
+            return _json_dumps({"success": False, "error": _ERROR_BUILDERS[name](msg)})
 
         if req_kind == 0:  # standard
             if not direction_in:
@@ -1300,9 +1328,9 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             if length < 0 or length > CONTROL_TRANSFER_MAX_LENGTH:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": index_size_error(
                         f"length {length} is out of range "
@@ -1319,16 +1347,13 @@ class WebUSBBridge(QObject):
                 )
             except Exception as e:
                 if is_stall_error(e):
-                    return json.dumps({"success": True, "status": "stall", "data": ""})
+                    return _format_transfer_success_json("stall", b"")
                 if is_babble_error(e):
-                    return json.dumps({"success": True, "status": "babble", "data": ""})
+                    return _format_transfer_success_json("babble", b"")
                 raise
-            return json.dumps({
-                "success": True, "status": "ok",
-                "data": _b64encode(data),
-            })
+            return _format_transfer_success_json("ok", data)
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, int, int, int, str, str, result=str)
     def controlTransferOut(self, handle_id, request_type, request, value, index, data_b64, frame_token=""):
@@ -1338,7 +1363,7 @@ class WebUSBBridge(QObject):
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             validation_error = self._control_transfer_validation_error(handle_id, dev, request_type, request, index)
             if validation_error is not None:
                 return validation_error
@@ -1350,11 +1375,11 @@ class WebUSBBridge(QObject):
                 )
             except Exception as e:
                 if is_stall_error(e):
-                    return json.dumps({"success": True, "status": "stall", "bytesWritten": 0})
+                    return _json_dumps({"success": True, "status": "stall", "bytesWritten": 0})
                 raise
-            return json.dumps({"success": True, "status": "ok", "bytesWritten": written})
+            return _json_dumps({"success": True, "status": "ok", "bytesWritten": written})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(result=str)
     def listKnownDevices(self):
@@ -1362,9 +1387,9 @@ class WebUSBBridge(QObject):
         try:
             devices = self._load_known_devices()
             devices.sort(key=lambda d: (-(d.get("connectCount", 0)), -(d.get("lastConnected", 0))))
-            return json.dumps({"devices": devices})
+            return _json_dumps({"devices": devices})
         except Exception as e:
-            return json.dumps({"devices": [], "error": safe_error_str(e)})
+            return _json_dumps({"devices": [], "error": safe_error_str(e)})
 
     @Slot(int, int, result=str)
     def forgetKnownDevice(self, vendor_id, product_id):
@@ -1374,18 +1399,18 @@ class WebUSBBridge(QObject):
             new_devices = [d for d in devices
                            if not (d.get("vendorId") == vendor_id and d.get("productId") == product_id)]
             self._save_known_devices(new_devices)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(result=str)
     def forgetAllKnownDevices(self):
         """既知デバイス一覧を全削除する"""
         try:
             self._save_known_devices([])
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     def _iso_backend_or_error(self, dev):
         """isochronous転送に使う低レベルbackend/デバイスハンドルを取得する。
@@ -1411,7 +1436,7 @@ class WebUSBBridge(QObject):
             if not (hasattr(backend, "iso_read") and hasattr(backend, "iso_write")):
                 raise AttributeError("backend has no iso_read/iso_write")
         except Exception:
-            return json.dumps({
+            return _json_dumps({
                 "success": False,
                 "error": (
                     "NotSupportedError: isochronous transfers require pyusb's libusb1 "
@@ -1435,13 +1460,13 @@ class WebUSBBridge(QObject):
         try:
             packet_lengths = json.loads(packet_lengths_json) if packet_lengths_json else []
         except Exception:
-            return None, json.dumps({"success": False, "error": "TypeError: packetLengths must be a JSON array"})
+            return None, _json_dumps({"success": False, "error": "TypeError: packetLengths must be a JSON array"})
         if not isinstance(packet_lengths, list) or not packet_lengths:
-            return None, json.dumps({"success": False, "error": "TypeError: packetLengths must be a non-empty array"})
+            return None, _json_dumps({"success": False, "error": "TypeError: packetLengths must be a non-empty array"})
         if any((not isinstance(n, int)) or isinstance(n, bool) or n < 0 for n in packet_lengths):
-            return None, json.dumps({"success": False, "error": "TypeError: packetLengths must contain non-negative integers"})
+            return None, _json_dumps({"success": False, "error": "TypeError: packetLengths must contain non-negative integers"})
         if len(set(packet_lengths)) > 1:
-            return None, json.dumps({
+            return None, _json_dumps({
                 "success": False,
                 "error": (
                     "NotSupportedError: this bridge only supports isochronous transfers "
@@ -1479,7 +1504,7 @@ class WebUSBBridge(QObject):
             packet_length = packet_lengths[0]
             total_length = packet_length * len(packet_lengths)
             if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": index_size_error(
                         f"total packetLengths {total_length} exceeds the maximum of "
@@ -1489,7 +1514,7 @@ class WebUSBBridge(QObject):
 
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             validation_error, owner_number = self._endpoint_available_or_error(
                 handle_id, dev, True, endpoint, required_type="isochronous"
             )
@@ -1522,10 +1547,10 @@ class WebUSBBridge(QObject):
                     # 個々のパケット単位でstall/ok を区別する手段がpyusb越しには無いため、
                     # 安全側に倒して全パケットstall扱いにする。
                     packets = [{"status": "stall", "data": ""} for _ in packet_lengths]
-                    return json.dumps({"success": True, "packets": packets})
+                    return _json_dumps({"success": True, "packets": packets})
                 if is_babble_error(e):
                     packets = [{"status": "babble", "data": ""} for _ in packet_lengths]
-                    return json.dumps({"success": True, "packets": packets})
+                    return _json_dumps({"success": True, "packets": packets})
                 raise
 
             received = bytes(buff)[:max(int(transferred), 0)]
@@ -1535,9 +1560,9 @@ class WebUSBBridge(QObject):
                 chunk = received[offset:offset + packet_length]
                 offset += packet_length
                 packets.append({"status": "ok", "data": _b64encode(chunk)})
-            return json.dumps({"success": True, "packets": packets})
+            return _json_dumps({"success": True, "packets": packets})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     @Slot(int, int, str, str, str, result=str)
     def isochronousTransferOut(self, handle_id, endpoint, data_b64, packet_lengths_json, frame_token=""):
@@ -1551,7 +1576,7 @@ class WebUSBBridge(QObject):
             packet_length = packet_lengths[0]
             total_length = packet_length * len(packet_lengths)
             if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
-                return json.dumps({
+                return _json_dumps({
                     "success": False,
                     "error": index_size_error(
                         f"total packetLengths {total_length} exceeds the maximum of "
@@ -1561,7 +1586,7 @@ class WebUSBBridge(QObject):
 
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
-                return json.dumps({"success": False, "error": "Invalid device handle"})
+                return _json_dumps({"success": False, "error": "Invalid device handle"})
             validation_error, owner_number = self._endpoint_available_or_error(
                 handle_id, dev, False, endpoint, required_type="isochronous"
             )
@@ -1586,7 +1611,7 @@ class WebUSBBridge(QObject):
             except Exception as e:
                 if is_stall_error(e):
                     packets = [{"status": "stall", "bytesWritten": 0} for _ in packet_lengths]
-                    return json.dumps({"success": True, "packets": packets})
+                    return _json_dumps({"success": True, "packets": packets})
                 raise
 
             remaining = max(int(transferred), 0)
@@ -1595,9 +1620,9 @@ class WebUSBBridge(QObject):
                 written = min(packet_length, remaining)
                 remaining -= written
                 packets.append({"status": "ok", "bytesWritten": written})
-            return json.dumps({"success": True, "packets": packets})
+            return _json_dumps({"success": True, "packets": packets})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     # --- オリジン権限の管理 ---
     @Slot(int, int, str, result=str)
@@ -1608,16 +1633,16 @@ class WebUSBBridge(QObject):
         try:
             origin = self._current_origin(frame_token)
             if not origin:
-                return json.dumps({"success": False})
+                return _json_dumps({"success": False})
             data = self._load_granted_origins()
             grants = data.get(origin, [])
             new_grants = [g for g in grants if not (g.get("vendorId") == vendor_id and g.get("productId") == product_id)]
             if len(new_grants) != len(grants):
                 data[origin] = new_grants
                 self._save_granted_origins(data)
-            return json.dumps({"success": True})
+            return _json_dumps({"success": True})
         except Exception as e:
-            return json.dumps({"success": False, "error": safe_error_str(e)})
+            return _json_dumps({"success": False, "error": safe_error_str(e)})
 
     # ↓↓↓ 以下3つは意図的に @Slot を付けていない(=QWebChannel経由でJS/Webページからは
     # 一切呼び出せない)。任意のオリジン一覧の閲覧・他オリジンの許可取り消しは、
