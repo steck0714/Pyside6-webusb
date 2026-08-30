@@ -12,9 +12,16 @@ pyside6-webusb本体は完全に動作する(bridge.py側の _b64encode/_b64deco
 2. ADBメッセージヘッダのpack/unpack/verifyが正しく機能し、改ざんを検出できること。
 3. 不正な入力(壊れたbase64、長さの違うヘッダ)がクラッシュではなく、
    Python側で捕捉可能な例外として報告されること。
+4. (v0.0.4b1) format_transfer_in_success_json()が、bridge.py側のPure Python
+   フォールバック経路(_format_transfer_success_json、HAVE_RUST_ACCEL=False時)
+   と完全にバイト一致する出力を生成すること — Rustが使えるかどうかで
+   ワイヤ上のバイト列が変わってしまわないことの確認。
 """
 import base64
+import json
+import os
 import random
+import sys
 
 import pytest
 
@@ -24,6 +31,8 @@ accel = pytest.importorskip(
            "native/pyside6_webusb_accel/ で `maturin develop` すればこのテストが有効になる。"
            "pyside6-webusb本体はこの拡張なしでも完全に動作する(README参照)。",
 )
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 # ============================================================
@@ -135,3 +144,52 @@ def test_adb_checksum_is_sum_not_real_crc32():
         "ADBのdata_crc32は単純総和のはずで、本物のCRC32とは一致しないはず"
     )
     print("test_adb_checksum_is_sum_not_real_crc32: OK")
+
+
+# ============================================================
+# 🚚 v0.0.4b1: 転送成功レスポンスJSON組み立ての高速化
+# ============================================================
+
+def test_format_transfer_in_success_json_matches_python_json_dumps():
+    """format_transfer_in_success_json()の出力が、
+    json.dumps({"success": True, "status": ..., "data": base64(...)},
+    separators=(",", ":")) と完全にバイト一致することを、複数サイズで確認する。
+    一致していれば、JSON.parse()する側(polyfill.py)からは常に同じ内容が
+    見えることになる。"""
+    random.seed(20260830)
+    for size in [0, 1, 16, 1000, 300_000]:
+        data = bytes(random.randrange(256) for _ in range(size))
+        for status in ["ok", "stall", "babble"]:
+            rust_json = accel.format_transfer_in_success_json(status, data)
+            python_json = json.dumps(
+                {"success": True, "status": status, "data": base64.b64encode(data).decode("ascii")},
+                separators=(",", ":"),
+            )
+            assert rust_json == python_json, f"size={size} status={status}: 不一致"
+            # 構文的に妥当なJSONであり、パース結果も期待どおりであること
+            parsed = json.loads(rust_json)
+            assert parsed == {"success": True, "status": status, "data": base64.b64encode(data).decode("ascii")}
+    print("test_format_transfer_in_success_json_matches_python_json_dumps: OK")
+
+
+def test_bridge_format_transfer_success_json_wrapper_matches_rust_and_python_paths():
+    """bridge.py側のラッパー(_format_transfer_success_json)が、
+    HAVE_RUST_ACCELの真偽どちらでも同一のバイト列を返すことを確認する
+    (=Rust拡張の有無でワイヤフォーマットが変わらないことの、実際に配線
+    されているbridge.py経由での確認。test_format_transfer_in_success_json_
+    matches_python_json_dumps はRust関数を直接叩く下位レベルの確認)。"""
+    from pyside6_webusb import bridge as bridge_module
+    data = bytes(range(200)) * 500  # 100KB程度、Rustパスもチャンク相当を通る
+
+    original = bridge_module.HAVE_RUST_ACCEL
+    try:
+        bridge_module.HAVE_RUST_ACCEL = True
+        with_rust = bridge_module._format_transfer_success_json("ok", data)
+        bridge_module.HAVE_RUST_ACCEL = False
+        without_rust = bridge_module._format_transfer_success_json("ok", data)
+    finally:
+        bridge_module.HAVE_RUST_ACCEL = original
+
+    assert with_rust == without_rust
+    assert json.loads(with_rust)["data"] == base64.b64encode(data).decode("ascii")
+    print("test_bridge_format_transfer_success_json_wrapper_matches_rust_and_python_paths: OK")
