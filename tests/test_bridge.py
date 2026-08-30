@@ -3,6 +3,7 @@
 チューザーダイアログに差し替えた上で実際に呼び出して検証する統合テスト。
 実USBデバイス・実GUI操作なしで、options.filters/exclusionFiltersによる
 絞り込みと、選択後のリッチな記述子再構築を確認する。"""
+import base64
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and not os
 from PySide6.QtWidgets import QApplication
 
 from pyside6_webusb.bridge import WebUSBBridge
+from pyside6_webusb.hardening import BULK_TRANSFER_CHUNK_SIZE
 
 _app = QApplication.instance() or QApplication([])
 
@@ -136,13 +138,34 @@ class FakeDevice:
         #    を要求する。呼び出し時に実際に渡された値を記録しておき、
         #    bulkTransferIn()側でIN方向ビット(0x80)が正しく付与されているかを
         #    テストから検証できるようにする。
+        # 🧵 v0.0.4b: read_calls に全呼び出しを蓄積する(last_read_callは互換の
+        #    ため残す=最後の呼び出しのみを見る既存テスト向け)。チャンク分割
+        #    (_chunked_bulk_read)が複数回read()を呼ぶケースをテストで検証する
+        #    ために必要。
         self.last_read_call = {"endpoint": endpoint, "length": length, "timeout": timeout}
+        if not hasattr(self, "read_calls"):
+            self.read_calls = []
+        self.read_calls.append(dict(self.last_read_call))
         if getattr(self, "read_exception", None) is not None:
             raise self.read_exception
+        # read_stream が設定されていれば、そこから要求バイト数ぶんを"消費"して
+        # 返す(=デバイスが継続的に大量のデータを送ってくる状況を再現し、
+        # _chunked_bulk_read()が複数チャンクにわたって正しくループすることを
+        # 検証できるようにする)。無ければ従来どおりの挙動(最大4バイトの
+        # 固定応答=常にshort packet)を維持し、既存テストに影響しない。
+        stream = getattr(self, "read_stream", None)
+        if stream is not None:
+            pos = getattr(self, "_read_stream_pos", 0)
+            chunk = stream[pos:pos + length]
+            self._read_stream_pos = pos + len(chunk)
+            return chunk
         return bytes([0xAB]) * min(length, 4)
 
     def write(self, endpoint, data, timeout=None):
         self.last_write_call = {"endpoint": endpoint, "data": bytes(data), "timeout": timeout}
+        if not hasattr(self, "write_calls"):
+            self.write_calls = []
+        self.write_calls.append(dict(self.last_write_call))
         if getattr(self, "write_exception", None) is not None:
             raise self.write_exception
         return len(data)
@@ -663,7 +686,9 @@ def test_bulk_and_control_transfer_timeout_scales_with_length():
     handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
     assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
 
-    big_length = 2_000_000  # 2MB相当のIN転送(WebADBのファイル転送規模を想定)
+    big_length = 100_000  # チャンク分割閾値(256KiB)未満 = 単一呼び出し経路のテスト
+                           # (チャンク分割経路自体は
+                           # test_bulk_transfer_chunks_large_payload_and_processes_events で別途検証)
     assert json.loads(bridge.bulkTransferIn(handle, 1, big_length))["success"] is True
     assert dev_a.last_read_call["timeout"] == scaled_transfer_timeout_ms(big_length)
     assert dev_a.last_read_call["timeout"] > 5000, "旧来の固定5秒より長くなっているはず"
@@ -673,7 +698,202 @@ def test_bulk_and_control_transfer_timeout_scales_with_length():
     print("test_bulk_and_control_transfer_timeout_scales_with_length: OK")
 
 
-def test_bulk_and_control_transfer_reject_absurdly_large_length():
+def test_bulk_transfer_chunks_large_payload_and_processes_events():
+    """🆕 v0.0.4b (UIフリーズ対策): BULK_TRANSFER_CHUNK_SIZE(256KiB)を超える
+    bulkTransferInは、単一の巨大なpyusb呼び出しではなく複数のサブチャンクへ
+    分割され、各サブチャンクの合間にQCoreApplication.processEvents()が
+    呼ばれることを確認する(でなければ、大容量ペイロードを送ってくる/応答が
+    遅いデバイス相手に、アプリ全体のUIが転送完了までフリーズしてしまう)。"""
+    from PySide6.QtCore import QCoreApplication
+    from pyside6_webusb.hardening import scaled_transfer_timeout_ms
+
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    # 600KB連続でデータを送り続けてくる"よく喋る"デバイスを模倣する
+    # (short packetが来ない=読み切るまで複数チャンク要求し続ける状況)。
+    total = 600_000
+    dev_a.read_stream = bytes((i * 3 + 1) % 256 for i in range(total))
+
+    processed_events_count = [0]
+    original_process_events = QCoreApplication.processEvents
+    def _counting_process_events(*a, **kw):
+        processed_events_count[0] += 1
+        return original_process_events(*a, **kw)
+    QCoreApplication.processEvents = staticmethod(_counting_process_events)
+    try:
+        result = json.loads(bridge.bulkTransferIn(handle, 1, total))
+    finally:
+        QCoreApplication.processEvents = original_process_events
+
+    assert result["success"] is True, result
+    assert result["status"] == "ok"
+    decoded = base64.b64decode(result["data"])
+    assert decoded == dev_a.read_stream, "600KB分割転送後もバイト列が完全一致するはず"
+
+    expected_chunks = -(-total // BULK_TRANSFER_CHUNK_SIZE)  # 切り上げ除算
+    assert len(dev_a.read_calls) == expected_chunks, dev_a.read_calls
+    # 最後のチャンク以外は、サブチャンク要求量ちょうどのはず
+    for call in dev_a.read_calls[:-1]:
+        assert call["length"] == BULK_TRANSFER_CHUNK_SIZE
+        assert call["timeout"] == scaled_transfer_timeout_ms(BULK_TRANSFER_CHUNK_SIZE)
+    # サブチャンクの合間(=チャンク数-1回)だけprocessEvents()が呼ばれるはず
+    assert processed_events_count[0] == expected_chunks - 1, processed_events_count[0]
+    print("test_bulk_transfer_chunks_large_payload_and_processes_events: OK")
+
+
+def test_bulk_transfer_short_packet_ends_chunked_read_early():
+    """USBのbulk転送は「要求量ぶん受信し終える」か「short packet(要求より
+    短いパケット)を受信する」かの早い方で完了する。チャンク分割していても
+    この打ち切り条件が正しく再現され、short packet受信後は追加のread()を
+    呼ばない(=デバイスが実際に用意した分より多くを待ち続けない)ことを
+    確認する。"""
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    # デバイスは1チャンクぶん(256KiB)ちょうどしかデータを持っておらず、
+    # 要求は1MBだったとする。1回目のサブチャンクでshort packet相当には
+    # ならない(ちょうどチャンクサイズぶん来る)ので2回目を要求するが、
+    # 2回目はデータが尽きて0バイト(=short packet)になる、という状況。
+    dev_a.read_stream = bytes([0x42]) * BULK_TRANSFER_CHUNK_SIZE
+    result = json.loads(bridge.bulkTransferIn(handle, 1, 1_000_000))
+    assert result["success"] is True, result
+    decoded = base64.b64decode(result["data"])
+    assert decoded == dev_a.read_stream
+    assert len(dev_a.read_calls) == 2, dev_a.read_calls
+    assert dev_a.read_calls[1]["length"] == BULK_TRANSFER_CHUNK_SIZE
+    print("test_bulk_transfer_short_packet_ends_chunked_read_early: OK")
+
+
+def _pack_adb_header_for_test(command, arg0, arg1, data):
+    """テスト専用の、ADBメッセージヘッダのpure Python参照実装。
+    native/pyside6_webusb_accel(Rust)側にも同じロジックがあるが、この
+    統合テストはRust拡張のビルド有無に関係なく常に実行したいため、ここでは
+    あえてRust拡張には依存せず単純に再実装している(フィールド順・
+    チェックサム算出方法はbridge.py/CHANGELOGに記載のとおり、実際に動作する
+    公開Rust ADBクライアント実装を確認して転記したもの)。"""
+    import struct
+    data_crc32 = sum(data) & 0xFFFFFFFF
+    magic = command ^ 0xFFFFFFFF
+    return struct.pack("<6I", command, arg0, arg1, len(data), data_crc32, magic)
+
+
+def test_bulk_transfer_round_trips_realistic_adb_wrte_message():
+    """🆕 v0.0.4b (WebADB統合シナリオ): 一般的なADBクライアント実装が実際に
+    送信する形——24バイトのWRTEヘッダ + 256KBのペイロード(典型的なADB syncの
+    転送チャンクサイズに近い規模)——を、実際にbulkTransferOut()→
+    (別のFakeDeviceで)bulkTransferIn()経由で送受信し、ヘッダ・ペイロード
+    ともに1バイトも欠落・破損せず、チャンク分割(BULK_TRANSFER_CHUNK_SIZE)を
+    経由しても正しく往復することを確認する。任意サイズの塊を送るだけの
+    汎用テストではなく、実際のADBプロトコルの"形"をしたデータで検証する
+    ことで、WebADBのようなアプリが実際にこのブリッジ越しに送るであろう
+    ものにより近い形の回帰テストになっている。"""
+    WRTE = 0x4554_5257
+    LOCAL_ID, REMOTE_ID = 1, 42
+    payload = bytes((i * 31 + 7) % 256 for i in range(256 * 1024))
+    message = _pack_adb_header_for_test(WRTE, LOCAL_ID, REMOTE_ID, payload) + payload
+    assert len(message) == 24 + 256 * 1024
+
+    # --- 送信側: OUT方向のbulkTransferOut() ---
+    ep_out = FakeEndpoint(0x02, 0x02)
+    intf_out = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_out])
+    dev_out = FakeDevice(0x18D1, 0x4EE2, [FakeConfiguration(1, [intf_out])])  # 0x18D1=Google(実在するADBデバイスのUSB VID)
+    bridge_out = make_bridge([dev_out])
+    bridge_out._is_granted = lambda *a, **kw: True
+    handle_out = json.loads(bridge_out.openDevice(0x18D1, 0x4EE2))["handle"]
+    assert json.loads(bridge_out.claimInterface(handle_out, 0))["success"] is True
+
+    send_result = json.loads(bridge_out.bulkTransferOut(handle_out, 2, base64.b64encode(message).decode("ascii")))
+    assert send_result["success"] is True, send_result
+    assert send_result["bytesWritten"] == len(message)
+    sent_reconstructed = b"".join(c["data"] for c in dev_out.write_calls)
+    assert sent_reconstructed == message, "ADB WRTEメッセージ(ヘッダ+256KBペイロード)が送信側で欠落・破損した"
+    assert len(dev_out.write_calls) > 1, "256KB超のメッセージは複数チャンクに分割されるはず"
+
+    # --- 受信側: IN方向のbulkTransferIn()(デバイスがまさに今送ったのと同じ
+    #     メッセージを送り返してくる状況を想定) ---
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf_in = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_in = FakeDevice(0x18D1, 0x4EE2, [FakeConfiguration(1, [intf_in])])
+    dev_in.read_stream = message
+    bridge_in = make_bridge([dev_in])
+    bridge_in._is_granted = lambda *a, **kw: True
+    handle_in = json.loads(bridge_in.openDevice(0x18D1, 0x4EE2))["handle"]
+    assert json.loads(bridge_in.claimInterface(handle_in, 0))["success"] is True
+
+    recv_result = json.loads(bridge_in.bulkTransferIn(handle_in, 1, len(message)))
+    assert recv_result["success"] is True, recv_result
+    received = base64.b64decode(recv_result["data"])
+    assert received == message, "ADB WRTEメッセージが受信側で欠落・破損した"
+
+    # ヘッダ部分を実際に構造体として解釈し、フィールドが正しく往復しているかも確認
+    import struct
+    command, arg0, arg1, data_length, data_crc32, magic = struct.unpack("<6I", received[:24])
+    assert command == WRTE
+    assert arg0 == LOCAL_ID
+    assert arg1 == REMOTE_ID
+    assert data_length == len(payload)
+    assert magic == (command ^ 0xFFFFFFFF)
+    assert data_crc32 == (sum(payload) & 0xFFFFFFFF)
+    assert received[24:] == payload
+    print("test_bulk_transfer_round_trips_realistic_adb_wrte_message: OK")
+
+
+
+    """🆕 v0.0.4b: チャンク分割の合間に呼ぶprocessEvents()は、原理上そこで
+    別のQWebChannel呼び出し(同じhandleへの新たな転送呼び出し等)が割り込む
+    (再入する)余地を生む。同一デバイスへ向けたpyusb呼び出しが入り乱れて
+    データが壊れるのを防ぐため、handle単位で「転送中」を追跡し、再入した
+    呼び出しは安全にエラーを返す(=状態を壊すより早く失敗させる)ことを
+    確認する。"""
+    from PySide6.QtCore import QCoreApplication
+
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    dev_a.read_stream = bytes([0x01]) * 600_000
+    reentrant_results = []
+
+    original_process_events = QCoreApplication.processEvents
+    def _reentrant_process_events(*a, **kw):
+        # チャンクの合間で、同じhandleへ向けて再度bulkTransferInを呼んで
+        # みる(=実際にはprocessEvents()がQWebChannel経由の新規呼び出しを
+        # dispatchしてしまうケースを直接シミュレートしている)。
+        if not reentrant_results:
+            reentrant_results.append(json.loads(bridge.bulkTransferIn(handle, 1, 10)))
+        return original_process_events(*a, **kw)
+    QCoreApplication.processEvents = staticmethod(_reentrant_process_events)
+    try:
+        outer_result = json.loads(bridge.bulkTransferIn(handle, 1, 600_000))
+    finally:
+        QCoreApplication.processEvents = original_process_events
+
+    assert len(reentrant_results) == 1, "再入は1回だけ発生させたはず"
+    assert reentrant_results[0]["success"] is False
+    assert reentrant_results[0]["error"].startswith("InvalidStateError:"), reentrant_results[0]
+    # 外側(最初)の呼び出し自体は、再入を安全に弾いた上で正常完了するはず
+    assert outer_result["success"] is True, outer_result
+    # 再入後もhandleは "busy" のまま残らない(finally節で確実に解除される)
+    assert handle not in bridge._busy_handles
+    print("test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected: OK")
+
+
+
     """🆕 v0.0.4a0: 行儀の悪い/悪意あるページが天文学的なlengthを渡すだけで
     ホスト側に無制限のメモリ確保を強制できないよう、実務上の上限を設けた。
     (仕様上の型はbulk=unsigned long、control=unsigned shortだが、素直に
@@ -735,7 +955,14 @@ def test_bulk_transfer_large_payload_round_trip_via_base64():
     payload = bytes((i * 7 + 3) % 256 for i in range(300_000))
     out_result = json.loads(bridge.bulkTransferOut(handle, 2, base64.b64encode(payload).decode("ascii")))
     assert out_result["success"] is True, out_result
-    assert dev_a.last_write_call["data"] == payload, "300KBのペイロードが1バイトも欠落・破損せず届くはず"
+    # 300KB > BULK_TRANSFER_CHUNK_SIZE(256KiB)なので複数回のwrite()呼び出しに
+    # 分割される(v0.0.4b)。write_callsを順につなげて元のペイロードと
+    # 1バイトも欠落・破損せず一致することを確認する。
+    reconstructed = b"".join(c["data"] for c in dev_a.write_calls)
+    assert len(dev_a.write_calls) > 1, "300KBは複数チャンクに分割されるはず"
+    assert reconstructed == payload, "300KBのペイロードが1バイトも欠落・破損せず届くはず"
+    assert all(c["endpoint"] == 2 for c in dev_a.write_calls)
+    assert out_result["bytesWritten"] == len(payload)
     print("test_bulk_transfer_large_payload_round_trip_via_base64: OK")
 
 
