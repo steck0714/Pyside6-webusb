@@ -1,4 +1,4 @@
-# Mock-webusb
+# Pyside6-Webusb
 An AI-generated mock implementation of WebUSB API for PySide.
 (Screenshot of the F12 console during testing.)
 
