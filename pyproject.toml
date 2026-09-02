@@ -10,30 +10,30 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 authors = [
-    { name = "pyside6-webusb contributors" },
+{ name = "pyside6-webusb contributors" },
 ]
 keywords = ["pyside6", "qt", "qtwebengine", "webusb", "usb", "pyusb", "qwebchannel", "polyfill"]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Topic :: Software Development :: Libraries",
-    "Topic :: System :: Hardware",
-    "Environment :: X11 Applications :: Qt",
+"Development Status :: 4 - Beta",
+"Intended Audience :: Developers",
+"License :: OSI Approved :: MIT License",
+"Programming Language :: Python :: 3",
+"Topic :: Software Development :: Libraries",
+"Topic :: System :: Hardware",
+"Environment :: X11 Applications :: Qt",
 ]
 dependencies = [
-    "PySide6-Essentials>=6.5",
-    "PySide6-Addons>=6.5",
-    "pyusb>=1.2.1",
+"PySide6-Essentials>=6.5",
+"PySide6-Addons>=6.5",
+"pyusb>=1.2.1",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
 [project.urls]
-Homepage = "https://github.com/steck0714/Mock-webusb"
-Issues = "https://github.com/steck0714/Mock-webusb/issues"
+Homepage = "https://github.com/steck0714/Pyside6-webusb"
+Issues = "https://github.com/steck0714/Pyside6-webusb/issues"
 Specification = "https://wicg.github.io/webusb/"
 
 [tool.setuptools.packages.find]
