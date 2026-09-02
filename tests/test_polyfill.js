@@ -51,6 +51,21 @@ function makeSignal() {
 const fakeBridge = {
     deviceConnected: makeSignal(),
     deviceDisconnected: makeSignal(),
+    // 🔧 v0.0.4b2: window.__pysideWebUSB.bridgeInfo()/explainTransferLimits()が
+    // callBridge('isAvailable')経由でこれを叩く。実際のPython実装
+    // (bridge.py, isAvailable())が返す形をそのまま模している。
+    isAvailable: function(cb) {
+        cb(JSON.stringify({
+            available: true,
+            bridgeVersion: '0.0.4b2-test',
+            rustAccelerated: true,
+            transferLimits: {
+                chromeCompatibleWarnThreshold: 33554432,
+                hostSafetyHardLimit: 536870912,
+                controlTransferMaxLength: 65535,
+            },
+        }));
+    },
     listDevices: function(frameToken, cb) { fakeBridgeCalls.push(['listDevices', frameToken]); cb(JSON.stringify({ devices: fakeDevices })); },
     requestDeviceChooser: function(optionsJson, frameToken, cb) {
         fakeBridgeCalls.push(['requestDeviceChooser', optionsJson, frameToken]);
@@ -468,6 +483,65 @@ async function main() {
     bulkTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
     bulkTransferOutResponse = { success: true, status: 'ok', bytesWritten: 1 };
     console.log('500KB payload round-trip via chunked base64 encode/decode (WebADB-scale transfer): OK');
+
+    // 🛡️ バグ修正(v0.0.4b2)の回帰テスト: Python側(errors.py)が返す
+    // "IndexSizeError:"/"DataError:"/"NotFoundError:"/"InvalidAccessError:" 接頭辞つき
+    // エラーが、throwFromResult()のKNOWN_ERROR_PREFIXESに含まれておらず、正しい
+    // DOMException名へ振り分けられていなかった(=常定のNetworkErrorになり、かつ
+    // メッセージ本文に接頭辞がそのまま残ってしまっていた)実バグの回帰テスト。
+    // bulkTransferInにはJS側の事前チェックが一切無い(直接ブリッジへ問い合わせる)
+    // ため、このパスはPythonが返すエラー名に完全に依存する。
+    const errorPrefixCases = [
+        ['IndexSizeError:', 'endpoint number 99 is out of range (must be between 0 and 15)'],
+        ['DataError:', 'length 999999999 is out of range (must be between 0 and 33554432)'],
+        ['NotFoundError:', 'no such interface'],
+        ['InvalidAccessError:', 'endpoint 3 is a isochronous endpoint, not bulk or interrupt'],
+    ];
+    for (const [prefix, msg] of errorPrefixCases) {
+        bulkTransferInResponse = { success: false, error: prefix + ' ' + msg };
+        let caught = null;
+        try {
+            await dev.transferIn(1, 4);
+        } catch (e) {
+            caught = e;
+        }
+        const expectedName = prefix.slice(0, -1);
+        assert.ok(caught instanceof DOMException, `${prefix}: DOMExceptionが投げられるはず`);
+        assert.strictEqual(caught.name, expectedName,
+            `${prefix}: DOMException.nameは'${expectedName}'であるべき(実際: '${caught.name}') -- ` +
+            `旧実装ではKNOWN_ERROR_PREFIXESに無いプレフィックスは全てNetworkErrorになっていた`);
+        assert.strictEqual(caught.message, msg,
+            `${prefix}: DOMException.messageから接頭辞が正しく取り除かれているべき(実際: '${caught.message}') -- ` +
+            `旧実装では"${prefix} "がメッセージ本文にそのまま残ってしまっていた`);
+    }
+    bulkTransferInResponse = { success: true, status: 'ok', data: 'AA==' };
+    console.log('Python error prefixes (IndexSizeError/DataError/NotFoundError/InvalidAccessError) dispatch to the correct DOMException.name: OK');
+
+    // 🔧 v0.0.4b2: window.__pysideWebUSB (F12/DevTools向けデバッグネームスペース) の検証
+    assert.strictEqual(typeof window.__pysideWebUSB, 'object', 'window.__pysideWebUSBが生えているはず');
+    assert.strictEqual(typeof window.__pysideWebUSB.listGrantedDevices, 'function');
+    assert.strictEqual(typeof window.__pysideWebUSB.bridgeInfo, 'function');
+    assert.strictEqual(typeof window.__pysideWebUSB.explainTransferLimits, 'function');
+
+    const grantedRows = await window.__pysideWebUSB.listGrantedDevices();
+    assert.ok(Array.isArray(grantedRows));
+    assert.strictEqual(grantedRows.length, fakeDevices.length);
+    assert.strictEqual(grantedRows[0].vendorId, '0x' + fakeDevices[0].vendorId.toString(16));
+    // 🛡️ 安全設計の確認: listGrantedDevices()はnavigator.usb.getDevices()と
+    // 完全に同じデータであり、それ以上の情報(他オリジンの許可済みデバイス等)を
+    // 一切含まないこと。
+    const viaGetDevices = await navigator.usb.getDevices();
+    assert.strictEqual(grantedRows.length, viaGetDevices.length,
+        'listGrantedDevices()はgetDevices()と同じデータ量であるべき(それ以上の開示は無い)');
+
+    const info = await window.__pysideWebUSB.bridgeInfo();
+    assert.strictEqual(info.bridgeVersion, '0.0.4b2-test');
+    assert.strictEqual(info.rustAccelerated, true);
+    assert.strictEqual(info.transferLimits.hostSafetyHardLimit, 536870912);
+
+    const limits = await window.__pysideWebUSB.explainTransferLimits();
+    assert.strictEqual(limits.chromeCompatibleWarnThreshold, 33554432);
+    console.log('window.__pysideWebUSB debug namespace (listGrantedDevices/bridgeInfo/explainTransferLimits): OK');
 
     console.log('ALL WEBUSB POLYFILL JS TESTS PASSED');
 }

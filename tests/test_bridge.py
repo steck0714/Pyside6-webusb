@@ -893,12 +893,20 @@ def test_bulk_transfer_round_trips_realistic_adb_wrte_message():
     print("test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected: OK")
 
 
-
+def test_bulk_and_control_transfer_reject_absurdly_large_length():
     """🆕 v0.0.4a0: 行儀の悪い/悪意あるページが天文学的なlengthを渡すだけで
-    ホスト側に無制限のメモリ確保を強制できないよう、実務上の上限を設けた。
+    ホスト側に無制限のメモリ確保を強制できないよう、実務上の上限
+    (HOST_SAFETY_MAX_TRANSFER_LENGTH)を設けた。
     (仕様上の型はbulk=unsigned long、control=unsigned shortだが、素直に
-    信用してすぐさまその場でバッファを確保するのは安全ではない。)"""
-    from pyside6_webusb.hardening import BULK_TRANSFER_MAX_LENGTH, CONTROL_TRANSFER_MAX_LENGTH
+    信用してすぐさまその場でバッファを確保するのは安全ではない。)
+
+    🔓 v0.0.4b2: 実Chromeの32MiB上限(CHROME_USB_TRANSFER_LENGTH_LIMIT)は、
+    もはやここでの拒否理由ではない(それを超えるだけの場合が本当に拒否
+    されないことは test_bulk_transfer_over_chrome_limit_warns_but_succeeds
+    で確認する)。ここで実際に確認するのは、桁違いに巨大な要求
+    (HOST_SAFETY_MAX_TRANSFER_LENGTH超)がなお拒否されること
+    ——この実装自身のホストプロセス保護が生きていることの確認。"""
+    from pyside6_webusb.hardening import HOST_SAFETY_MAX_TRANSFER_LENGTH, CONTROL_TRANSFER_MAX_LENGTH
     ep_in = FakeEndpoint(0x81, 0x02)
     intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
     dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
@@ -907,21 +915,74 @@ def test_bulk_transfer_round_trips_realistic_adb_wrte_message():
     handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
     assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
 
-    too_big_bulk = json.loads(bridge.bulkTransferIn(handle, 1, BULK_TRANSFER_MAX_LENGTH + 1))
+    too_big_bulk = json.loads(bridge.bulkTransferIn(handle, 1, HOST_SAFETY_MAX_TRANSFER_LENGTH + 1))
     assert too_big_bulk["success"] is False
-    assert too_big_bulk["error"].startswith("IndexSizeError:"), too_big_bulk
-    assert not hasattr(dev_a, "last_read_call"), "上限超過時はpyusbのread()すら呼ばれないべき"
+    assert too_big_bulk["error"].startswith("DataError:"), too_big_bulk
+    assert not hasattr(dev_a, "read_calls"), "上限超過時はpyusbのread()すら呼ばれないべき"
 
     too_big_ctrl = json.loads(bridge.controlTransferIn(handle, 0xA1, 1, 0, 0, CONTROL_TRANSFER_MAX_LENGTH + 1))
     assert too_big_ctrl["success"] is False
+    # controlTransferInの上限(WebIDLのunsigned short型そのものの範囲、65535)は
+    # HOST_SAFETY_MAX_TRANSFER_LENGTHよりずっと小さく、Chrome32MiB上限の議論とは
+    # 無関係な「型の範囲外」の話なので、IndexSizeErrorのまま変更していない。
     assert too_big_ctrl["error"].startswith("IndexSizeError:"), too_big_ctrl
     print("test_bulk_and_control_transfer_reject_absurdly_large_length: OK")
 
 
+def test_bulk_transfer_over_chrome_limit_warns_but_succeeds():
+    """🔓 v0.0.4b2の方針転換の中核: 転送が実Chromeの32MiB上限
+    (CHROME_USB_TRANSFER_LENGTH_LIMIT)を超えても、拒否はされず
+    (HOST_SAFETY_MAX_TRANSFER_LENGTH以下である限り)処理は続行され、
+    レスポンスに"warning"フィールドが付くことを確認する。この
+    "warning"はpolyfill.py側でconsole.warn()としてDevTools(F12)へ
+    転送される(test_polyfill.js側で確認)。"""
+    from pyside6_webusb.hardening import CHROME_USB_TRANSFER_LENGTH_LIMIT, HOST_SAFETY_MAX_TRANSFER_LENGTH
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    # ちょうどCHROME_USB_TRANSFER_LENGTH_LIMIT: 警告なし、まだHOST_SAFETY未満
+    at_limit = json.loads(bridge.bulkTransferIn(handle, 1, CHROME_USB_TRANSFER_LENGTH_LIMIT))
+    assert at_limit["success"] is True, at_limit
+    assert "warning" not in at_limit, "ちょうど上限そのものはまだ超過していないので警告は無いはず"
+
+    # 超過: 拒否はされず、warningフィールドが付いて成功する
+    over_limit = json.loads(bridge.bulkTransferIn(handle, 1, CHROME_USB_TRANSFER_LENGTH_LIMIT + 1))
+    assert over_limit["success"] is True, over_limit
+    assert over_limit["status"] == "ok"
+    assert "warning" in over_limit, "32MiB超過時はwarningフィールドが付くはず"
+    assert "pyside6-webusb" in over_limit["warning"]
+    assert str(CHROME_USB_TRANSFER_LENGTH_LIMIT) in over_limit["warning"]
+    assert "DataError" in over_limit["warning"], "実Chromeが投げるはずのエラー名を引用しているはず"
+    assert over_limit["warning"].count(str(HOST_SAFETY_MAX_TRANSFER_LENGTH)) >= 1, \
+        "この実装自身の(Chromeとは別の)ハード上限にも言及しているはず"
+
+    # isochronousでも同じ方針であることを確認
+    ep_iso_in = FakeEndpoint(0x83, 0x01)
+    intf2 = FakeInterface(1, 0, 0xFF, 0x00, 0x00, [ep_iso_in])
+    dev_b = FakeDevice(0x18D1, 0x4EE2, [FakeConfiguration(1, [intf2])])
+    fake_backend = dev_b.enable_fake_iso_backend()
+    bridge2 = make_bridge([dev_b])
+    bridge2._is_granted = lambda *a, **kw: True
+    handle2 = json.loads(bridge2.openDevice(0x18D1, 0x4EE2))["handle"]
+    assert json.loads(bridge2.claimInterface(handle2, 1))["success"] is True
+    big_packet_count = CHROME_USB_TRANSFER_LENGTH_LIMIT // 4096 + 1
+    iso_result = json.loads(bridge2.isochronousTransferIn(handle2, 3, json.dumps([4096] * big_packet_count)))
+    assert iso_result["success"] is True, iso_result
+    assert "warning" in iso_result
+    print("test_bulk_transfer_over_chrome_limit_warns_but_succeeds: OK")
+
+
 def test_isochronous_transfer_rejects_oversized_total_packet_lengths():
     """🆕 v0.0.4a0: isochronousTransferIn/Outにも、packetLengths合計に対する
-    実務上の上限を追加した。"""
-    from pyside6_webusb.hardening import ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH
+    実務上の上限(HOST_SAFETY_MAX_TRANSFER_LENGTH)を追加した。
+    🔓 v0.0.4b2: bulkと同様、実際に拒否されるのはHOST_SAFETY_MAX_TRANSFER_
+    LENGTH超のみ(CHROME_USB_TRANSFER_LENGTH_LIMIT超は警告のみ、上のテスト参照)。"""
+    from pyside6_webusb.hardening import HOST_SAFETY_MAX_TRANSFER_LENGTH
     ep_iso_in = FakeEndpoint(0x83, 0x01)
     intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_iso_in])
     dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
@@ -930,10 +991,10 @@ def test_isochronous_transfer_rejects_oversized_total_packet_lengths():
     handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
     assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
 
-    huge_packet = ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH // 2 + 1
+    huge_packet = HOST_SAFETY_MAX_TRANSFER_LENGTH // 2 + 1
     result = json.loads(bridge.isochronousTransferIn(handle, 3, json.dumps([huge_packet, huge_packet])))
     assert result["success"] is False
-    assert result["error"].startswith("IndexSizeError:"), result
+    assert result["error"].startswith("DataError:"), result
     print("test_isochronous_transfer_rejects_oversized_total_packet_lengths: OK")
 
 
@@ -1081,6 +1142,45 @@ def test_isochronousTransfer_requires_claimed_isochronous_endpoint():
     assert wrong_type["success"] is False
     assert wrong_type["error"].startswith("InvalidAccessError:"), wrong_type
     print("test_isochronousTransfer_requires_claimed_isochronous_endpoint: OK")
+
+
+def test_isochronousTransferOut_rejects_data_length_mismatch_with_packet_lengths():
+    """🛡️ バグ修正(v0.0.4b2, 実Blinkソース確認済み): dataのバイト数が
+    packetLengths合計と一致しない場合、実Chromeは"The data buffer size must
+    match the total packet length."というDataErrorで拒否する
+    (third_party/blink/renderer/modules/webusb/usb_device.cc の
+    kBufferSizeMismatch)。旧実装はこのチェックが丸ごと抜けており、
+    食い違ったサイズのdataでもそのままbackend.iso_write()へ渡してしまって
+    いた。"""
+    ep_iso_out = FakeEndpoint(0x04, 0x01)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_iso_out])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    fake_backend = dev_a.enable_fake_iso_backend()
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    # packetLengths合計は8(4+4)だが、実際のdataは6バイトしか無い(短すぎ)
+    too_short = base64.b64encode(bytes(6)).decode("ascii")
+    result = json.loads(bridge.isochronousTransferOut(handle, 4, too_short, json.dumps([4, 4])))
+    assert result["success"] is False
+    assert result["error"].startswith("DataError:"), result
+    assert "must match the total packet length" in result["error"]
+    assert len(fake_backend.iso_write_calls) == 0, "検証に失敗した時点でbackendへは一切渡さないべき"
+
+    # 逆に長すぎる場合も同様に拒否されるはず
+    too_long = base64.b64encode(bytes(10)).decode("ascii")
+    result2 = json.loads(bridge.isochronousTransferOut(handle, 4, too_long, json.dumps([4, 4])))
+    assert result2["success"] is False
+    assert result2["error"].startswith("DataError:"), result2
+
+    # ちょうど一致していれば通る(健全性チェック: 検証が厳しすぎて正常系まで
+    # 壊していないことの確認)
+    exact = base64.b64encode(bytes(8)).decode("ascii")
+    result3 = json.loads(bridge.isochronousTransferOut(handle, 4, exact, json.dumps([4, 4])))
+    assert result3["success"] is True, result3
+    print("test_isochronousTransferOut_rejects_data_length_mismatch_with_packet_lengths: OK")
 
 
 def test_isochronousTransfer_success_path_with_fake_backend():
@@ -1394,7 +1494,121 @@ def test_requestDeviceChooser_is_registered_as_qt_slot():
     assert "_iso_backend_or_error" not in slot_names and "_validate_packet_lengths" not in slot_names, (
         "isochronous transfer helpers must remain private, not JS-reachable @Slots"
     )
+    # 🛡️ セキュリティ修正(v0.0.4b2)の回帰テスト: install()はポリフィルJSを
+    # MainWorld(=ページ自身のJSと同じ実行コンテキスト)へ注入するため、
+    # qt.webChannelTransportはページJSからも到達可能であり、@Slotが付いた
+    # メソッドはpolyfill.py自身が呼ぶかどうかに関係なく、任意のWebページが
+    # 独自にQWebChannel接続してchannel.objects.pyUsbBridge経由で直接
+    # 呼び出せてしまう。旧実装ではlistKnownDevices/forgetKnownDevice/
+    # forgetAllKnownDevicesに@Slotが付いており、「既知デバイス一覧の閲覧・
+    # 全削除を表示中のWebページへ公開すべきではない」という、すぐ下の
+    # list_granted_origins等が同じファイル内で明記している原則に反していた
+    # (=任意のページが他オリジン由来の既知デバイス情報を読める、全削除できる、
+    # という実害のある抜け穴だった)。
+    for management_only_method in (
+        "listKnownDevices", "forgetKnownDevice", "forgetAllKnownDevices",
+        "list_granted_origins", "revoke_origin_grant", "revoke_all_for_origin",
+    ):
+        assert management_only_method not in slot_names, (
+            f"{management_only_method} manages data across ALL origins and must "
+            f"remain a private, Python-only method (called only by the host "
+            f"app's own trusted UI code) -- it must never be a JS-reachable "
+            f"@Slot, since install() injects the polyfill into MainWorld where "
+            f"any web page can open its own QWebChannel connection and call it "
+            f"directly, bypassing whatever polyfill.py's own JS does or doesn't call"
+        )
     print("test_requestDeviceChooser_is_registered_as_qt_slot: OK")
+
+
+def test_sustained_large_transfers_do_not_leak_state_or_corrupt_data():
+    """🔁 v0.0.4b2: 「大きい容量の連続した読み込みに耐えられる」ことの検証。
+    これまでのテストは基本的に単発の大容量転送(1回だけ)を確認するものだった。
+    WebADBのようなユースケースでは、同じハンドルに対して数十〜数百回連続で
+    大容量転送を行うのが通常であり、単発では起きない種類の問題
+    (_busy_handles/_open_devicesの状態リーク、繰り返しによる劣化・破損)が
+    無いことは別途確認する価値がある。
+
+    確認する内容:
+      1. 300KB(チャンク分割の閾値=256KBを超える)のIN転送を30回連続で行い、
+         毎回データが正しく届くこと(=N回目だけ壊れる、といった劣化が無いこと)。
+      2. 300KBのOUT転送を30回連続で行い、毎回全バイトが正しく送られること。
+      3. IN/OUTを交互に(ADBの要求-応答パターンに近い形で)50回繰り返しても
+         問題ないこと。
+      4. どの時点でも_busy_handles/_open_devicesのサイズが増え続けない
+         (=1ハンドルぶんのまま)こと——チャンク転送のたびに増えっぱなしに
+         なるような実装ミスがあれば、ここで検出できる。
+    """
+    import base64 as base64_mod
+    from pyside6_webusb.hardening import BULK_TRANSFER_CHUNK_SIZE
+
+    # --- 1. 連続IN転送 ---
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf_in = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_in = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf_in])])
+    transfer_size = int(BULK_TRANSFER_CHUNK_SIZE * 1.2)  # チャンク分割を確実に踏む
+    bridge_in = make_bridge([dev_in])
+    bridge_in._is_granted = lambda *a, **kw: True
+    handle_in = json.loads(bridge_in.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge_in.claimInterface(handle_in, 0))["success"] is True
+
+    for i in range(30):
+        # 毎回中身が異なるデータにする(=前回の使い回しやキャッシュ的な取り違えが
+        # 無いことを検出できるように)。
+        dev_in.read_stream = bytes((i * 37 + j) % 256 for j in range(transfer_size))
+        dev_in._read_stream_pos = 0
+        result = json.loads(bridge_in.bulkTransferIn(handle_in, 1, transfer_size))
+        assert result["success"] is True, (i, result)
+        decoded = base64_mod.b64decode(result["data"])
+        assert decoded == dev_in.read_stream, f"{i}回目でデータが破損"
+        assert len(bridge_in._busy_handles) == 0, f"{i}回目の後もbusy_handlesが残っている: {bridge_in._busy_handles}"
+        assert len(bridge_in._open_devices) == 1, f"{i}回目の後にopen_devicesの数が変わった"
+    print("test_sustained_large_transfers_do_not_leak_state_or_corrupt_data (IN x30): OK")
+
+    # --- 2. 連続OUT転送 ---
+    ep_out = FakeEndpoint(0x02, 0x02)
+    intf_out = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_out])
+    dev_out = FakeDevice(0x2341, 0x8037, [FakeConfiguration(1, [intf_out])])
+    bridge_out = make_bridge([dev_out])
+    bridge_out._is_granted = lambda *a, **kw: True
+    handle_out = json.loads(bridge_out.openDevice(0x2341, 0x8037))["handle"]
+    assert json.loads(bridge_out.claimInterface(handle_out, 0))["success"] is True
+
+    for i in range(30):
+        payload = bytes((i * 53 + j) % 256 for j in range(transfer_size))
+        b64_payload = base64_mod.b64encode(payload).decode("ascii")
+        result = json.loads(bridge_out.bulkTransferOut(handle_out, 2, b64_payload))
+        assert result["success"] is True, (i, result)
+        assert result["bytesWritten"] == transfer_size, (i, result)
+        sent = b"".join(c["data"] for c in dev_out.write_calls[-((transfer_size // BULK_TRANSFER_CHUNK_SIZE) + 1):])
+        assert sent.endswith(payload) or sent == payload, f"{i}回目で送信データが破損"
+        assert len(bridge_out._busy_handles) == 0, f"{i}回目の後もbusy_handlesが残っている"
+        assert len(bridge_out._open_devices) == 1
+    print("test_sustained_large_transfers_do_not_leak_state_or_corrupt_data (OUT x30): OK")
+
+    # --- 3. IN/OUT交互(ADBの要求-応答パターンに近い形) ---
+    ep_in2 = FakeEndpoint(0x83, 0x02)
+    ep_out2 = FakeEndpoint(0x04, 0x02)
+    intf2 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in2, ep_out2])
+    dev2 = FakeDevice(0x18D1, 0x4EE2, [FakeConfiguration(1, [intf2])])
+    small_size = 4096
+    bridge2 = make_bridge([dev2])
+    bridge2._is_granted = lambda *a, **kw: True
+    handle2 = json.loads(bridge2.openDevice(0x18D1, 0x4EE2))["handle"]
+    assert json.loads(bridge2.claimInterface(handle2, 0))["success"] is True
+
+    for i in range(50):
+        req = bytes((i + j) % 256 for j in range(small_size))
+        out_result = json.loads(bridge2.bulkTransferOut(handle2, 4, base64_mod.b64encode(req).decode("ascii")))
+        assert out_result["success"] is True, (i, out_result)
+
+        dev2.read_stream = bytes((i * 2 + j) % 256 for j in range(small_size))
+        dev2._read_stream_pos = 0
+        in_result = json.loads(bridge2.bulkTransferIn(handle2, 3, small_size))
+        assert in_result["success"] is True, (i, in_result)
+        assert base64_mod.b64decode(in_result["data"]) == dev2.read_stream, f"往復{i}回目で受信データが破損"
+        assert len(bridge2._busy_handles) == 0
+        assert len(bridge2._open_devices) == 1
+    print("test_sustained_large_transfers_do_not_leak_state_or_corrupt_data (IN/OUT x50 alternating): OK")
 
 
 if __name__ == "__main__":
@@ -1432,4 +1646,5 @@ if __name__ == "__main__":
     test_frame_tracker_wired_isolates_handles_between_different_frame_origins()
     test_requestDeviceChooser_reentrancy_guard(mp)
     test_requestDeviceChooser_is_registered_as_qt_slot()
+    test_sustained_large_transfers_do_not_leak_state_or_corrupt_data()
     print("ALL BRIDGE TESTS PASSED")
