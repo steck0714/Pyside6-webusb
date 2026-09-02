@@ -29,6 +29,8 @@ import time
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
 
+from ._version import __version__
+
 # 🦀 大容量転送(WebADB等)向けのオプショナルなRustアクセラレーション。
 # `native/pyside6_webusb_accel/`(maturinでビルドするPyO3拡張)がビルド済みで
 # importできればそれを使い、そうでなければ標準ライブラリのbase64へ
@@ -66,13 +68,20 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj, separators=(",", ":"))
 
 
-def _format_transfer_success_json(status: str, data) -> str:
+def _format_transfer_success_json(status: str, data, warning=None) -> str:
     """{"success":true,"status":<status>,"data":<base64(data)>} 形式の
     レスポンスJSONを組み立てる。🚚 データ転送最適化(v0.0.4b1): Rustが使える
     場合は bytes連結→base64エンコード→json.dumps という3段階すべてを
     Rust側の1回のバッファ構築にまとめたformat_transfer_in_success_json()を
     使い、大容量ペイロードで発生する中間Pythonオブジェクト(base64文字列・
     JSON文字列)のコピーを1回分減らす。
+
+    warning(v0.0.4b2): 指定した場合、レスポンスへ"warning"フィールドとして
+    含める(chrome_transfer_limit_warning()等、DevTools consoleへ表示したい
+    但し書き用)。warningが要る呼び出しはそもそも巨大転送(32MiB超)という
+    レアケースに限られるため、その場合だけRust高速パスを使わずPure Python側
+    (JSON構築の手間が1回増えるだけで、転送そのものの重さに比べれば無視できる)
+    に倒して実装をシンプルに保つ。
 
     ⚠️ status引数は必ず"ok"/"stall"/"babble"のような、こちら側で完全に
     把握している固定文字列リテラルのみを渡すこと。Rustパス
@@ -81,12 +90,16 @@ def _format_transfer_success_json(status: str, data) -> str:
     または(理論上は)JSONインジェクションを生みうる。エラーメッセージ等の
     自由テキストを含むレスポンスには、これまでどおり_json_dumps()を直接
     使うこと。"""
-    if HAVE_RUST_ACCEL:
+    if warning is None and HAVE_RUST_ACCEL:
         return _rust_accel.format_transfer_in_success_json(status, bytes(data))
-    return _json_dumps({"success": True, "status": status, "data": _b64encode(data)})
+    obj = {"success": True, "status": status, "data": _b64encode(data)}
+    if warning is not None:
+        obj["warning"] = warning
+    return _json_dumps(obj)
 
 
 from .errors import (
+    data_error,
     index_size_error,
     invalid_access_error,
     invalid_state_error,
@@ -97,10 +110,13 @@ from .frame_origin import url_to_origin
 from .hardening import (
     BULK_TRANSFER_CHUNK_SIZE,
     BULK_TRANSFER_MAX_LENGTH,
+    CHROME_USB_TRANSFER_LENGTH_LIMIT,
     CONTROL_TRANSFER_MAX_LENGTH,
+    HOST_SAFETY_MAX_TRANSFER_LENGTH,
     ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH,
     UsbHotplugWatcher,
     build_device_descriptor,
+    chrome_transfer_limit_warning,
     device_is_fully_blocked,
     device_matches_any_usb_filter,
     interface_class_for,
@@ -452,11 +468,27 @@ class WebUSBBridge(QObject):
 
     @Slot(result=str)
     def isAvailable(self):
-        """pyusb / libusb が実際に使える状態か確認する"""
+        """pyusb / libusb が実際に使える状態か確認する。
+        🔧 v0.0.4b2: F12(DevTools)デバッグ用の静的メタ情報も併せて返すよう拡張した。
+        バージョン・Rustアクセラレーションの有無・転送サイズ上限値といった、
+        オリジンやデバイスに一切紐付かない静的情報のみ(=どのページから見ても
+        同じ内容であり、他オリジンの情報を一切開示しない)。既知デバイス一覧や
+        許可済みオリジンのような、オリジン横断の機微情報は絶対にここに含めない
+        こと(listKnownDevices等が@Slotを外された理由と同じ原則、このファイル内
+        list_granted_origins直前のコメント参照)。"""
         try:
             usb_core, _usb_util = self._pyusb()
             usb_core.find()  # バックエンド疎通確認（デバイスの有無は問わない）
-            return _json_dumps({"available": True})
+            return _json_dumps({
+                "available": True,
+                "bridgeVersion": __version__,
+                "rustAccelerated": HAVE_RUST_ACCEL,
+                "transferLimits": {
+                    "chromeCompatibleWarnThreshold": CHROME_USB_TRANSFER_LENGTH_LIMIT,
+                    "hostSafetyHardLimit": HOST_SAFETY_MAX_TRANSFER_LENGTH,
+                    "controlTransferMaxLength": CONTROL_TRANSFER_MAX_LENGTH,
+                },
+            })
         except Exception as e:
             return _json_dumps({"available": False, "error": safe_error_str(e)})
 
@@ -1141,14 +1173,22 @@ class WebUSBBridge(QObject):
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
                 return _json_dumps({"success": False, "error": "Invalid device handle"})
-            if length < 0 or length > BULK_TRANSFER_MAX_LENGTH:
+            # 🔓 v0.0.4b2: 実Chromeの32MiB上限(CHROME_USB_TRANSFER_LENGTH_LIMIT)は
+            # ここでは拒否理由にしない(方針: Chromeの代替品ではなく独自拡張を持つ
+            # 実装として、実転送は続行しDevTools consoleへ警告するだけに留める)。
+            # 実際に拒否するのは、この実装自身のホストプロセス保護のための
+            # はるかに大きいHOST_SAFETY_MAX_TRANSFER_LENGTHを超えた場合のみ。
+            if length < 0 or length > HOST_SAFETY_MAX_TRANSFER_LENGTH:
                 return _json_dumps({
                     "success": False,
-                    "error": index_size_error(
-                        f"length {length} is out of range "
-                        f"(must be between 0 and {BULK_TRANSFER_MAX_LENGTH})"
+                    "error": data_error(
+                        f"The data buffer exceeded supported maximum size of "
+                        f"{HOST_SAFETY_MAX_TRANSFER_LENGTH} bytes"
                     ),
                 })
+            transfer_warning = (
+                chrome_transfer_limit_warning(length) if length > CHROME_USB_TRANSFER_LENGTH_LIMIT else None
+            )
             validation_error, _owner = self._endpoint_available_or_error(
                 handle_id, dev, True, endpoint, required_type=("bulk", "interrupt")
             )
@@ -1171,7 +1211,7 @@ class WebUSBBridge(QObject):
                 raise
             finally:
                 self._busy_handles.discard(handle_id)
-            return _format_transfer_success_json("ok", data)
+            return _format_transfer_success_json("ok", data, warning=transfer_warning)
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 
@@ -1381,7 +1421,21 @@ class WebUSBBridge(QObject):
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 
-    @Slot(result=str)
+    # 🛡️ セキュリティ修正(v0.0.4b2): 以下3メソッドは元々@Slotが付いており、
+    # QWebChannel経由でJS/Webページから直接呼び出し可能になっていた。しかし
+    # install()はポリフィルJSをMainWorld(=表示中ページ自身のJSと同じ実行
+    # コンテキスト)へ注入するため(polyfill.py内setWorldId呼び出し参照)、
+    # qt.webChannelTransportはページJSからも到達可能であり、ページが独自に
+    # QWebChannelへ接続してchannel.objects.pyUsbBridgeへ直接触れることを妨げる
+    # 手段が無い。つまり@Slotが付いている限り、任意のWebページがこれらを直接
+    # 呼び出せてしまっていた——「既知デバイス一覧の閲覧・全削除を表示中の
+    # Webページへ公開すべきではない」というのは、すぐ下のlist_granted_origins
+    # 等がまさに同じファイル内で明記している原則そのものであり、この3つだけが
+    # (おそらく、より慎重なオリジン単位の許可管理アーキテクチャが整備される前の
+    # 初期実装のまま)その原則に反していた。@Slotを外し、list_granted_origins
+    # 等と同じ「ホストアプリ自身の信頼されたPythonコード(設定画面等)からのみ
+    # 呼び出せる」扱いへ揃えた。polyfill.py側のJSはこれら3メソッドを一切
+    # 呼んでおらず(grep済み)、この変更で失われる機能は無い。
     def listKnownDevices(self):
         """設定内に保存済みの既知USBデバイス一覧を返す（設定画面のUSB管理パネル用）"""
         try:
@@ -1391,7 +1445,6 @@ class WebUSBBridge(QObject):
         except Exception as e:
             return _json_dumps({"devices": [], "error": safe_error_str(e)})
 
-    @Slot(int, int, result=str)
     def forgetKnownDevice(self, vendor_id, product_id):
         """既知デバイス一覧から特定の1台を削除する"""
         try:
@@ -1403,7 +1456,6 @@ class WebUSBBridge(QObject):
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 
-    @Slot(result=str)
     def forgetAllKnownDevices(self):
         """既知デバイス一覧を全削除する"""
         try:
@@ -1456,7 +1508,33 @@ class WebUSBBridge(QObject):
         「パケットごとに異なる長さ」を表現する手段が無い。このため、渡された
         packetLengthsが全て同じ長さの場合のみ対応し、そうでない場合は
         NotSupportedErrorを返す(誤った長さで黙って動くよりはるかに安全)。
-        妥当なら (packet_lengths, None)、そうでなければ (None, エラーレスポンス文字列)。"""
+        妥当なら (packet_lengths, None)、そうでなければ (None, エラーレスポンス文字列)。
+
+        🔬 打開策の調査(v0.0.4b2): 可変長パケットへの対応をRust経由のlibusb直接
+        バインディング(rusb/libusb1-sys等)で実現できないか検討した。libusbの
+        C API自体は`libusb_fill_iso_transfer`でパケットごとに異なる長さを設定
+        できる(`iso_packet_desc[i].length`)ため、理論上は可能。ただし
+        実装するには次の課題があり、今回は見送った:
+          1. libusbの等時転送は非同期API(submit + イベントループでの
+             コールバック待ち)のみで、同期APIが存在しない。「同期的に完了を
+             待つ」薄いラッパーを書くこと自体は可能だが、
+          2. pyusbが既に開いている同じデバイス・同じインターフェースに対して、
+             Rust側から別途libusbハンドルを取って同時に触るのは、多くの
+             プラットフォームで「同一インターフェースの二重claim」に相当し
+             安全に共存できない。回避するにはpyusbが内部で保持する生の
+             `libusb_device_handle*`をRustへ渡す必要があるが、これは
+             pyusbの非公開の内部実装(`_ctx.handle.handle`等)に依存する
+             脆弱な方法であり、かつ生ポインタを言語間で共有するunsafeな
+             FFIになる。
+          3. 実USBハードウェアがこの環境に存在せず、上記のような低レベル
+             FFIコードを実機で検証する手段が無い。誤って実装した場合、
+             単なる論理バグではなくクラッシュや、デバイスへ意図しない
+             バイト列(パディング等)を送りつけて実機を誤動作させる
+             リスクがある——検証不能な状態でこれを組み込むのは、明確な
+             NotSupportedErrorを返す現状より悪い結果になりかねないと判断した。
+        そのため、この制約は解消できていない(既知の制約として残す)。将来的に
+        実機での検証手段が確保できれば、上記1-2を踏まえた設計で再検討する
+        価値はある。"""
         try:
             packet_lengths = json.loads(packet_lengths_json) if packet_lengths_json else []
         except Exception:
@@ -1503,14 +1581,21 @@ class WebUSBBridge(QObject):
                 return error
             packet_length = packet_lengths[0]
             total_length = packet_length * len(packet_lengths)
-            if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
+            # 🔓 v0.0.4b2: bulkTransferInと同じ方針転換。CHROME_USB_TRANSFER_LENGTH_LIMIT
+            # (実Chromeの32MiB上限)は拒否理由にせず警告に留め、実際に拒否するのは
+            # この実装自身のHOST_SAFETY_MAX_TRANSFER_LENGTHを超えた場合のみ。
+            if total_length > HOST_SAFETY_MAX_TRANSFER_LENGTH:
                 return _json_dumps({
                     "success": False,
-                    "error": index_size_error(
-                        f"total packetLengths {total_length} exceeds the maximum of "
-                        f"{ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH} bytes"
+                    "error": data_error(
+                        f"The data buffer exceeded supported maximum size of "
+                        f"{HOST_SAFETY_MAX_TRANSFER_LENGTH} bytes"
                     ),
                 })
+            transfer_warning = (
+                chrome_transfer_limit_warning(total_length)
+                if total_length > CHROME_USB_TRANSFER_LENGTH_LIMIT else None
+            )
 
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1560,7 +1645,10 @@ class WebUSBBridge(QObject):
                 chunk = received[offset:offset + packet_length]
                 offset += packet_length
                 packets.append({"status": "ok", "data": _b64encode(chunk)})
-            return _json_dumps({"success": True, "packets": packets})
+            response = {"success": True, "packets": packets}
+            if transfer_warning is not None:
+                response["warning"] = transfer_warning
+            return _json_dumps(response)
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 
@@ -1575,13 +1663,33 @@ class WebUSBBridge(QObject):
                 return error
             packet_length = packet_lengths[0]
             total_length = packet_length * len(packet_lengths)
-            if total_length > ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH:
+            # 🔓 v0.0.4b2: isochronousTransferInと同じ方針転換(下記参照)。
+            if total_length > HOST_SAFETY_MAX_TRANSFER_LENGTH:
                 return _json_dumps({
                     "success": False,
-                    "error": index_size_error(
-                        f"total packetLengths {total_length} exceeds the maximum of "
-                        f"{ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH} bytes"
+                    "error": data_error(
+                        f"The data buffer exceeded supported maximum size of "
+                        f"{HOST_SAFETY_MAX_TRANSFER_LENGTH} bytes"
                     ),
+                })
+            transfer_warning = (
+                chrome_transfer_limit_warning(total_length)
+                if total_length > CHROME_USB_TRANSFER_LENGTH_LIMIT else None
+            )
+
+            data = _b64decode(data_b64)
+            if len(data) != total_length:
+                # 🛡️ バグ修正(v0.0.4b2, 実Blinkソース確認済み): dataの長さが
+                # packetLengths合計と一致しない場合、実Chromeは
+                # "The data buffer size must match the total packet length."
+                # というDataErrorで拒否している(kBufferSizeMismatch)。旧実装は
+                # この検証が丸ごと抜けており、data長がtotal_lengthと食い違って
+                # いても(短すぎ/長すぎのいずれでも)そのままbackend.iso_write()へ
+                # 渡してしまっていた——意図しないバイト列を送出しうる、実害の
+                # あるバリデーション漏れだった。
+                return _json_dumps({
+                    "success": False,
+                    "error": data_error("The data buffer size must match the total packet length."),
                 })
 
             dev = self._get_open_device(handle_id, frame_token)
@@ -1599,7 +1707,6 @@ class WebUSBBridge(QObject):
             backend, dev_handle = iso
 
             import array
-            data = _b64decode(data_b64)
             buff = array.array("B", data)
             # 🛡️ バグ修正(v0.0.4): isochronousTransferInと同じ理由で、第3引数には
             # エンドポイント番号ではなくインターフェース番号(owner_number)を渡す。
@@ -1620,7 +1727,10 @@ class WebUSBBridge(QObject):
                 written = min(packet_length, remaining)
                 remaining -= written
                 packets.append({"status": "ok", "bytesWritten": written})
-            return _json_dumps({"success": True, "packets": packets})
+            response = {"success": True, "packets": packets}
+            if transfer_warning is not None:
+                response["warning"] = transfer_warning
+            return _json_dumps(response)
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 

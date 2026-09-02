@@ -222,7 +222,22 @@ WEBUSB_POLYFILL_JS = r"""
     //    "XxxError:"を付けて返す取り決めなので、ここではそのプレフィックスだけを見て
     //    DOMExceptionの種別を仕様どおりに振り分ける。それ以外の失敗はメソッドごとの
     //    デフォルト(通常はNetworkError)のままにする。
-    var KNOWN_ERROR_PREFIXES = ['SecurityError:', 'InvalidStateError:'];
+    // 🛡️ バグ修正(v0.0.4b2, 実Chrome/Blinkソース精査中に発覚): このリストは
+    //    元々'SecurityError:'/'InvalidStateError:'の2つしか無く、Python側
+    //    (errors.py)が実際に生成しうる 'NotFoundError:' / 'InvalidAccessError:' /
+    //    'IndexSizeError:' / 'DataError:' が一切ここで振り分けられていなかった。
+    //    該当した場合、DOMExceptionの.nameが(呼び出し元がdefaultErrorNameを
+    //    明示していない限り)本来と違う既定値(通常'NetworkError')になり、
+    //    かつ.messageの先頭に"IndexSizeError: "のような接頭辞がそのまま
+    //    残ってしまう(=ページ側が.nameで正しく分岐できず、メッセージ文面も
+    //    おかしい)という実害のあるバグだった。errors.py側で定義している
+    //    プレフィックスを漏れなくここに列挙するのが正しい対処であり、
+    //    個々の呼び出し箇所でdefaultErrorNameを都度指定する方式は今回のように
+    //    漏れが生まれやすいため採らない。
+    var KNOWN_ERROR_PREFIXES = [
+        'SecurityError:', 'InvalidStateError:', 'NotFoundError:',
+        'InvalidAccessError:', 'IndexSizeError:', 'DataError:',
+    ];
     function throwFromResult(res, defaultMessage, defaultErrorName) {
         var msg = (res && res.error) || defaultMessage;
         var name = defaultErrorName || 'NetworkError';
@@ -384,6 +399,12 @@ WEBUSB_POLYFILL_JS = r"""
             // 🛡️ 実仕様(USBTransferStatus): STALLはrejectではなくstatus:'stall'を
             //    伴う成功resolveとして返る。Python側がstall検出時はres.statusに
             //    'stall'を入れてくる(それ以外はres.status==='ok')。
+            // 🔓 v0.0.4b2: res.warningがあれば(=実Chromeの32MiB上限を超えた等)
+            //    DevTools consoleへ警告として転送する。実Chromeを騙るのではなく、
+            //    「実Chromeならここでエラーになるが、これはpyside6-webusbなので
+            //    続行している」という相違を透明に説明するためのもの
+            //    (chrome_transfer_limit_warning()、hardening.py参照)。
+            if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
             var bytes = base64ToUint8(res.data || '');
             return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
         });
@@ -436,6 +457,7 @@ WEBUSB_POLYFILL_JS = r"""
         return callBridge('isochronousTransferIn', this._handle, endpointNumber, JSON.stringify(packetLengths), _frameToken())
             .then(function(res) {
                 if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
+                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
                 var totalLength = 0;
                 var packetBytes = (res.packets || []).map(function(p) {
                     var b = base64ToUint8(p.data || '');
@@ -468,6 +490,7 @@ WEBUSB_POLYFILL_JS = r"""
         return callBridge('isochronousTransferOut', this._handle, endpointNumber, b64, JSON.stringify(packetLengths), _frameToken())
             .then(function(res) {
                 if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
+                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
                 return { packets: res.packets || [] };
             });
     };
@@ -582,6 +605,76 @@ WEBUSB_POLYFILL_JS = r"""
         },
         removeEventListener: function(type, fn) {
             if (_listeners[type]) _listeners[type] = _listeners[type].filter(function(f) { return f !== fn; });
+        },
+    };
+
+    // 🔧 v0.0.4b2: F12(DevTools Console)向けのデバッグ用ネームスペース。
+    // ページを開発中にnavigator.usbの状態を手軽に確認できるユーティリティ集。
+    // 🛡️ 安全上の設計方針: ここで公開する情報は「オリジンに紐付かない静的情報
+    // (バージョン・Rust高速化の有無・転送上限値)」と「呼び出し元オリジン自身が
+    // 既にnavigator.usb.getDevices()経由で見えている情報を見やすく整形しただけの
+    // もの」に限定している。他オリジンの許可済みデバイス一覧のような機微情報は
+    // 絶対に含めない——install()はこのポリフィル自体をMainWorld(=ページ自身の
+    // JSと同じ実行コンテキスト)へ注入するため、ここに書いたものは事実上どの
+    // Webページからも(DevTools越しの人間だけでなく、そのページ自身のスクリプト
+    // からも)見える。listKnownDevices等の@Slotを外した理由(bridge.py参照)と
+    // 全く同じ原則がここにも適用される。
+    window.__pysideWebUSB = {
+        // 呼び出し元オリジンが既に許可済みのデバイス一覧を、DevTools上で
+        // console.table()を使って見やすく表示するショートカット。中身は
+        // navigator.usb.getDevices()と完全に同じデータ(=追加の情報開示は無い)。
+        listGrantedDevices: function() {
+            return navigator.usb.getDevices().then(function(devices) {
+                var rows = devices.map(function(d) {
+                    return {
+                        vendorId: '0x' + d.vendorId.toString(16),
+                        productId: '0x' + d.productId.toString(16),
+                        productName: d.productName,
+                        manufacturerName: d.manufacturerName,
+                        serialNumber: d.serialNumber,
+                        opened: d.opened,
+                    };
+                });
+                if (typeof console !== 'undefined' && console.table) console.table(rows);
+                return rows;
+            });
+        },
+
+        // 🆕 独自拡張(実Chromeのnavigator.usbには相当機能が無い): このブリッジ
+        // 自体の状態(バージョン・Rustアクセラレーションが実際に効いているか・
+        // 転送サイズの上限方針)。navigator.usb自体からは通常知りようがない
+        // 情報なので、getDevices()の整形と違い、これは純粋にこの実装が
+        // 追加で公開している情報。
+        bridgeInfo: function() {
+            return callBridge('isAvailable').then(function(res) {
+                if (typeof console !== 'undefined' && console.log) {
+                    console.log('[pyside6-webusb] bridge info:', res);
+                }
+                return res;
+            });
+        },
+
+        // 🆕 独自拡張: 実Chromeの32MiB上限(kUsbTransferLengthLimit)をこの
+        // 実装がどう扱っているか(拒否ではなく警告に留める方針、
+        // hardening.pyのCHROME_USB_TRANSFER_LENGTH_LIMIT/HOST_SAFETY_MAX_
+        // TRANSFER_LENGTH参照)をDevTools上で説明する。実際に上限を超えた
+        // 転送が起きた際は、この説明を読まなくてもtransferIn/Out自体が
+        // console.warn()でその都度知らせる(res.warning、上記callBridge経由の
+        // transferIn実装を参照)。
+        explainTransferLimits: function() {
+            return callBridge('isAvailable').then(function(res) {
+                var limits = res.transferLimits || {};
+                var msg = '[pyside6-webusb] Transfer size policy: transfers up to ' +
+                    limits.hostSafetyHardLimit + ' bytes are allowed here. Real Chrome ' +
+                    'would reject anything over ' + limits.chromeCompatibleWarnThreshold +
+                    ' bytes with DataError -- this implementation instead logs a ' +
+                    'console.warn() on that specific transfer and lets it proceed, since ' +
+                    'it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
+                    'implementation with its own, more permissive extensions. ' +
+                    'See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
+                if (typeof console !== 'undefined' && console.log) console.log(msg);
+                return limits;
+            });
         },
     };
 })();

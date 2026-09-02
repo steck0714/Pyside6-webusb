@@ -632,16 +632,69 @@ def safe_error_str(exc, max_len: int = 500) -> str:
 # controlTransferIn()のlengthは仕様上 WebIDL の unsigned short (0-65535)。
 CONTROL_TRANSFER_MAX_LENGTH = 0xFFFF
 
-# transferIn()(=bulkTransferIn)のlengthは仕様上unsigned long(最大約42億)
-# だが、実在するUSBデバイスがそれほど巨大な単発readを必要とすることは無い。
-# WebADBのような正当な大容量転送用途(1コールあたり数百KB〜数MB程度)を
-# 十分上回りつつ、暴走を防げる実務上の上限として64MiBを設ける。
-BULK_TRANSFER_MAX_LENGTH = 64 * 1024 * 1024
+# 🛡️ v0.0.4b2: 実Chrome(Blink)のソース(third_party/blink/renderer/modules/
+# webusb/usb_device.cc)を実際に取得して確認したところ、この実装が独自に
+# 定めていた上限(旧: bulk=64MiB, isochronous合計=16MiB、いずれも根拠のない
+# 独自の見積もり)とは別に、Blink自身が"kUsbTransferLengthLimit"という
+# 実在の定数を持っており、値は32MiB(32 * 1024 * 1024)、bulk/isochronousの
+# 両方に同じ値が適用されていた(kWebUSBTransferSizeLimitというフィーチャ
+# フラグの有効時。無効な場合はBlink側では上限なし=Mojo IPCメッセージ長等の
+# より上位の制約に委ねられる形になる)。
+#
+# 🔓 方針転換(v0.0.4b2): 当初はこの32MiBを本実装でも「そのまま拒否の閾値」
+# として採用していたが、このプロジェクトは意図的に「実Chromeの完全な代替品」
+# ではなく「WebUSBではあるが独自拡張も持つ実装」として作られている方針の
+# ため、実Chrome由来のこの制限を「拒否」ではなく「参考値」として扱うことにした:
+#   - 転送が32MiBを超えても実際には拒否せず処理を続行する(host側の生存を
+#     脅かさない範囲=HOST_SAFETY_MAX_TRANSFER_LENGTH以下である限り)。
+#   - ただし黙って通すのではなく、実Chromeなら拒否していたはずだという事実を
+#     DevTools consoleへ警告として明示する(chrome_transfer_limit_warning()。
+#     挙動の相違を隠さない、という透明性を保つ。実Chromeのエラーを騙る
+#     のではなく、「これは実Chromeではなくpyside6-webusbだから通っている」
+#     ことを明記する)。
+CHROME_USB_TRANSFER_LENGTH_LIMIT = 32 * 1024 * 1024
 
-# isochronousTransferIn()のpacketLengths合計についても同じ理由で上限を
-# 設ける(個々のパケットは通常1〜数KB程度だが、パケット数が多い呼び出しを
-# 積み上げられた場合の保険)。
-ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH = 16 * 1024 * 1024
+# 上記とは完全に独立した、この実装自身のためのハード上限。Chrome互換性とは
+# 無関係の理由(あまりに巨大なlengthを鵜呑みにしてホスト側で即座にその
+# サイズのバッファを確保するのは、それ自体として安全ではない、という
+# この実装自身のプロセス保護方針)で維持する。512MiBはWebADBは元より
+# 通常のWebUSB用途を大きく上回りつつ、暴走(数十GBの確保要求等)は
+# 防げる値として設定した——CHROME_USB_TRANSFER_LENGTH_LIMITとは目的も
+# 値も別物である点に注意。
+HOST_SAFETY_MAX_TRANSFER_LENGTH = 512 * 1024 * 1024
+
+# transferIn()(=bulkTransferIn)のlength上限。実際に拒否されるのは
+# HOST_SAFETY_MAX_TRANSFER_LENGTHを超えたときだけで、
+# CHROME_USB_TRANSFER_LENGTH_LIMITを超えるだけなら警告付きで処理を続行する。
+BULK_TRANSFER_MAX_LENGTH = HOST_SAFETY_MAX_TRANSFER_LENGTH
+
+# isochronousTransferIn()のpacketLengths合計の上限。上と同じ二段階方式。
+# 実Chromeでは同じkUsbTransferLengthLimitがbulkと共通で使われている
+# (isochronousTransferIn/Out双方のC++実装が同じShouldRejectUsbTransferLength()
+# を呼んでいることを確認済み)。
+ISOCHRONOUS_TRANSFER_MAX_TOTAL_LENGTH = HOST_SAFETY_MAX_TRANSFER_LENGTH
+
+
+def chrome_transfer_limit_warning(actual_length: int) -> str:
+    """actual_lengthバイトの転送が実Chromeの32MiB上限(kUsbTransferLengthLimit)を
+    超えている場合に、DevTools consoleへ表示する警告文を組み立てる。
+    実Chromeが投げるDataErrorの実際の文言("The data buffer exceeded supported
+    maximum size of %d bytes"、Blinkソースで確認済み)を引用しつつ、これは
+    実Chromeではなくpyside6-webusbであり、この制限を課していないために処理を
+    続行していることを明記する——実Chromeの挙動を偽装するのではなく、
+    相違点を利用者へ透明に説明することが目的。"""
+    return (
+        f"[pyside6-webusb] This transfer is {actual_length} bytes, which exceeds the "
+        f"{CHROME_USB_TRANSFER_LENGTH_LIMIT}-byte limit real Chrome enforces here — "
+        f"real Chrome would reject this with "
+        f'DataError: "The data buffer exceeded supported maximum size of '
+        f'{CHROME_USB_TRANSFER_LENGTH_LIMIT} bytes" (confirmed by reading Blink\'s own '
+        f"usb_device.cc). This is pyside6-webusb, not Chrome — it does not enforce that "
+        f"limit, so this transfer is proceeding normally rather than failing. "
+        f"(HOST_SAFETY_MAX_TRANSFER_LENGTH={HOST_SAFETY_MAX_TRANSFER_LENGTH} is this "
+        f"implementation's own, much larger, unrelated safety ceiling.)"
+    )
+
 
 # bulkTransferIn/Outを内部的に分割する際の1サブチャンクあたりの上限バイト数。
 # 単一の巨大なpyusb呼び出し(例: 2MBのdev.read()を1回)は、デバイスが

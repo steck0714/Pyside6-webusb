@@ -24,6 +24,7 @@ See README.md for the security model, spec-compliance notes, and a full example 
 from .bridge import WebUSBBridge
 from .chooser_dialog import WebUsbDeviceChooserDialog
 from .polyfill import WEBUSB_POLYFILL_JS, install
+from ._version import __version__
 
 __all__ = [
     "install",
@@ -31,5 +32,3 @@ __all__ = [
     "WebUsbDeviceChooserDialog",
     "WEBUSB_POLYFILL_JS",
 ]
-
-__version__ = "0.0.4b1"

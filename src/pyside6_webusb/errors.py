@@ -51,3 +51,12 @@ def invalid_access_error(message):
 def index_size_error(message):
     """数値が許容範囲外(例: endpoint番号が1-15の範囲外)。"""
     return _prefixed("IndexSizeError", message)
+
+
+def data_error(message):
+    """指定はできる(=見つかる)が、データの中身・サイズがおかしい場合。
+    実Chrome(Blink)のUSBDevice実装(third_party/blink/renderer/modules/webusb/
+    usb_device.cc)を実際に読んで確認: 転送サイズが上限(kUsbTransferLengthLimit)を
+    超えた場合や、isochronousTransferOut()のdataサイズがpacketLengths合計と
+    一致しない場合は、IndexSizeErrorではなくDataErrorが使われている。"""
+    return _prefixed("DataError", message)
