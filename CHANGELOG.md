@@ -2,6 +2,169 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4b2]
+
+A cross-checked-against-real-Chrome-source pass, plus a real security fix, an F12/DevTools
+debug surface, and a deliberate policy change around this implementation's own identity: rather
+than being a drop-in Chrome clone, `pyside6-webusb` is explicitly a WebUSB-*compatible*
+implementation that keeps some of its own, more permissive extensions where they don't
+compromise safety. Every behavioral claim below was checked against Blink's actual source
+(`third_party/blink/renderer/modules/webusb/usb_device.cc`, fetched from the `chromium/chromium`
+GitHub mirror), not the abstract spec text alone or memory.
+
+### Security
+
+- **`listKnownDevices`/`forgetKnownDevice`/`forgetAllKnownDevices` were reachable from any web
+  page, not just the host application.** These three manage data across *all* origins (the full
+  known-device list; `forgetAllKnownDevices` is destructive) and were explicitly meant for a
+  host app's own trusted settings UI — the exact same category of operation that
+  `list_granted_origins`/`revoke_origin_grant`/`revoke_all_for_origin` in the same file already
+  document as "deliberately not `@Slot`, since exposing this to the currently-displayed web page
+  would be wrong." These three just never got the same treatment, seemingly predating that
+  principle being established. Since `install()` injects the polyfill into `MainWorld` — the
+  same JS execution context the page's own scripts run in, which is *required* for
+  `navigator.usb` to be visible to the page at all — anything registered as a `@Slot` on the
+  bridge object is reachable by any web page opening its own `QWebChannel` connection directly,
+  regardless of whether `polyfill.py`'s own JS ever calls it (confirmed `polyfill.py` never did,
+  for any of these three). Removed `@Slot` from all three; they're now plain Python methods,
+  callable only by the host application's own code, matching the established pattern next to
+  them. `tests/test_bridge.py::test_requestDeviceChooser_is_registered_as_qt_slot` now asserts
+  all six management-only methods are absent from the Qt meta-object's slot list — confirmed
+  this actually catches the regression by re-adding `@Slot` and watching the assertion fail with
+  the exact expected message before restoring the fix.
+
+### Fixed
+
+- **`errors.py`'s own error prefixes (`IndexSizeError:`, `InvalidAccessError:`, `NotFoundError:`,
+  and the new `DataError:`) weren't recognized by the JS-side dispatcher**, only
+  `SecurityError:`/`InvalidStateError:` were. `bulkTransferIn`/`Out` have no client-side
+  pre-check at all before calling the bridge, so this was a live, reachable bug: an
+  out-of-range endpoint number (a check that's existed since early versions) produced a
+  `DOMException` with `.name === 'NetworkError'` and the literal text `"IndexSizeError: ..."`
+  still stuck in `.message`, instead of `.name === 'IndexSizeError'` with a clean message.
+  Confirmed by deliberately reverting the fix and watching a new regression test fail with
+  exactly that symptom, then confirming it passes with the fix restored. `KNOWN_ERROR_PREFIXES`
+  now lists every prefix `errors.py` can actually produce, rather than requiring every call site
+  to separately remember to pass a matching `defaultErrorName` (the approach that led to this
+  gap in the first place).
+- **`isochronousTransferOut` never checked that `data`'s length matched the sum of
+  `packetLengths`.** Real Chrome rejects a mismatch with `DataError: "The data buffer size must
+  match the total packet length."` (`kBufferSizeMismatch`, confirmed in Blink source). This
+  implementation had no equivalent check at all — a page could send `data` shorter or longer
+  than its declared `packetLengths` and the mismatched buffer would be passed straight to
+  `backend.iso_write()` as-is. Added the same check, with Chrome's exact message text.
+- Fixed a real structural bug in `tests/test_bridge.py` uncovered while updating these tests:
+  `test_bulk_and_control_transfer_reject_absurdly_large_length`'s `def` line had gone missing
+  (most likely lost in an earlier bulk find-and-replace pass in this project's history), leaving
+  its entire body as unreachable-but-syntactically-valid code silently appended to the *previous*
+  test function. It had never run as its own test — every one of its assertions had been
+  executing (and passing) as an unlabeled tail end of
+  `test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected` instead, which is why this
+  didn't show up as a missing test in any prior test count. Restored as its own function.
+
+### Changed — Chrome-compatibility alignment
+
+- **Both transfer size limits now match Blink's actual `kUsbTransferLengthLimit` (32 MiB)**
+  as a *reference* value, not this project's own previous, ungrounded guesses (bulk was 64 MiB,
+  isochronous was 16 MiB as of `0.0.4a0`/`0.0.4b0` — neither matched what real Chrome actually
+  enforces). Also switched the DOMException type real Chrome uses for this specific rejection
+  from `IndexSizeError` (this project's previous guess) to `DataError` (Blink's actual choice,
+  confirmed from source) — `IndexSizeError` is kept for the genuinely-different "endpoint number
+  out of range" case, which Blink's own `EnsureEndpointAvailable` does use `IndexSizeError` for.
+- **This 32 MiB figure is no longer a hard rejection threshold in this implementation** — see
+  the policy change below.
+
+### Changed — deliberate policy: WebUSB-compatible, not a Chrome clone
+
+This is the most substantive change in this release, so it gets its own section rather than
+being folded into "Fixed" or "Changed" above.
+
+Real Chrome's 32 MiB transfer limit (`kUsbTransferLengthLimit`) is Chrome's own operational
+choice, not a WebUSB spec requirement — nothing in the spec text mandates it. This project is
+built as a WebUSB-*compatible* implementation with room for its own extensions, not a
+byte-for-byte Chrome clone, so as of this release: **a `transferIn`/`transferOut`/
+`isochronousTransferIn`/`isochronousTransferOut` call exceeding 32 MiB is no longer rejected.**
+It proceeds normally, up to a much larger, *unrelated* hard ceiling
+(`HOST_SAFETY_MAX_TRANSFER_LENGTH`, 512 MiB) that exists purely so this implementation's own
+host process can't be forced into an unbounded memory allocation by a pathological request —
+that ceiling has nothing to do with Chrome-matching and is enforced regardless.
+
+This is not silent, and it does not pretend to be Chrome: the response carries a `warning`
+field (`chrome_transfer_limit_warning()`, `hardening.py`) that the polyfill forwards to
+`console.warn()` — visible in DevTools (F12) on the exact transfer that exceeded the limit. The
+message quotes Blink's real rejection text (`"The data buffer exceeded supported maximum size of
+33554432 bytes"`) and then explicitly states that this is pyside6-webusb, not Chrome, and that
+it does not enforce that limit — the point is to be transparent about the divergence, not to
+mimic Chrome's identity or hide that anything unusual happened. `window.__pysideWebUSB.
+explainTransferLimits()` (new, see below) gives the same explanation on demand. Verified: a
+request at exactly 32 MiB carries no warning; one byte over does; both succeed either way
+(`test_bulk_transfer_over_chrome_limit_warns_but_succeeds`, covering both `bulkTransferIn` and
+`isochronousTransferIn`).
+
+### Added
+
+- **`window.__pysideWebUSB`**, an F12/DevTools Console debug namespace, injected alongside
+  `navigator.usb`. Deliberately scoped to information that either (a) doesn't vary by origin at
+  all (bridge version, Rust-acceleration status, transfer size limits) or (b) is exactly what
+  the calling origin already sees via `navigator.usb.getDevices()`, just reformatted for
+  `console.table()` — nothing here discloses anything a page couldn't already learn, and in
+  particular nothing here repeats the mistake fixed in Security above.
+  - `listGrantedDevices()` — the calling origin's already-granted devices, `console.table()`-
+    formatted. Verified to return exactly as many rows as `navigator.usb.getDevices()` — no
+    additional disclosure.
+  - `bridgeInfo()` — version, `rustAccelerated`, and the transfer-limit values, sourced from a
+    new `isAvailable()` response field (`bridgeVersion`/`rustAccelerated`/`transferLimits`) that
+    didn't exist before this release; this information wasn't accessible from JS at all
+    previously.
+  - `explainTransferLimits()` — logs the same reasoning described in the policy section above,
+    on demand rather than only reactively when a specific transfer happens to exceed it.
+  - A single source of truth for the version string was needed for `bridgeInfo()` to read it
+    without a circular import (`bridge.py` importing from `__init__.py`, which itself imports
+    `bridge.py`) — added `_version.py`, now what both `__init__.py` and `bridge.py` read
+    `__version__` from.
+- Investigated (but did not implement) using Rust to work around this implementation's existing
+  isochronous limitation (uniform packet lengths only — `_validate_packet_lengths` in
+  `bridge.py`, unchanged since `0.0.2b0`). `libusb`'s C API does support per-packet lengths via
+  its async submission API (`libusb_fill_iso_transfer`), so a Rust binding (`rusb`/
+  `libusb1-sys`) could in principle expose it. Didn't proceed, for reasons recorded in
+  `_validate_packet_lengths`'s own docstring rather than silently dropped: libusb's isochronous
+  support is async-only (no synchronous "wait for completion" variant to wrap), and the real
+  blocker — `pyusb` already holds this device open via its own `libusb` context/handle, and a
+  second, independent handle from Rust can't safely coexist claiming the same interface on most
+  platforms. Working around that would mean extracting `pyusb`'s internal raw
+  `libusb_device_handle*` (an undocumented implementation detail liable to break on any `pyusb`
+  update) and sharing it across the FFI boundary as a raw, Rust-ownership-untracked pointer —
+  with no real USB hardware available anywhere to validate such code, the risk profile (a bug
+  here isn't a logic error, it's a potential crash or, worse, sending a real device incorrect
+  padded data because the surrounding software couldn't tell that "make it work" this way would
+  give the device different bytes than intended) outweighed shipping it unverified. Left as a
+  documented, deliberately-not-attempted path rather than a rushed half-solution.
+- `tests/test_bridge.py::test_sustained_large_transfers_do_not_leak_state_or_corrupt_data`: 30
+  consecutive ~300 KB `transferIn` calls (each exceeding `BULK_TRANSFER_CHUNK_SIZE`, so each
+  exercises the `0.0.4b0` chunking path), 30 consecutive `transferOut` calls, then 50 alternating
+  IN/OUT round trips resembling an ADB request/response pattern — each iteration uses distinct
+  data (not the same buffer reused) so corruption on any single iteration, not just a systematic
+  one, would be caught, and `_busy_handles`/`_open_devices` size is checked after every single
+  iteration, not just at the end, to catch a leak that only shows up gradually.
+
+### Project metadata
+
+- Version bumped to `0.0.4b2`.
+- Confirmed via the `chromium/chromium` GitHub mirror that `raw.githubusercontent.com` serves
+  real, current Blink source (`usb_device.cc`, `usb.cc`) — used throughout this entry's fixes.
+- **Fixed `pyproject.toml`'s `Homepage`/`Issues` URLs**, which pointed at
+  `steck0714/Mock-webusb` — verified via `git ls-remote` that this and
+  `steck0714/Pyside6-webusb` are two genuinely different repositories (different `HEAD` commits),
+  not a rename/case variation of the same one. Fetching `Mock-webusb`'s actual `README.ja.md`
+  confirmed it's the umbrella project's landing repo (multi-language READMEs, no `pyproject.toml`
+  at all) linking out to this package's real repo (`Pyside6-webusb`) and its Firefox counterpart
+  (`fox-webusb`) — not this package's own code repository. Now points `Homepage`/`Issues` at
+  `Pyside6-webusb` (confirmed live, and already tracking this project — its `pyproject.toml`
+  showed `version = "0.0.4b1"` at the time of this check) and added a separate
+  `"Mock-APIs (parent project)"` URL entry for `Mock-webusb`. Mock-webusb's real README text is
+  also what the "Why this exists" section's Chrome-compatible-not-identical framing is now quoted
+  from directly, rather than paraphrased from a secondhand description.
+
 ## [0.0.4b1]
 
 A cross-language quality/audit pass rather than new user-facing features: ran each language's
