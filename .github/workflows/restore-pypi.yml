@@ -1,63 +1,75 @@
 name: Restore old releases to PyPI
 
 on:
-
   workflow_dispatch:
 
 jobs:
-
   publish:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
-
         uses: actions/checkout@v4
 
-      - name: Install Twine
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-        run: python -m pip install --upgrade twine
+      - name: Install Twine
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install twine
 
       - name: Check distributions
-
         run: |
+          python - <<'PY'
+          from pathlib import Path
 
-          echo "Files in dist:"
+          dist = Path("dist")
 
-          find dist -maxdepth 1 -type f -print
+          files = sorted(
+              p for p in dist.iterdir()
+              if p.is_file()
+              and (p.name.endswith(".whl") or p.name.endswith(".tar.gz"))
+          )
 
-          echo
-
-          echo "Distribution files:"
-
-          find dist -maxdepth 1 -type f \
-
-            \( -name '*.whl' -o -name '*.tar.gz' \) -print
-
-          echo
-
-          echo "Count:"
-
-          find dist -maxdepth 1 -type f \
-
-            \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l
+          print(f"Found {len(files)} distributions:")
+          for p in files:
+              print(f" - {p}")
+          PY
 
       - name: Upload old distributions
-
         env:
-
           TWINE_USERNAME: __token__
-
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
 
-          python -m twine upload \
+          files = sorted(
+              str(p) for p in Path("dist").iterdir()
+              if p.is_file()
+              and (p.name.endswith(".whl") or p.name.endswith(".tar.gz"))
+          )
 
-            --skip-existing \
+          if not files:
+              print("No distributions found in dist/")
+              sys.exit(1)
 
-            dist/*.whl \
+          print(f"Uploading {len(files)} distributions...")
 
-            dist/*.tar.gz
+          subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "twine",
+                  "upload",
+                  "--skip-existing",
+                  *files,
+              ],
+              check=True,
+          )
+          PY
