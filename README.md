@@ -4,6 +4,6 @@
 
 ## 🌐 Language
 
-- 🇯🇵 [日本語](README.ja.md)
-- 🇺🇸 [English](README.en.md)
-- 🇨🇳 [简体中文](README.zh.md)
+🇯🇵 [日本語](https://github.com/steck0714/Pyside6-webusb/blob/main/README.ja.md) |
+🇺🇸 [English](https://github.com/steck0714/Pyside6-webusb/blob/main/README.en.md) |
+🇨🇳 [简体中文](https://github.com/steck0714/Pyside6-webusb/blob/main/README.zh.md)
