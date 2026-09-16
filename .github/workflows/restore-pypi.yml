@@ -20,6 +20,30 @@ jobs:
 
         run: python -m pip install --upgrade twine
 
+      - name: Check distributions
+
+        run: |
+
+          echo "Files in dist:"
+
+          find dist -maxdepth 1 -type f -print
+
+          echo
+
+          echo "Distribution files:"
+
+          find dist -maxdepth 1 -type f \
+
+            \( -name '*.whl' -o -name '*.tar.gz' \) -print
+
+          echo
+
+          echo "Count:"
+
+          find dist -maxdepth 1 -type f \
+
+            \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l
+
       - name: Upload old distributions
 
         env:
@@ -30,4 +54,10 @@ jobs:
 
         run: |
 
-          python -m twine upload --skip-existing dist/*
+          python -m twine upload \
+
+            --skip-existing \
+
+            dist/*.whl \
+
+            dist/*.tar.gz
