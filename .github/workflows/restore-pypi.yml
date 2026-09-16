@@ -17,16 +17,79 @@ jobs:
           python-version: "3.12"
 
       - name: Install Twine
-        run: python -m pip install --upgrade twine
-
-      - name: Check distribution
         run: |
-          python -m twine check dist/pyside6_webusb-0.0.0-py3-none-any.whl
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade twine
 
-      - name: Upload test distribution
+      - name: Check distributions
+        run: |
+          python -m twine check dist/*
+
+      - name: Upload distributions
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          python -m twine upload --verbose \
-            dist/pyside6_webusb-0.0.0-py3-none-any.whl
+          set +e
+
+          SUCCESS_FILES=()
+          FAILED_FILES=()
+
+          echo "========================================"
+          echo "Starting PyPI upload"
+          echo "========================================"
+
+          for file in dist/*; do
+            echo
+            echo "========================================"
+            echo "Uploading: $file"
+            echo "========================================"
+
+            python -m twine upload --verbose "$file"
+
+            status=$?
+
+            if [ "$status" -eq 0 ]; then
+              echo "SUCCESS: $file"
+              SUCCESS_FILES+=("$file")
+            else
+              echo "SKIPPED: $file"
+              echo "Exit code: $status"
+              FAILED_FILES+=("$file")
+            fi
+          done
+
+          echo
+          echo "========================================"
+          echo "UPLOAD SUMMARY"
+          echo "========================================"
+
+          echo
+          echo "Successfully uploaded:"
+          if [ "${#SUCCESS_FILES[@]}" -eq 0 ]; then
+            echo "  (none)"
+          else
+            for file in "${SUCCESS_FILES[@]}"; do
+              echo "  ✓ $file"
+            done
+          fi
+
+          echo
+          echo "Skipped / rejected:"
+          if [ "${#FAILED_FILES[@]}" -eq 0 ]; then
+            echo "  (none)"
+          else
+            for file in "${FAILED_FILES[@]}"; do
+              echo "  ✗ $file"
+            done
+          fi
+
+          echo
+          echo "========================================"
+          echo "Finished."
+          echo "Successful: ${#SUCCESS_FILES[@]}"
+          echo "Skipped:    ${#FAILED_FILES[@]}"
+          echo "Total:      $(( ${#SUCCESS_FILES[@]} + ${#FAILED_FILES[@]} ))"
+          echo "========================================"
+
+          exit 0
