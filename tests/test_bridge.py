@@ -26,6 +26,16 @@ from pyside6_webusb.hardening import BULK_TRANSFER_CHUNK_SIZE
 _app = QApplication.instance() or QApplication([])
 
 
+def _request_chooser(bridge, options_json):
+    """bridge.requestDeviceChooser()を呼ぶ既存テストの大半をそのまま動かす
+    ための薄いラッパー。security_audit No.2でgesture_token検証が追加された
+    後も、このファイル自身の関心(フィルタ絞り込み・オリジン伝播・選択後の
+    許可記録・再入防止等)はgesture_token機構そのものではないため、ここで
+    常に有効なトークンを都度発行して渡す(gesture_token機構自体の検証は
+    security_audit/test_direct_channel_bypass.pyが担う)。"""
+    return bridge.requestDeviceChooser(options_json, "", bridge.mintGestureToken())
+
+
 # --- test_hardening.py と同じ形のフェイクpyusbオブジェクト ---
 class FakeEndpoint:
     def __init__(self, address, attributes, max_packet=64):
@@ -293,7 +303,7 @@ def test_filters_narrow_the_candidate_list(monkeypatch):
     bridge = make_bridge([dev_a, dev_b])
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{"vendorId": 0x2341}]})))
+    result = json.loads(_request_chooser(bridge, json.dumps({"filters": [{"vendorId": 0x2341}]})))
     assert result["cancelled"] is False
     assert result["device"]["vendorId"] == 0x2341
     assert len(FakeChooserDialog.last_devices_info) == 1  # dev_bは候補から除外されているはず
@@ -306,7 +316,7 @@ def test_empty_filters_array_matches_nothing(monkeypatch):
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
     # 仕様どおり filters: [] (空配列)は「一致するものなし」
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": []})))
+    result = json.loads(_request_chooser(bridge, json.dumps({"filters": []})))
     assert result["cancelled"] is True
     print("test_empty_filters_array_matches_nothing: OK")
 
@@ -316,7 +326,7 @@ def test_exclusion_filters_remove_a_match(monkeypatch):
     bridge = make_bridge([dev_a])
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({
+    result = json.loads(_request_chooser(bridge, json.dumps({
         "filters": [{}], "exclusionFilters": [{"vendorId": 0x2341}],
     })))
     assert result["cancelled"] is True
@@ -329,7 +339,7 @@ def test_selected_device_gets_rich_descriptor(monkeypatch):
     bridge = make_bridge([dev_a])
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+    result = json.loads(_request_chooser(bridge, json.dumps({"filters": [{}]})))
     assert result["cancelled"] is False
     # チューザー一覧構築時は軽量記述子だが、選ばれた1台はgetDevices()と同じ
     # リッチな記述子(configurations付き)で返るはず
@@ -343,12 +353,12 @@ def test_grant_recorded_only_on_selection(monkeypatch):
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
 
     FakeChooserDialog.SELECT_INDEX = None
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+    result = json.loads(_request_chooser(bridge, json.dumps({"filters": [{}]})))
     assert result["cancelled"] is True
     assert bridge.__test_grants__ == []
 
     FakeChooserDialog.SELECT_INDEX = 0
-    result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+    result = json.loads(_request_chooser(bridge, json.dumps({"filters": [{}]})))
     assert result["cancelled"] is False
     assert bridge.__test_grants__ == [("https://example.test", 0x2341, 0x8036)]
     print("test_grant_recorded_only_on_selection: OK")
@@ -368,7 +378,7 @@ def test_origin_is_passed_to_the_dialog(monkeypatch):
     bridge = make_bridge([dev_a])
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    bridge.requestDeviceChooser(json.dumps({"filters": [{}]}))
+    _request_chooser(bridge, json.dumps({"filters": [{}]}))
     assert FakeChooserDialog.last_origin == "https://example.test"
     print("test_origin_is_passed_to_the_dialog: OK")
 
@@ -423,7 +433,7 @@ def test_requestDeviceChooser_passes_browser_window_to_dialog_as_parent(monkeypa
         bridge = make_bridge([dev_a], browser_window=window)
         monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
         FakeChooserDialog.SELECT_INDEX = 0
-        result = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+        result = json.loads(_request_chooser(bridge, json.dumps({"filters": [{}]})))
         assert result["cancelled"] is False, result
         assert FakeChooserDialog.last_parent is window
     finally:
@@ -436,7 +446,7 @@ def test_refresh_callback_reflects_newly_plugged_device(monkeypatch):
     bridge = make_bridge([dev_a])
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    bridge.requestDeviceChooser(json.dumps({"filters": [{}]}))
+    _request_chooser(bridge, json.dumps({"filters": [{}]}))
     assert len(FakeChooserDialog.last_refresh_callback()) == 1
 
     # ダイアログを開いたまま新しいデバイスが挿された、という状況を模擬する
@@ -472,7 +482,7 @@ def test_full_flow_persists_grant_and_usage_without_mocking_internals(monkeypatc
 
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", FakeChooserDialog)
     FakeChooserDialog.SELECT_INDEX = 0
-    raw = bridge.requestDeviceChooser(json.dumps({"filters": [{}]}))
+    raw = _request_chooser(bridge, json.dumps({"filters": [{}]}))
     result = json.loads(raw)
     assert result["cancelled"] is False
     assert result["device"]["vendorId"] == 0x2341
@@ -1331,7 +1341,7 @@ def test_requestDeviceChooser_reentrancy_guard(monkeypatch):
     同じWebUSBBridgeインスタンスへもう一度requestDeviceChooser()が呼ばれると、
     チューザーダイアログが二重に開いてしまう恐れがある。ここではFakeChooserDialog.exec()
     の中から(="ダイアログが開いている最中"に相当するタイミングで)
-    bridge.requestDeviceChooser()を再帰的に呼び出し、内側の呼び出しが
+    _request_chooser()(=bridge.requestDeviceChooser())を再帰的に呼び出し、内側の呼び出しが
     InvalidStateErrorで即座に弾かれ、外側の(正規の)呼び出しは通常どおり成功し、
     完了後はガードフラグが確実に解除されていることを確認する。"""
     dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [])])
@@ -1340,12 +1350,12 @@ def test_requestDeviceChooser_reentrancy_guard(monkeypatch):
 
     class ReentrantChooserDialog(FakeChooserDialog):
         def exec(self):
-            reentrant_raw["result"] = bridge.requestDeviceChooser(json.dumps({"filters": [{}]}))
+            reentrant_raw["result"] = _request_chooser(bridge, json.dumps({"filters": [{}]}))
             return super().exec()
 
     monkeypatch.setattr("pyside6_webusb.bridge.WebUsbDeviceChooserDialog", ReentrantChooserDialog)
     ReentrantChooserDialog.SELECT_INDEX = 0
-    outer = json.loads(bridge.requestDeviceChooser(json.dumps({"filters": [{}]})))
+    outer = json.loads(_request_chooser(bridge, json.dumps({"filters": [{}]})))
 
     assert "result" in reentrant_raw, "exec()の中からの再入呼び出しが実行されていない"
     inner = json.loads(reentrant_raw["result"])
@@ -1445,7 +1455,8 @@ def test_requestDeviceChooser_is_registered_as_qt_slot():
     """QWebChannel's QMetaObjectPublisher only exposes methods that are registered
     as Qt Slots on staticMetaObject to the JS-side proxy object -- plain Python
     methods are invisible to it. Every test above calls
-    bridge.requestDeviceChooser(...) directly from Python, so they all pass
+    bridge.requestDeviceChooser(...) directly from Python (via the
+    _request_chooser() test helper), so they all pass
     regardless of whether @Slot is present or attached to the right method,
     leaving a blind spot where "every test is green" while the method is
     actually unreachable from JS. (This is exactly what happened in practice:

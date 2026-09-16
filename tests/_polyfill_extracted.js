@@ -1,141 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-polyfill.py
-===========
-navigator.usb のJSポリフィル本体(WEBUSB_POLYFILL_JS)と、QWebEnginePageへの
-装着を1回の呼び出しで済ませる install() を提供する。
 
-    from pyside6_webusb import install
-    install(my_web_engine_page)
-
-だけで、そのページ上のJavaScriptから navigator.usb.getDevices() /
-navigator.usb.requestDevice() などが動くようになる(実機の選択はネイティブの
-Qtダイアログ、実際のUSB通信はpyusb/libusb経由)。
-"""
-
-_QWEBCHANNEL_JS_CACHE = None
-
-
-def _load_qwebchannel_js():
-    """Qt自身が(QtWebChannelモジュールの一部として)同梱しているqwebchannel.jsを
-    実行時に読み込む。Qt公式のQWebChannel standaloneサンプルが示す標準的な取得方法
-    (QFile(":/qtwebchannel/qwebchannel.js"))を使うことで、本パッケージがQt本体の
-    JSファイルを別途同梱・バージョン追従する必要をなくしている
-    (qwebchannel.js自体はQt側でBSD-3-Clauseライセンスとして配布されている)。
-
-    PySide6.QtWebChannel を一度でもimportしていないと、このQtリソースパスは
-    まだ登録されていないことがある。install()はQWebChannelを内部でimportするため、
-    通常このモジュールを直接使わずinstall()経由で呼べば問題にならない。
-    """
-    global _QWEBCHANNEL_JS_CACHE
-    if _QWEBCHANNEL_JS_CACHE is not None:
-        return _QWEBCHANNEL_JS_CACHE
-    from PySide6.QtCore import QFile, QIODevice
-    f = QFile(":/qtwebchannel/qwebchannel.js")
-    opened = f.open(QIODevice.OpenModeFlag.ReadOnly | QIODevice.OpenModeFlag.Text)
-    if not opened:
-        raise RuntimeError(
-            "Could not load qwebchannel.js from Qt's built-in resources "
-            "(:/qtwebchannel/qwebchannel.js). This usually means PySide6.QtWebChannel "
-            "has not been imported yet. install() imports it automatically, so if you "
-            "see this error you are likely calling _load_qwebchannel_js() directly, or "
-            "your Qt installation does not ship the qtwebchannel resource. As a "
-            "workaround, pass qwebchannel_js=<the file's contents> to install() "
-            "explicitly (you can find qwebchannel.js inside your Qt/PySide6 installation)."
-        )
-    data = bytes(f.readAll().data()).decode("utf-8", errors="replace")
-    f.close()
-    _QWEBCHANNEL_JS_CACHE = data
-    return data
-
-
-def install(page, browser_window=None,
-            settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
-            qwebchannel_js=None):
-    """
-    唯一の公開エントリポイント。QWebEnginePage に navigator.usb ポリフィルを装着する。
-
-    page: QWebEnginePage。このページ(と、そのページで開かれる以降のドキュメント)上で
-        navigator.usb が有効になる。
-    browser_window: 任意。`.settings` (QSettingsインスタンス)属性を持つホストアプリの
-        ウィンドウを渡すと、デバイス許可の永続化にそれを使う。省略時は
-        settings_organization/settings_applicationでQSettingsへフォールバックする。
-    settings_organization / settings_application: browser_window省略時に使う
-        QSettingsの組織名・アプリ名(省略時は"pyside6-webusb"/"WebUSBBridge")。
-    qwebchannel_js: 通常は不要(Qtの内蔵リソースから自動取得する)。取得に失敗する
-        環境向けに、qwebchannel.jsの中身を直接渡すための上書き用パラメータ。
-
-    戻り値: 生成した WebUSBBridge インスタンス(追加の配線やデバッグに使える)。
-        QWebChannel自体が使えない環境では例外を送出せず None を返す
-        (WebUSB機能だけが無効になり、アプリ全体は落とさない設計)。
-    """
-    from PySide6.QtWebChannel import QWebChannel
-    from PySide6.QtWebEngineCore import QWebEngineScript
-
-    from .bridge import WebUSBBridge
-    from .frame_origin import FrameOriginTracker
-
-    try:
-        bridge = WebUSBBridge(browser_window=browser_window, parent=page,
-                               settings_organization=settings_organization,
-                               settings_application=settings_application)
-        channel = QWebChannel(page)
-        channel.registerObject("pyUsbBridge", bridge)
-        page.setWebChannel(channel)
-    except Exception:
-        return None  # QWebChannel自体が使えない環境では静かに諦める(アプリ全体は落とさない)
-
-    try:
-        # 🛡️ フレーム単位オリジン特定(frame_origin.FrameOriginTracker、詳細はそちらの
-        #    モジュールdocstring及びCHANGELOG.mdの0.0.2b0/0.0.3/0.0.3a0/0.0.3bを参照)。
-        #    これが無かった0.0.2b0では、setRunsOnSubFrames(False)にしてiframeへの
-        #    公開自体を諦めることで安全側に倒していた。ここで実際に配線することで、
-        #    各フレーム(メインフレーム含む)が個別に発行されたトークンを持ち、
-        #    WebUSBBridge._current_origin(frame_token)がそのトークンからのみ
-        #    オリジンを解決できるようになる(トークンを渡さない/不正なトークンは
-        #    常に「オリジン不明」= 拒否になる。トップレベルページへのフォール
-        #    バックは一切行わない)。
-        tracker = FrameOriginTracker(page)
-        tracker.wire()
-        if tracker.is_functional:
-            bridge._frame_tracker = tracker
-        else:
-            print("[pyside6-webusb] install: navigationRequestedに接続できないため、"
-                  "navigator.usbはメインフレームのみに制限されます(古いPySide6/Qtの可能性があります)")
-            bridge._frame_tracker = None
-    except Exception as e:
-        print(f"[pyside6-webusb] install: FrameOriginTrackerの配線に失敗(navigator.usbはメインフレームのみに制限されます): {e}")
-        bridge._frame_tracker = None
-
-    try:
-        qwc_js = qwebchannel_js if qwebchannel_js is not None else _load_qwebchannel_js()
-    except Exception as e:
-        print(f"[pyside6-webusb] install: qwebchannel.js の読み込みに失敗しました: {e}")
-        return bridge  # ブリッジ自体は生成済みだが、スクリプト注入はできていない
-
-    for name, code in (
-        ("PySide6WebUSBQWebChannelLib", qwc_js),
-        ("PySide6WebUSBPolyfill", WEBUSB_POLYFILL_JS),
-    ):
-        try:
-            script = QWebEngineScript()
-            script.setName(name)
-            script.setSourceCode(code)
-            script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
-            script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-            # 🛡️ FrameOriginTrackerが上で正常に配線できた場合のみTrueにする。
-            #    配線に失敗した(=bridge._frame_trackerがNoneのままの)場合は、
-            #    0.0.2b0の判断を踏襲してFalseのままにする(安全側優先。
-            #    詳しくはWebUSBBridge._current_origin()のdocstring参照)。
-            script.setRunsOnSubFrames(bridge._frame_tracker is not None)
-            page.scripts().insert(script)
-        except Exception as e:
-            print(f"[pyside6-webusb] install: 例外を無視: {e}")
-
-    return bridge
-
-
-WEBUSB_POLYFILL_JS = r"""
 (function() {
     'use strict';
     if (navigator.usb) return;  // 既にネイティブAPIがあれば上書きしない（将来Qtが対応した場合の保険）
@@ -234,13 +97,6 @@ WEBUSB_POLYFILL_JS = r"""
     //    プレフィックスを漏れなくここに列挙するのが正しい対処であり、
     //    個々の呼び出し箇所でdefaultErrorNameを都度指定する方式は今回のように
     //    漏れが生まれやすいため採らない。
-    // 🛡️ security_audit No.2b: Python側(requestDeviceChooser)がfilters/
-    //    exclusionFiltersの構造検証を素のQWebChannel直叩きに対する最終防衛
-    //    として追加したことに伴う対応。実仕様(wicg.github.io/webusb)では、
-    //    無効なUSBDeviceFilterは(下のisValidUsbDeviceFilterによるJS側の
-    //    正規チェックと同様)DOMExceptionではなく組み込みの TypeError に
-    //    なるべきものなので、'TypeError:'プレフィックスだけは他と扱いを分け、
-    //    DOMExceptionではなく本物のTypeErrorとしてthrowする。
     var KNOWN_ERROR_PREFIXES = [
         'SecurityError:', 'InvalidStateError:', 'NotFoundError:',
         'InvalidAccessError:', 'IndexSizeError:', 'DataError:',
@@ -248,9 +104,6 @@ WEBUSB_POLYFILL_JS = r"""
     function throwFromResult(res, defaultMessage, defaultErrorName) {
         var msg = (res && res.error) || defaultMessage;
         var name = defaultErrorName || 'NetworkError';
-        if (typeof msg === 'string' && msg.indexOf('TypeError:') === 0) {
-            throw new TypeError(msg.slice('TypeError:'.length).trim());
-        }
         if (typeof msg === 'string') {
             for (var i = 0; i < KNOWN_ERROR_PREFIXES.length; i++) {
                 var prefix = KNOWN_ERROR_PREFIXES[i];
@@ -542,35 +395,14 @@ WEBUSB_POLYFILL_JS = r"""
     }
     _bridgeReady.then(function(bridge) {
         if (!bridge) return;
-        // 🛡️ security_audit No.5: Python側のdeviceConnected/deviceDisconnected
-        // シグナルは、QWebChannelにフレーム単位配信の仕組みが無いため、ページ内の
-        // 全フレームへブロードキャストされる。発火条件も「トップレベルページの
-        // 許可状況」だけで、"このイベントを受け取っている個々のフレーム自身"の
-        // オリジンは一切見ていない(bridge.pyの_poll_hotplug()のコメント参照)。
-        // その結果、トップレベルページが許可したデバイスの抜き挿しが、同じページに
-        // 埋め込まれた無関係なクロスオリジンiframe(そのデバイスへの許可を一度も
-        // 得ていない第三者広告等)にまで届いてしまう。
-        // QWebChannel/Qt Signal自体をフレーム単位配信に作り直すことはできないが、
-        // 受け取った側であるここで、getDevices()と同じ判定(=このフレーム自身の
-        // オリジンが実際にこのvendorId/productIdへの許可を持っているか)を
-        // isGrantedToThisFrame()で再検証し、許可が無ければpageへdispatchせずに
-        // 静かに捨てる。これによりobservableな挙動としては正しく
-        // フレームごとにスコープされる。
-        function _dispatchIfGrantedToThisFrame(type, info) {
-            try {
-                bridge.isGrantedToThisFrame(info.vendorId, info.productId, _frameToken(), function(granted) {
-                    if (granted) _dispatchUsbEvent(type, new OpenWebUSBDevice(info));
-                });
-            } catch (e) { /* 判定できなければ安全側(dispatchしない) */ }
-        }
         if (bridge.deviceConnected && bridge.deviceConnected.connect) {
             bridge.deviceConnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('connect', JSON.parse(infoJson)); } catch (e) {}
+                try { _dispatchUsbEvent('connect', new OpenWebUSBDevice(JSON.parse(infoJson))); } catch (e) {}
             });
         }
         if (bridge.deviceDisconnected && bridge.deviceDisconnected.connect) {
             bridge.deviceDisconnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('disconnect', JSON.parse(infoJson)); } catch (e) {}
+                try { _dispatchUsbEvent('disconnect', new OpenWebUSBDevice(JSON.parse(infoJson))); } catch (e) {}
             });
         }
     });
@@ -613,24 +445,10 @@ WEBUSB_POLYFILL_JS = r"""
                 return Promise.reject(new DOMException(
                     'Must be handling a user gesture to call navigator.usb.requestDevice().', 'SecurityError'));
             }
-            // 🛡️ security_audit No.2: 直前で確認した「本物のユーザー操作から
-            //    呼ばれている」という事実を、Python側(requestDeviceChooser)が
-            //    独立に検証できる形にするため、短命・使い切りのトークンを
-            //    発行してもらってから渡す(see: bridge.pyのmintGestureToken/
-            //    __init__のself._gesture_tokensのコメント、および既知の限界)。
-            //    mintGestureTokenはJSONではなく生のトークン文字列を返す設計
-            //    なので、常にJSON.parseする callBridge は使わず直接呼ぶ。
-            return _bridgeReady.then(function(bridge) {
-                return new Promise(function(resolve) {
-                    if (!bridge) return resolve('');
-                    bridge.mintGestureToken(function(token) { resolve(token || ''); });
-                });
-            }).then(function(gestureToken) {
-                return callBridge('requestDeviceChooser', JSON.stringify({
-                    filters: _options.filters,
-                    exclusionFilters: exclusionFilters,
-                }), _frameToken(), gestureToken);
-            }).then(function(res) {
+            return callBridge('requestDeviceChooser', JSON.stringify({
+                filters: _options.filters,
+                exclusionFilters: exclusionFilters,
+            }), _frameToken()).then(function(res) {
                 if (res.cancelled) {
                     // 🛡️ res.errorがある場合(再入防止ガード発火・pyusbバックエンド不通・
                     //    ダイアログ例外など)は実際の理由を伝える。無い場合(=ユーザーが
@@ -723,4 +541,3 @@ WEBUSB_POLYFILL_JS = r"""
         },
     };
 })();
-"""

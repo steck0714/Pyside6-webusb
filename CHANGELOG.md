@@ -2,6 +2,85 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4b3]
+
+An independent, external security audit against this codebase (two passes — the second at the
+requester's explicit request for maximum strictness), reproduced end to end in a real
+Python 3.14.4 / PySide6 6.11.2 environment before any fix landed, and re-verified the same way
+after. See [`security_report/VULNERABILITY_REPORT.md`](security_report/VULNERABILITY_REPORT.md)
+for the full writeup and [`security_audit/`](security_audit/) for the executable reproductions —
+every one of them is designed to keep passing, unmodified, as long as the corresponding fix
+stays in place. Final result: **83 audit tests, 83 passing** (up from 66/80 before this release);
+the full existing `tests/` suite (161 tests) also still passes unmodified.
+
+### Security
+
+- **Alternate-setting class confusion let a page reach a protected interface class's endpoints
+  without `claimInterface()` ever seeing that class (High).** `interface_class_for()` looked only
+  at whichever alternate setting's descriptor came first for a given interface number, and
+  `_endpoint_available_or_error()` searched a claimed interface's endpoints across *every*
+  alternate setting rather than only the one actually selected. A composite device declaring
+  alternate setting 0 of an interface as innocuous vendor-specific and alternate setting 1 of
+  that same interface as HID could be claimed under alternate setting 0 (correctly allowed) and
+  then have `bulkTransferIn()` — no `selectAlternateInterface()` call needed — read real data
+  from the hidden HID alternate's endpoint. The same root cause reached the `class`- and
+  `interface`-recipient branches of control-transfer validation, too. The same category of
+  security boundary CVE-2018-6125 found Chrome itself missing. Every one of `claimInterface()`,
+  `_endpoint_available_or_error()`, both affected control-transfer branches, and
+  `selectAlternateInterface()` now agree on which alternate setting is actually selected for each
+  claimed interface, and that tracked state is invalidated by `selectConfiguration()` and
+  `resetDevice()` (a device may legitimately re-enumerate with different descriptors after a bus
+  reset).
+- **`requestDeviceChooser()` had no server-side check that it was called from a real user
+  gesture, and no server-side validation of `filters`/`exclusionFilters` structure (Medium).**
+  Both checks existed only in `polyfill.py`'s own JS — a page with a direct `QWebChannel`
+  connection to the bridge (bypassing `polyfill.py` entirely) could pop the native chooser dialog
+  at any time with zero user interaction, and a structurally invalid filter (e.g. `productId`
+  without `vendorId`) widened the candidate list instead of matching nothing, the opposite of
+  what the spec requires. `polyfill.py` now mints a short-lived, single-use token
+  (`mintGestureToken()`) at the exact moment it confirms `navigator.userActivation.isActive`, and
+  `requestDeviceChooser()` independently verifies both that token and every filter's structure
+  before constructing the dialog. Documented limitation: PySide6/QtWebEngine has no public API
+  for the Python side to independently observe a page's real DOM user-activation state, so this
+  raises the bar substantially without being a perfect guarantee against a sufficiently
+  determined scripted attacker that also mints its own token.
+- **Device-supplied strings (manufacturer/product/serial/configuration/interface names) reached
+  the chooser dialog and JSON descriptors with no sanitization at all (Medium).** These strings
+  are entirely the connected device's own choice. A hostile device could embed control
+  characters, Unicode bidirectional-override characters (the same trick used to disguise
+  filenames — e.g. making `cod.exe` display as `exe.doc`), or HTML-like markup that Qt's default
+  `QLabel` text format would render as rich text, visually spoofing the permission dialog itself
+  — the same category of issue as CVE-2020-16033. All such strings now pass through
+  `sanitize_device_string()` (strips control and bidi-override characters, caps length), and
+  every `QLabel` in the chooser dialog is forced to `Qt.TextFormat.PlainText` regardless of
+  content.
+- **`closeDevice()` always returned `None` instead of a JSON string — on every call, not only
+  invalid ones (Low).** Every code path fell off the end of the function with no explicit
+  `return`. `JSON.parse(null)` throws on the JS side, so this broke error handling for legitimate
+  callers too, not just the adversarial case the audit used to find it. While fixing this, a
+  second, unrelated bug was found by inspection: its `@Slot` declaration didn't declare
+  `result=str` at all (unlike every sibling method), meaning even a correct Python return value
+  would never have been marshalled back to JS through a real `QWebChannel` connection — direct
+  Python-call tests could never have caught this, since they bypass Qt's meta-object marshalling
+  entirely.
+- **Hotplug `connect`/`disconnect` events reached cross-origin frames that were never granted the
+  device involved (Low/Informational).** `deviceConnected`/`deviceDisconnected` are plain Qt
+  signals with no per-frame delivery mechanism, and whether one fires is decided from the
+  top-level page's grants alone — so an embedded cross-origin iframe that had never itself been
+  granted a device could still observe its vendorId/productId on connect/disconnect. Qt Signals
+  can't be redesigned to deliver per-frame without a larger architecture change, but the
+  *observable* behavior didn't need one: `polyfill.py` now re-verifies, via a new
+  `isGrantedToThisFrame()` check scoped to its own frame's own origin, before ever dispatching a
+  JS event or calling `onconnect`/`ondisconnect`.
+- **`openDevice()` had no limit on simultaneous open handles per origin (Medium — easy to
+  trigger despite modest per-call cost).** An ordinary page holding one legitimate grant could
+  grow `WebUSBBridge`'s internal handle table without bound just by calling `device.open()` in a
+  loop without ever closing them — no `QWebChannel` bypass needed. This consumes memory in the
+  *host application's own process*, not the tab's renderer, so it isn't bounded by normal
+  per-tab memory limits. Each origin is now capped at a generous number of concurrently open
+  handles; opening past the cap releases that origin's oldest handle first rather than failing
+  the new `open()` call.
+
 ## [0.0.4b2]
 
 A cross-checked-against-real-Chrome-source pass, plus a real security fix, an F12/DevTools
