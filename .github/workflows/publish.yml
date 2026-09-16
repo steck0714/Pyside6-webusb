@@ -1,21 +1,21 @@
-name: Publish to PyPI
+name: Backfill Releases to PyPI
 
 on:
-  release:
-    types:
-      - published
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build package
+  publish-releases:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+      id-token: write
 
     steps:
-      - name: Checkout release
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,35 +27,50 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
-      - name: Build distributions
-        run: python -m build
+      - name: Get release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 1000 --json tagName,isDraft > releases.json
 
-      - name: Check distributions
-        run: python -m twine check dist/*
+          python - <<'PY'
+          import json
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-distributions
-          path: dist/
-          if-no-files-found: error
+          with open("releases.json", encoding="utf-8") as f:
+              releases = json.load(f)
 
-  publish:
-    name: Publish package
-    needs: build
-    runs-on: ubuntu-latest
+          tags = [
+              r["tagName"]
+              for r in releases
+              if not r["isDraft"]
+          ]
 
-    permissions:
-      id-token: write
+          print("Releases:")
+          for tag in tags:
+              print("  " + tag)
 
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v4
-        with:
-          name: python-distributions
-          path: dist/
+          with open("release_tags.txt", "w", encoding="utf-8") as f:
+              for tag in tags:
+                  f.write(tag + "\n")
+          PY
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
+      - name: Publish each release
+        run: |
+          while IFS= read -r TAG; do
+            echo "========================================"
+            echo "Publishing: $TAG"
+            echo "========================================"
+
+            rm -rf dist build *.egg-info
+
+            git checkout --force "$TAG"
+
+            python -m build
+            python -m twine check dist/*
+            python -m twine upload dist/* --non-interactive --skip-existing
+
+          done < release_tags.txt
+
+      - name: Restore main
+        if: always()
+        run: git checkout --force main
