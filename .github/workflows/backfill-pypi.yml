@@ -1,0 +1,88 @@
+name: Backfill Releases to PyPI
+
+on:
+workflow_dispatch:
+
+jobs:
+publish-releases:
+name: Publish existing releases
+runs-on: ubuntu-latest
+
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+    with:
+      fetch-depth: 0
+
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+
+  - name: Install build tools
+    run: |
+      python -m pip install --upgrade pip
+      python -m pip install build twine
+
+  - name: Get release tags
+    id: releases
+    env:
+      GH_TOKEN: ${{ github.token }}
+    run: |
+      gh release list \
+        --limit 1000 \
+        --json tagName,isDraft,isPrerelease \
+        > releases.json
+
+      python - <<'PY'
+      import json
+
+      with open("releases.json", encoding="utf-8") as f:
+          releases = json.load(f)
+
+      tags = [
+          r["tagName"]
+          for r in releases
+          if not r["isDraft"]
+      ]
+
+      print("Releases:")
+      for tag in tags:
+          print(f"  {tag}")
+
+      with open("release_tags.txt", "w", encoding="utf-8") as f:
+          for tag in tags:
+              f.write(tag + "\n")
+      PY
+
+  - name: Publish each release
+    env:
+      GH_TOKEN: ${{ github.token }}
+    run: |
+      while IFS= read -r TAG; do
+        echo ""
+        echo "========================================"
+        echo "Publishing release: $TAG"
+        echo "========================================"
+
+        rm -rf dist build *.egg-info
+
+        git checkout --force "$TAG"
+
+        python -m build
+        python -m twine check dist/*
+
+        python -m twine upload dist/* \
+          --non-interactive \
+          --skip-existing
+
+      done < release_tags.txt
+
+  - name: Restore main branch
+    if: always()
+    run: |
+      git checkout --force main
