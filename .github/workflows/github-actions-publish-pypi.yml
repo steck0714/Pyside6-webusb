@@ -1,0 +1,60 @@
+# 任意提案: .github/workflows/publish-pypi.yml として配置すると、
+# 「vX.Y.Z」形式のタグをpushするたびに、そのタグ名から自動でversionを決めて
+# ビルド・PyPI公開まで行います。手動でpyproject.tomlのversionを書き換えてから
+# タグを打つ、という今回ズレの原因になっていた手順が不要になります。
+#
+# 事前準備:
+#   1. GitHubリポジトリの Settings > Secrets and variables > Actions で
+#      PYPI_API_TOKEN という名前のsecretにPyPIのAPIトークンを登録してください。
+#      (よりトークン管理が要らない方法として、PyPI側の "Trusted Publishers"
+#       機能を使う手もあります。興味があれば別途調べてみてください。)
+#   2. タグ名は "v0.0.5" のように付け、a/b等の文字を使う場合は
+#      "v0.0.5a1" のように「番号を上げてから」a/b/rcを付ける順序にすると、
+#      PyPIのバージョン規則(PEP 440)とも自然に一致します。
+#
+# 注意: これは提案・雛形です。そのまま使うかどうかは任意です。
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: タグ名からバージョンを決定してpyproject.tomlに反映
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME}"        # 例: v0.0.5
+          VERSION="${RAW_TAG#v}"              # 例: 0.0.5
+          echo "Resolved version: ${VERSION}"
+          python3 - "$VERSION" <<'PY'
+          import re, sys, pathlib
+          version = sys.argv[1]
+          p = pathlib.Path("pyproject.toml")
+          text = p.read_text(encoding="utf-8")
+          text, n = re.subn(r'^(version\s*=\s*)"[^"]*"', f'\\1"{version}"', text, count=1, flags=re.MULTILINE)
+          assert n == 1, "version= line not found in pyproject.toml"
+          p.write_text(text, encoding="utf-8")
+          PY
+
+      - name: ビルド
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build
+
+      - name: PyPIへ公開
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python3 -m pip install --upgrade twine
+          python3 -m twine upload --skip-existing dist/*
