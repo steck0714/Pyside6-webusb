@@ -1,6 +1,14 @@
+```yaml
 name: Publish to PyPI
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release tag to publish"
+        required: true
+        default: "v0.0.4b2"
+
   release:
     types: [published]
 
@@ -26,9 +34,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
-      - name: Check release version
+      - name: Determine release tag
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$EVENT_RELEASE_TAG" ]; then
+            echo "RELEASE_TAG=$EVENT_RELEASE_TAG" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=$INPUT_RELEASE_TAG" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check release version
         run: |
           python - <<'PY'
           import os
@@ -39,7 +56,6 @@ jobs:
 
           package_version = project["version"]
           release_tag = os.environ["RELEASE_TAG"]
-
           expected_tag = f"v{package_version}"
 
           print(f"Package version : {package_version}")
@@ -84,3 +100,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+```
