@@ -2,6 +2,198 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5a0]
+
+Feature release on top of `0.0.4b3`: one new host-app-facing capability
+(`grant_device_for_origin()`), a new environment-diagnostics module + CLI, and three fixes found
+while verifying this release in a real `Python 3.14.7` / `PySide6-Essentials`/`PySide6-Addons`
+`6.11.2` environment — including one in this release's own new diagnostics feature, found by
+actually installing the built wheel rather than trusting its unit tests alone (see "Fixed,"
+below). Marked `a0` (alpha) rather than a plain patch bump since this adds behavior rather than
+only fixing it — same reasoning as `0.0.1a0`/`0.0.2b0`/`0.0.3a0`/`0.0.3b0`/`0.0.4a0` before it.
+The archive this release started from already had its version string bumped to a plain `0.0.5`
+with no corresponding changelog entry; nothing beyond the two `0.0.4b3`-inherited items under
+"Fixed" below (the `closeDevice()` gap and the test file's missing `def` line) was found to
+differ from `0.0.4b3`'s documented end state, but this project has no record of what, if
+anything, else `0.0.5` was meant to contain, and this entry does not claim to speak for it.
+
+### Added
+
+- **`WebUSBBridge.grant_device_for_origin(origin, vendor_id, product_id)`.** The management-only
+  methods next to it (`list_granted_origins()`/`revoke_origin_grant()`/`revoke_all_for_origin()`)
+  let a host app inspect and revoke grants, but nothing let it *create* one without routing
+  through the chooser dialog — an asymmetry with no way to pre-authorize a device the way
+  Chrome's enterprise
+  [`WebUsbAllowDevicesForUrls`](https://chromeenterprise.google/policies/#WebUsbAllowDevicesForUrls)
+  policy does, which kiosk/embedded deployments need (the set of allowed origins/devices is
+  fixed by configuration, not decided by an end user clicking "Connect" in a dialog they may
+  never even see). Shares `_grant()`/`_is_granted()` and the same `QSettings`-backed persistence
+  as a grant obtained through the normal flow, so a pre-authorized device is indistinguishable
+  from — and immediately visible to `listDevices()`/`navigator.usb.getDevices()` alongside — one
+  granted the usual way, and can later be removed with the existing `revoke_origin_grant()`.
+  Rejects blocklisted (known-security-key) devices for the same reason `openDevice()` does —
+  arguably more important here, precisely *because* this path bypasses the user interaction that
+  the chooser dialog would otherwise provide as a second layer. Deliberately **not** a `@Slot`,
+  for the same reason `list_granted_origins()`/`revoke_origin_grant()`/`revoke_all_for_origin()`
+  aren't (see `0.0.4b2`): `install()` injects the polyfill into `MainWorld`, so any `@Slot`
+  on the bridge is reachable by *any* page opening its own `QWebChannel` connection directly,
+  regardless of what `polyfill.py`'s own JS does or doesn't call — a method that hands out device
+  access with no user gesture at all must never be one.
+- **`pyside6_webusb.diagnostics`: `environment_report()` / `format_environment_report()`.** Most
+  "`navigator.usb` isn't working" reports turn out to be an environment problem — old/missing
+  PySide6, or `pyusb` installed without an OS-level `libusb` backend behind it — rather than a
+  bug in this package's own logic, and there was previously no single place to check that
+  (`isAvailable()` is JS/DevTools-facing and doesn't cover the Python-side environment at all).
+  `environment_report()` returns a plain, JSON-safe dict (Python version/implementation,
+  `PySide6`/`shiboken6`/Qt-runtime versions, `pyusb` version and which backend — `libusb1` vs
+  `libusb0` — actually resolved, Rust-acceleration status, and a `problems` list);
+  `format_environment_report()` renders the same as human-readable text. Deliberately has zero
+  `PySide6`/`QtCore` import at module scope — a tool for diagnosing whether `PySide6` is
+  reachable at all would be self-defeating if it could only run once `PySide6` already is.
+  Missing Rust acceleration is reported but intentionally never added to `problems`: it's a
+  fully-supported, optional fallback (see "Rust acceleration (optional)" in the README), not a
+  broken state.
+- **`python -m pyside6_webusb`** (new `__main__.py`) and, once installed, **`pyside6-webusb-doctor`**
+  (new `[project.scripts]` entry point) both print `format_environment_report()`'s output and
+  exit `1` if `problems` is non-empty, `0` otherwise — usable as a one-line CI/support-tooling
+  sanity check (`python -m pyside6_webusb || echo "environment broken"`), not just interactively.
+  `environment_report`/`format_environment_report` are also re-exported from the package's own
+  `__init__.py`.
+
+### Fixed
+
+- **`import pyside6_webusb` itself failed with a raw `ModuleNotFoundError` in any environment
+  missing `PySide6-Essentials`/`PySide6-Addons` — including the exact environment the new
+  `environment_report()`/`python -m pyside6_webusb`/`pyside6-webusb-doctor` (see "Added," above)
+  exist to help with.** `__init__.py` imported `bridge.py` (which imports `PySide6.QtCore`
+  unconditionally at module scope) before `diagnostics.py`, so the package's own import chain
+  hit the missing dependency and died before a caller could ever reach the diagnostic tooling —
+  a self-defeating failure mode for a tool whose entire premise is "help figure out what's wrong
+  with your `PySide6` install." Found the same way several other issues in this project's
+  history have been: by actually installing the built wheel with `--no-deps` into a clean venv
+  (deliberately *not* installing `PySide6`) and running `pyside6-webusb-doctor` against it,
+  rather than trusting that the new feature worked because its own mocked unit tests passed —
+  those tests (see "Tests," below) all ran in a process where `pyside6_webusb` and `PySide6`
+  were already successfully imported earlier, so none of them actually exercised this exact
+  failure path. `__init__.py` now imports `diagnostics` first and wraps the `PySide6`-dependent
+  imports (`bridge`, `chooser_dialog`, `polyfill`) in a `try`/`except ImportError` that inspects
+  `.name` to distinguish a genuinely-missing `PySide6`/`shiboken6` (degrade gracefully) from any
+  other `ImportError` (a real bug in this package's own code, which must still surface loudly,
+  not be misreported as "PySide6 is missing"). `install`/`WebUSBBridge`/`WebUsbDeviceChooserDialog`
+  become a small stub that raises a clear `ImportError` — chained from the original — pointing at
+  `python -m pyside6_webusb` when actually called, rather than either working partially or
+  failing with a confusing `NoneType`/`AttributeError` later. **A second, subtler bug turned up
+  fixing the first one**: the stub closure initially referenced the `except ImportError as _e`
+  variable directly, which Python 3 automatically deletes at the end of the `except` block (to
+  avoid the traceback keeping a reference cycle alive) — so calling the stub *later*, well after
+  that block had already exited, raised `NameError: name '_e' is not defined` instead of the
+  intended message. Fixed by copying the exception into an ordinarily-scoped variable before the
+  closure captures it. Both bugs are covered by
+  `test_package_import_and_install_survive_pyside6_being_unavailable`, which runs a real
+  subprocess with `python -S` (site-packages excluded entirely, so `PySide6`/`pyusb` are
+  genuinely absent rather than merely mocked) and checks both that `import pyside6_webusb`
+  succeeds and that calling each stub actually raises the intended message rather than crashing
+  differently.
+- **`closeDevice()` could dispose a device out from under an in-progress chunked bulk transfer**
+  — a gap the `0.0.4b` entry's docstring had explicitly named and deferred ("より完全な修正は
+  将来のバージョンで検討する"). `bulkTransferIn()`/`bulkTransferOut()` yield to the Qt event
+  loop (`processEvents()`) between sub-chunks of a large transfer so the UI thread doesn't
+  freeze; transfer-vs-transfer reentrancy on the same handle during that window was already
+  guarded via `_busy_handles`, but `closeDevice()` never checked the same marker, so a
+  same-handle `close()` arriving in that window could `dispose_resources()` the device while a
+  transfer loop still held a reference to it. `closeDevice()` now checks `_busy_handles` exactly
+  like the transfer methods do and rejects with `InvalidStateError` instead, verified by
+  reproducing the actual reentrant call via a monkeypatched `QCoreApplication.processEvents`
+  (`test_closeDevice_rejects_close_while_handle_is_mid_chunked_transfer`) rather than reasoning
+  about it in the abstract — the same technique the original `0.0.4b`
+  transfer-vs-transfer reentrancy test already used, now reused for this second call path.
+  `closeDevice()` had no dedicated tests at all before this release (a contributing reason the
+  original always-returns-`None` bug that `0.0.4b3`'s security audit (finding No.4) caught went
+  unnoticed as long as it did); it now has three (`test_closeDevice_returns_json_and_disposes_the_device`,
+  `test_closeDevice_rejects_invalid_handle`, plus the reentrancy test above), and the test-only
+  `FakeUsbUtil` fixture gained a real `dispose_resources()` (previously absent — meaning the
+  production code's call to it was silently swallowed by the surrounding `try`/`except` in every
+  existing test) so disposal can actually be asserted on rather than merely not-crash on.
+- **A structural bug in `tests/test_bridge.py`, of the same shape `0.0.4b1` had already fixed
+  once for a different test:** `test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected`'s
+  `def` line was missing, so its entire body (a valid, already-passing set of assertions) was
+  silently executing as an unlabeled tail appended to the end of the preceding
+  `test_bulk_transfer_round_trips_realistic_adb_wrte_message` — collected and run as part of
+  that test, but never on its own, and absent from every test list and count. Caught the same
+  way `0.0.4b1` caught the original instance: by actually running `pytest --collect-only` and
+  checking the resulting count against expectations, not by assuming the file's structure
+  matched its contents. Restored the missing `def` line; the test now collects and passes on its
+  own (`tests/` collection count: 79 → 80).
+
+### Tests
+
+- `test_bridge.py`: the restored `test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected`;
+  `test_closeDevice_returns_json_and_disposes_the_device`,
+  `test_closeDevice_rejects_invalid_handle`,
+  `test_closeDevice_rejects_close_while_handle_is_mid_chunked_transfer`;
+  `test_grant_device_for_origin_persists_without_chooser_and_is_symmetric_with_revoke`,
+  `test_grant_device_for_origin_rejects_blocklisted_device`,
+  `test_grant_device_for_origin_rejects_missing_origin`. Extended the existing
+  `test_requestDeviceChooser_is_registered_as_qt_slot` regression test (it enumerates every
+  method that must *not* be a JS-reachable `@Slot`) to also cover `grant_device_for_origin`.
+- `tests/test_diagnostics.py` (new file, 9 tests): a clean-environment baseline against the
+  actual installed `PySide6`/`shiboken6`/`pyusb` in the verification environment (not mocked),
+  plus `sys.modules`-`None` injection (the standard "simulate an uninstalled package" pytest
+  idiom) to exercise the missing-`PySide6`, missing-`pyusb`, and `pyusb`-without-a-`libusb`-
+  backend paths, `format_environment_report()`'s two branches, and both exit codes of
+  `python -m pyside6_webusb`'s `main()`. Two of this file's own first-draft assertions turned out
+  to be wrong once actually run rather than merely reasoned about — `shiboken6` doesn't share
+  `PySide6`'s `sys.modules` entry (it's an independent top-level package, not a submodule), and
+  `PySide6.QtCore` specifically needed its own `sys.modules[...] = None` alongside `PySide6`'s
+  own, since CPython's import machinery resolves an already-cached dotted submodule straight
+  from `sys.modules` without re-checking whether its parent package was blocked — both fixed
+  after the failure surfaced, not asserted away. The `__init__.py`-resilience regression test
+  (`test_package_import_and_install_survive_pyside6_being_unavailable`, see "Fixed," above) went
+  through the same kind of correction: a first draft used the same `sys.modules`-`None` trick,
+  which triggered an unrelated crash from `shiboken6`'s own site-initialization signature-support
+  hook reacting badly to an artificially-blocked-but-actually-installed `PySide6` — not a sign
+  the underlying fix was wrong, but a sign the simulation was unrealistic. Rewritten to spawn a
+  real subprocess with `python -S` (skips `site`/`.pth` processing entirely) and a `PYTHONPATH`
+  containing only this package's own `src/`, so site-packages — `PySide6` included — is
+  genuinely absent rather than merely patched around, matching the actual `--no-deps` install
+  that first surfaced the bug.
+- Full suite re-verified together after every change in this entry, not just at the end:
+  `tests/` + `security_audit/` — **178 passed, 1 skipped** (163 + 15 new = 178; the 1 skip is the
+  pre-existing, environment-dependent "Rust extension not built" skip in `test_rust_accel.py`,
+  unrelated to this release).
+
+### Project metadata
+
+- Version: `0.0.5a0`.
+- Verified environment for this entire entry: **Python `3.14.7`** (installed fresh via
+  `uv python install`, not assumed to already be present — Ubuntu 24.04's system package manager
+  only offers `3.12.x`), **`PySide6-Essentials`/`PySide6-Addons` `6.11.2`**, **`pyusb` `1.3.1`**
+  (both confirmed as the actual current latest on PyPI at verification time, not just the
+  versions asked for), with a real `libusb1` backend resolving successfully
+  (`libusb-1.0-0` present). `QT_QPA_PLATFORM=offscreen`, no real display — the existing
+  `conftest.py` already assumed exactly this kind of headless environment.
+- Every file touched or added in this release was also successfully byte-compiled under Python
+  `3.9.25` (this project's `requires-python` floor), installed fresh via `uv python install`
+  rather than assumed — no accidental reliance on newer syntax.
+- The Rust acceleration crate under `native/` is unmodified in this release and was not
+  rebuilt or re-tested (no Rust toolchain available in the verification environment this time);
+  `test_rust_accel.py`'s existing skip-when-unbuilt behavior is unaffected either way.
+- `pyproject.toml`: `license = { text = "MIT" }` plus a `License :: OSI Approved :: MIT License`
+  classifier replaced with the single SPDX-expression form (`license = "MIT"`, classifier
+  dropped as redundant) and `build-system.requires` bumped to `setuptools>=77` to match —
+  `python -m build` emitted explicit deprecation warnings for the old table form pointing at a
+  2027-02-18 removal date, surfaced while building this release's own wheel/sdist rather than
+  found by inspection.
+- Built both `sdist` and `wheel` with `python -m build` (clean, no warnings, after the
+  `pyproject.toml` fix above); both pass `twine check`. Installed the built wheel into a fresh
+  venv (`uv pip install pyside6_webusb-0.0.5a0-py3-none-any.whl`, dependencies resolved from
+  PyPI, not from this checkout) and confirmed `import pyside6_webusb`, `python -m
+  pyside6_webusb`, and the installed `pyside6-webusb-doctor` console script all behave
+  identically to the checkout under test. Separately installed the same wheel with `--no-deps`
+  into another fresh venv to deliberately reproduce a `PySide6`-less install — this is the install
+  that surfaced the first "Fixed" item above, and re-running it after the fix confirms
+  `pyside6-webusb-doctor` now reports the missing dependency cleanly instead of crashing.
+
 ## [0.0.4b3]
 
 An independent, external security audit against this codebase (two passes — the second at the
