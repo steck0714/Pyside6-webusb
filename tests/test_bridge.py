@@ -232,6 +232,13 @@ class FakeUsbUtil:
         dev.claimed_by_util = getattr(dev, "claimed_by_util", set())
         dev.claimed_by_util.discard(interface)
 
+    def dispose_resources(self, dev):
+        # 🆕 v0.0.5a0: 従来このメソッド自体が定義されておらず、closeDevice()内の
+        # usb_util.dispose_resources(dev)呼び出しは常にAttributeErrorとなって
+        # try/exceptに握り潰されていた(=closeDeviceの実処理を検証するテストが
+        # 一切書けなかった)。実際に呼ばれたことをdev側に記録できるようにする。
+        dev.disposed = True
+
 
 class FakeUsbCore:
     def __init__(self, devices):
@@ -496,6 +503,74 @@ def test_full_flow_persists_grant_and_usage_without_mocking_internals(monkeypatc
     known = bridge._load_known_devices()
     assert any(d.get("vendorId") == 0x2341 for d in known), "利用実績(known devices)にも記録されているはず"
     print("test_full_flow_persists_grant_and_usage_without_mocking_internals: OK")
+
+
+def test_grant_device_for_origin_persists_without_chooser_and_is_symmetric_with_revoke():
+    """🆕 v0.0.5a0: revoke_origin_grant()/revoke_all_for_origin()には元々
+    「取り消す」公開APIしか無く、その対になる「チューザーダイアログを経由せず
+    能動的に許可する」公開APIが存在しなかった。requestDeviceChooser()・
+    FakeChooserDialogに一切触れず、grant_device_for_origin()だけで
+    listDevices()に反映されること、実際のQSettingsへ永続化されること、
+    revoke_origin_grant()で対称に取り消せることを確認する。"""
+    import tempfile
+    from PySide6.QtCore import QSettings
+
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [])])
+    bridge = WebUSBBridge()  # _grant/_is_grantedは上書きしない(実装をそのまま使う)
+    bridge._pyusb = lambda: (FakeUsbCore([dev_a]), FakeUsbUtil())
+    bridge._current_origin = lambda *a, **kw: "https://example.test"
+
+    tmp_dir = tempfile.mkdtemp(prefix="pyside6_webusb_test_")
+    ini_path = os.path.join(tmp_dir, "settings.ini")
+    real_settings = QSettings(ini_path, QSettings.Format.IniFormat)
+    bridge._known_device_settings = lambda: real_settings
+
+    # チューザーダイアログには一切触れていない時点ではまだ許可されていないはず
+    before = json.loads(bridge.listDevices())
+    assert before["devices"] == []
+
+    added = bridge.grant_device_for_origin("https://example.test", 0x2341, 0x8036)
+    assert added is True
+
+    granted = bridge.list_granted_origins()
+    assert granted.get("https://example.test"), "実際のQSettingsへ永続化されているはず"
+    entry = granted["https://example.test"][0]
+    assert entry["vendorId"] == 0x2341 and entry["productId"] == 0x8036
+
+    after = json.loads(bridge.listDevices())
+    assert len(after["devices"]) == 1
+    assert after["devices"][0]["vendorId"] == 0x2341
+
+    # 同じ組み合わせをもう一度許可しても「新規追加は無かった」のでFalse
+    added_again = bridge.grant_device_for_origin("https://example.test", 0x2341, 0x8036)
+    assert added_again is False
+
+    # revoke_origin_grant()で対称に取り消せる(通常フローで得た許可と区別できない)
+    revoked = bridge.revoke_origin_grant("https://example.test", 0x2341, 0x8036)
+    assert revoked is True
+    after_revoke = json.loads(bridge.listDevices())
+    assert after_revoke["devices"] == []
+    print("test_grant_device_for_origin_persists_without_chooser_and_is_symmetric_with_revoke: OK")
+
+
+def test_grant_device_for_origin_rejects_blocklisted_device():
+    """🛡️ ユーザー操作を経ない経路だからこそ、汚染された/誤った設定ファイル経由で
+    セキュリティキー等のブロックリスト対象デバイスをうっかり許可してしまう事故を
+    防ぐ必要がある(openDevice()と同じ理由)。"""
+    bridge = make_bridge([])
+    # 0x1050/0x0010はKNOWN_SECURITY_KEY_BLOCKLIST収載のYubico製セキュリティキー
+    added = bridge.grant_device_for_origin("https://example.test", 0x1050, 0x0010)
+    assert added is False
+    assert bridge.__test_grants__ == [], "ブロックリスト対象は_grant()にすら到達してはならない"
+    print("test_grant_device_for_origin_rejects_blocklisted_device: OK")
+
+
+def test_grant_device_for_origin_rejects_missing_origin():
+    bridge = make_bridge([])
+    assert bridge.grant_device_for_origin("", 0x2341, 0x8036) is False
+    assert bridge.grant_device_for_origin(None, 0x2341, 0x8036) is False
+    assert bridge.__test_grants__ == []
+    print("test_grant_device_for_origin_rejects_missing_origin: OK")
 
 
 def test_bulkTransferIn_adds_the_in_direction_bit():
@@ -859,7 +934,7 @@ def test_bulk_transfer_round_trips_realistic_adb_wrte_message():
     print("test_bulk_transfer_round_trips_realistic_adb_wrte_message: OK")
 
 
-
+def test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected():
     """🆕 v0.0.4b: チャンク分割の合間に呼ぶprocessEvents()は、原理上そこで
     別のQWebChannel呼び出し(同じhandleへの新たな転送呼び出し等)が割り込む
     (再入する)余地を生む。同一デバイスへ向けたpyusb呼び出しが入り乱れて
@@ -901,6 +976,85 @@ def test_bulk_transfer_round_trips_realistic_adb_wrte_message():
     # 再入後もhandleは "busy" のまま残らない(finally節で確実に解除される)
     assert handle not in bridge._busy_handles
     print("test_bulk_transfer_reentrant_call_on_busy_handle_is_rejected: OK")
+
+
+def test_closeDevice_returns_json_and_disposes_the_device():
+    """🆕 v0.0.5a0: closeDevice()には従来テストが一切無かった(常にNoneを返す
+    不具合がsecurity_audit No.4で見つかるまで気付かれなかった一因でもある)。
+    正常系として、有効なhandleをcloseすると{"success": True}を返すこと、
+    実際にusb_util.dispose_resources()がそのデバイスに対して呼ばれること、
+    close後は同じhandleへの他の操作が"Invalid device handle"になることを
+    確認する。"""
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    close_result = json.loads(bridge.closeDevice(handle))
+    assert close_result == {"success": True}, close_result
+    assert getattr(dev_a, "disposed", False) is True, "dispose_resources()が実際に呼ばれているはず"
+
+    after_close = json.loads(bridge.claimInterface(handle, 0))
+    assert after_close["success"] is False
+    assert after_close["error"] == "Invalid device handle"
+    print("test_closeDevice_returns_json_and_disposes_the_device: OK")
+
+
+def test_closeDevice_rejects_invalid_handle():
+    bridge = make_bridge([])
+    result = json.loads(bridge.closeDevice(999999))
+    assert result == {"success": False, "error": "Invalid device handle"}
+    print("test_closeDevice_rejects_invalid_handle: OK")
+
+
+def test_closeDevice_rejects_close_while_handle_is_mid_chunked_transfer():
+    """🆕 v0.0.5a0: v0.0.4bのCHANGELOGで「既知の限界、より完全な修正は将来の
+    バージョンで検討する」と明記されていたギャップの回帰テスト。
+    bulkTransferInのチャンク分割の合間(processEvents())に、同じhandleへ
+    向けてcloseDeviceが割り込んできても: (1)closeDeviceはInvalidStateErrorで
+    安全に拒否され、(2)外側の転送はデバイスをdisposeされることなく最後まで
+    正常に完了し、(3)転送完了後に改めてcloseDeviceを呼べば今度こそ正しく
+    閉じられる、ことを確認する。"""
+    from PySide6.QtCore import QCoreApplication
+
+    ep_in = FakeEndpoint(0x81, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_in])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    dev_a.read_stream = bytes([0x01]) * 600_000
+    reentrant_results = []
+
+    original_process_events = QCoreApplication.processEvents
+    def _reentrant_process_events(*a, **kw):
+        # チャンクの合間で、同じhandleへ向けてcloseDeviceを呼んでみる
+        # (=processEvents()がQWebChannel経由の新規呼び出しをdispatchして
+        # しまうケースを直接シミュレートしている)。
+        if not reentrant_results:
+            reentrant_results.append(json.loads(bridge.closeDevice(handle)))
+        return original_process_events(*a, **kw)
+    QCoreApplication.processEvents = staticmethod(_reentrant_process_events)
+    try:
+        outer_result = json.loads(bridge.bulkTransferIn(handle, 1, 600_000))
+    finally:
+        QCoreApplication.processEvents = original_process_events
+
+    assert len(reentrant_results) == 1, "再入は1回だけ発生させたはず"
+    assert reentrant_results[0]["success"] is False
+    assert reentrant_results[0]["error"].startswith("InvalidStateError:"), reentrant_results[0]
+    # 外側の転送は、割り込んできたcloseDeviceに邪魔されず正常完了するはず
+    assert outer_result["success"] is True, outer_result
+    assert getattr(dev_a, "disposed", False) is False, "拒否されたcloseDeviceがdisposeを実行してはならない"
+    assert handle not in bridge._busy_handles
+
+    # 転送が終わった後であれば、今度こそ正しく閉じられる
+    final_close = json.loads(bridge.closeDevice(handle))
+    assert final_close == {"success": True}, final_close
+    assert getattr(dev_a, "disposed", False) is True
+    print("test_closeDevice_rejects_close_while_handle_is_mid_chunked_transfer: OK")
 
 
 def test_bulk_and_control_transfer_reject_absurdly_large_length():
@@ -1518,7 +1672,8 @@ def test_requestDeviceChooser_is_registered_as_qt_slot():
     # という実害のある抜け穴だった)。
     for management_only_method in (
         "listKnownDevices", "forgetKnownDevice", "forgetAllKnownDevices",
-        "list_granted_origins", "revoke_origin_grant", "revoke_all_for_origin",
+        "list_granted_origins", "grant_device_for_origin",
+        "revoke_origin_grant", "revoke_all_for_origin",
     ):
         assert management_only_method not in slot_names, (
             f"{management_only_method} manages data across ALL origins and must "
