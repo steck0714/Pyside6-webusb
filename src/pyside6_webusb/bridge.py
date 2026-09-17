@@ -935,16 +935,22 @@ class WebUSBBridge(QObject):
 
     @Slot(int, str, result=str)
     def closeDevice(self, handle_id, frame_token=""):
-        """⚠️ 既知の限界(v0.0.4b, スコープ外として明記): bulkTransferIn/Outの
-        チャンク分割(_busy_handles)は、processEvents()を挟むことで理論上、
-        同じhandleに対するclose要求がその合間に再入してくる余地を生む。
-        closeDeviceはこの_busy_handlesを一切チェックしていないため、
-        「チャンク転送の途中でたまたま同じhandleに対してcloseDeviceが割り込む」
-        極めて稀なケースでは、転送ループが以降のサブチャンクでdispose済みの
-        deviceに触れて例外になりうる(その場合もbulkTransferIn/Out側の
-        通常のexceptハンドラでNetworkError相当として捕捉されるだけで、
-        クラッシュや状態破壊はしない)。全メソッドを_busy_handlesで統一的に
-        ガードする、より完全な修正は将来のバージョンで検討する。
+        """🆕 v0.0.5a0: v0.0.4bのCHANGELOGで「既知の限界、スコープ外」として
+        明記されていたギャップをここで解消する。bulkTransferIn/Outの
+        チャンク分割(_busy_handles)はprocessEvents()を挟むため、その合間に
+        同じhandleへ向けたQWebChannel呼び出しが再入する余地がある —
+        transferIn/Out自身は再入をhandle単位で検出して安全に拒否する
+        ガードを最初から持っていたが、closeDeviceだけはこのチェックを
+        持たず、「チャンク転送の途中でたまたま同じhandleに対して
+        closeDeviceが割り込む」と、転送ループの足元でdeviceがdispose
+        されてしまいうる状態のまま残っていた(実害は次のサブチャンクで
+        例外→通常のexceptハンドラがNetworkError相当として捕捉するだけで、
+        クラッシュや状態破壊はしないが、成功するはずの転送が失敗する)。
+        bulkTransferIn/Outと全く同じ`_busy_handles`集合を見て、転送中の
+        handleへのcloseDeviceはInvalidStateErrorで拒否するようにし、
+        「転送を安全に完了させてから閉じる」という順序をPython側で保証する。
+        `test_closeDevice_rejects_close_while_handle_is_mid_chunked_transfer`
+        が実際のprocessEvents()再入から検証する。
         🛡️ security_audit No.4: このクラスのdocstringは「全てのSlotは常に
         有効なJSON文字列を返し、Python例外をJSに漏らさない」ことを謳っているが、
         このメソッドは無効ハンドル時に`return`(=None)、さらに成功時も含めて
@@ -957,6 +963,14 @@ class WebUSBBridge(QObject):
             # 別オリジンのハンドルは「存在しない」ものとして扱う(_get_open_deviceがオリジン照合する)
             if self._get_open_device(handle_id, frame_token) is None:
                 return _json_dumps({"success": False, "error": "Invalid device handle"})
+            if handle_id in self._busy_handles:
+                return _json_dumps({
+                    "success": False,
+                    "error": invalid_state_error(
+                        f"handle {handle_id} has a bulk transfer in progress and cannot be "
+                        f"closed until it completes"
+                    ),
+                })
             info = self._open_devices.pop(handle_id, None)
             dev = info.get("device") if info else None
             if dev is not None:
@@ -1953,8 +1967,8 @@ class WebUSBBridge(QObject):
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
 
-    # ↓↓↓ 以下3つは意図的に @Slot を付けていない(=QWebChannel経由でJS/Webページからは
-    # 一切呼び出せない)。任意のオリジン一覧の閲覧・他オリジンの許可取り消しは、
+    # ↓↓↓ 以下4つは意図的に @Slot を付けていない(=QWebChannel経由でJS/Webページからは
+    # 一切呼び出せない)。任意のオリジン一覧の閲覧・許可の付与/取り消しは、
     # 設定画面のようなアプリ内部の信頼された経路からのみ行うべき情報/操作であり、
     # 表示中のWebページに公開すべきではないため。設定UIを追加する際はここから
     # Python側で直接呼び出す想定。
@@ -1965,6 +1979,49 @@ class WebUSBBridge(QObject):
         except Exception as e:
             print(f"[pyside6-webusb] list_granted_origins: 例外を無視: {e}")
             return {}
+
+    def grant_device_for_origin(self, origin, vendor_id, product_id):
+        """🆕 v0.0.5a0: revoke_origin_grant()/revoke_all_for_origin()は元々あったが、
+        その対になる「取り消しではなく能動的に許可する」公開APIが存在しない
+        非対称なギャップがあった。ホストアプリ自身が、チューザーダイアログを
+        一切経由せずに、あるオリジンへ特定デバイスへのアクセスを事前許可
+        できるようにする——実Chromeのエンタープライズポリシー
+        `WebUsbAllowDevicesForUrls` に相当する、kiosk/組み込み用途向けの
+        仕組み(起動時に設定ファイルや管理者ポリシーから呼び出す想定)。
+
+        requestDeviceChooser()経由の通常の許可と全く同じ_grant()/永続化
+        ストア(QSettings、_load_granted_origins/_save_granted_origins)を
+        使うため、事前許可された組み合わせはlistDevices()/navigator.usb.
+        getDevices()にも即座に反映され、後からrevoke_origin_grant()で
+        取り消すこともできる——通常フローで得た許可と区別できない、
+        完全に対称な操作として扱える。
+
+        🛡️ ブロックリスト対象デバイス(セキュリティキー等、
+        KNOWN_SECURITY_KEY_BLOCKLIST)は、ここでも拒否する。むしろ
+        ユーザー本人の明示的な操作(チューザーダイアログでの選択)を経ない
+        経路だからこそ、汚染された/誤った設定ファイル経由でうっかり
+        許可してしまう事故を防ぐ意味は openDevice() 以上に大きい。
+
+        戻り値: 実際に新規の許可を追加したら True。既に許可済みだった場合や、
+        origin未指定/ブロックリスト該当で許可しなかった場合は False——
+        「何か変わったか」を呼び出し元(設定UIの保存ボタン等)がそのまま
+        判定に使えるようにするため、単なる成功フラグではなくこの意味にする
+        (revoke_origin_grant()の戻り値の意味と対称)。"""
+        try:
+            if not origin:
+                return False
+            if is_blocklisted_device(vendor_id, product_id):
+                print(
+                    f"[pyside6-webusb] grant_device_for_origin: ブロックリスト対象デバイス "
+                    f"(vendorId={vendor_id}, productId={product_id}) への事前許可はスキップされました"
+                )
+                return False
+            already_granted = self._is_granted(origin, vendor_id, product_id)
+            self._grant(origin, vendor_id, product_id)
+            return not already_granted
+        except Exception as e:
+            print(f"[pyside6-webusb] grant_device_for_origin: 例外を無視: {e}")
+            return False
 
     def revoke_origin_grant(self, origin, vendor_id, product_id):
         try:
