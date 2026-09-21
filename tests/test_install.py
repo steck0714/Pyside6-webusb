@@ -124,9 +124,61 @@ def test_install_is_scoped_to_the_pages_own_origin_not_a_shared_default():
     print("test_install_is_scoped_to_the_pages_own_origin_not_a_shared_default: OK")
 
 
+def test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable(monkeypatch):
+    """🛡️ バグ修正の回帰テスト(v0.0.5a1)。
+
+    install()のdocstringは「QWebChannel自体が使えない環境では例外を送出せず
+    Noneを返す」と約束しているが、修正前は`from PySide6.QtWebChannel import
+    QWebChannel`/`from PySide6.QtWebEngineCore import QWebEngineScript`が
+    本体のtry節より外(関数の一番最初)に置かれていたため、これら自体の
+    importが失敗する環境では生のImportError/ModuleNotFoundErrorがそのまま
+    送出され、約束が守られていなかった。
+
+    PySide6 6.12.0a1開発版のwheelを実機確認したところ、QtWebEngineCoreが
+    PySide6-Addonsから新設のPySide6-WebEngineという別パッケージへ分離されて
+    いた(まだ正式リリースはされていない)ため、「PySide6-Addonsは入って
+    いるがQtWebEngineCoreだけがimportできない」環境は今後起こり得る、
+    実際に発生し得る状況として見つかった。
+
+    sys.modulesへNoneを仕込む(test_diagnostics.pyの
+    test_environment_report_detects_missing_pyside6と同じ、pytest公式に
+    文書化された定石)ことでPySide6.QtWebEngineCoreだけをimport不能にし
+    (PySide6自体・QtWebChannel等は本物のまま)、install()がNoneを返す
+    (raiseしない)ことを確認する。monkeypatchはテスト終了時に自動で
+    元へ戻すため、他のテストへの副作用は残らない。"""
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineCore", None)
+    _make_app()
+    page = FakePage()
+    result = install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install")
+    assert result is None
+    assert page.web_channel is None, "QtWebEngineCoreのimportに失敗した時点で、QWebChannelの配線自体に進んでいないはず"
+    print("test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable: OK")
+
+
 if __name__ == "__main__":
+    class _FakeMonkeypatch:
+        """pytestなしでも走らせられるよう、monkeypatch.setitem相当を素朴に実装したもの
+        (test_bridge.pyの_FakeMonkeypatchはsetattr版、こちらはsys.modules用のsetitem版)。"""
+        def __init__(self):
+            self._restore = []
+
+        def setitem(self, mapping, key, value):
+            self._restore.append((mapping, key, key in mapping, mapping.get(key)))
+            mapping[key] = value
+
+        def undo(self):
+            for mapping, key, had_key, old_value in reversed(self._restore):
+                if had_key:
+                    mapping[key] = old_value
+                else:
+                    mapping.pop(key, None)
+            self._restore.clear()
+
+    mp = _FakeMonkeypatch()
     test_install_returns_a_bridge_and_registers_the_web_channel()
     test_install_injects_exactly_two_scripts_with_correct_injection_point_and_world()
     test_install_does_not_run_scripts_on_subframes()
     test_install_is_scoped_to_the_pages_own_origin_not_a_shared_default()
+    test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable(mp)
+    mp.undo()
     print("ALL INSTALL TESTS PASSED")

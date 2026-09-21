@@ -1191,6 +1191,80 @@ def test_bulk_transfer_large_payload_round_trip_via_base64():
     print("test_bulk_transfer_large_payload_round_trip_via_base64: OK")
 
 
+def test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input():
+    """🆕 v0.0.5a1: Python 3.15(Doc/whatsnew/3.15.rst、Lib/base64.py、
+    Modules/binascii.cを実ソース確認済み)で追加されたbase64.b64decode()の
+    canonical引数を、3.15未満でも同じ結果になるround-trip判定で再現する。
+
+    'Zh==' はRFC 4648で有名な非正規base64の例: 標準ライブラリの
+    base64.b64decode()自体はレニエントに受理してb'f'を返す(パディング
+    ビットが本来ゼロであるべきところ非ゼロになっている)が、正規の
+    エンコーダ(_b64encode/JSのbtoa())が生成する'Zg=='とは異なるビット列。
+    QWebChannelは素のJSオブジェクトとして公開されるため、悪意あるフレームは
+    ポリフィルを経由せずこの手の非正規文字列を直接送り込める。"""
+    from pyside6_webusb.bridge import _b64decode, _b64decode_or_data_error, _b64encode
+    import base64 as _stdlib_b64
+
+    canonical = _stdlib_b64.b64encode(b"f").decode("ascii")
+    assert canonical == "Zg=="
+    noncanonical = "Zh=="
+    assert _stdlib_b64.b64decode(noncanonical) == b"f", "テストの前提(標準ライブラリはレニエント)が崩れている"
+
+    # 正規形は従来どおり通る
+    assert _b64decode(canonical) == b"f"
+    data, err = _b64decode_or_data_error(canonical)
+    assert err is None and data == b"f"
+
+    # 非正規形は拒否される
+    try:
+        _b64decode(noncanonical)
+        raise AssertionError("非正規base64が_b64decode()で拒否されなかった")
+    except Exception as e:
+        assert isinstance(e, ValueError), f"binascii.Errorはvalueerrorのサブクラスのはず: {type(e)}"
+
+    data2, err2 = _b64decode_or_data_error(noncanonical)
+    assert data2 is None
+    parsed = json.loads(err2)
+    assert parsed["success"] is False
+    assert parsed["error"].startswith("DataError: "), parsed["error"]
+
+    # _b64encode()自身の出力は常に正規形なので、往復させても壊れない
+    binary = bytes((i * 31 + 7) % 256 for i in range(517))
+    assert _b64decode(_b64encode(binary)) == binary
+    print("test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input: OK")
+
+
+def test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError():
+    """🛡️ バグ修正の回帰テスト(v0.0.5a1)。
+
+    修正前は、controlTransferOut/bulkTransferOut/isochronousTransferOutの
+    3箇所とも`data = _b64decode(data_b64)`が個別のtry/exceptを持たず、
+    メソッド末尾の`except Exception as e: return {"error":
+    safe_error_str(e)}`まで素通りしていた。この経路にはerrors.pyの規約上の
+    接頭辞("DataError: "等)が付かないため、polyfill.py側の
+    throwFromResult()がどのDOMExceptionにも振り分けられず、実Chromeが使う
+    DataError(データの中身がおかしい)ではなく、デフォルトのNetworkErrorへ
+    誤ってフォールバックしていた。"""
+    ep_out = FakeEndpoint(0x02, 0x02)
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [ep_out])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    result = json.loads(bridge.bulkTransferOut(handle, 2, "Zh=="))
+    assert result["success"] is False
+    assert result["error"].startswith("DataError: "), (
+        f"非正規base64はDataErrorになるべきだが実際は: {result['error']!r}"
+    )
+    # 拒否された以上、実際にデバイスへ書き込みが発生していないことも確認する
+    # (FakeDevice.write_callsは実際にwrite()が呼ばれて初めて遅延生成される
+    # ため、1度も無ければ属性自体が存在しない)
+    assert getattr(dev_a, "write_calls", []) == []
+    print("test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError: OK")
+
+
 def test_bulk_transfer_rejects_out_of_range_endpoint_number():
     """実Chromeは endpoint番号が 1-15 の範囲外(0または16以上)だと
     IndexSizeErrorで即座に拒否する(EnsureEndpointAvailable())。"""
@@ -1797,6 +1871,8 @@ if __name__ == "__main__":
     test_refresh_callback_reflects_newly_plugged_device(mp)
     test_full_flow_persists_grant_and_usage_without_mocking_internals(mp)
     test_bulkTransferIn_adds_the_in_direction_bit()
+    test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input()
+    test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError()
     test_control_transfer_class_request_to_protected_interface_is_blocked()
     test_control_transfer_interface_recipient_requires_claim()
     test_control_transfer_standard_request_restrictions()

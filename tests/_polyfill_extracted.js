@@ -97,6 +97,13 @@
     //    プレフィックスを漏れなくここに列挙するのが正しい対処であり、
     //    個々の呼び出し箇所でdefaultErrorNameを都度指定する方式は今回のように
     //    漏れが生まれやすいため採らない。
+    // 🛡️ security_audit No.2b: Python側(requestDeviceChooser)がfilters/
+    //    exclusionFiltersの構造検証を素のQWebChannel直叩きに対する最終防衛
+    //    として追加したことに伴う対応。実仕様(wicg.github.io/webusb)では、
+    //    無効なUSBDeviceFilterは(下のisValidUsbDeviceFilterによるJS側の
+    //    正規チェックと同様)DOMExceptionではなく組み込みの TypeError に
+    //    なるべきものなので、'TypeError:'プレフィックスだけは他と扱いを分け、
+    //    DOMExceptionではなく本物のTypeErrorとしてthrowする。
     var KNOWN_ERROR_PREFIXES = [
         'SecurityError:', 'InvalidStateError:', 'NotFoundError:',
         'InvalidAccessError:', 'IndexSizeError:', 'DataError:',
@@ -104,6 +111,9 @@
     function throwFromResult(res, defaultMessage, defaultErrorName) {
         var msg = (res && res.error) || defaultMessage;
         var name = defaultErrorName || 'NetworkError';
+        if (typeof msg === 'string' && msg.indexOf('TypeError:') === 0) {
+            throw new TypeError(msg.slice('TypeError:'.length).trim());
+        }
         if (typeof msg === 'string') {
             for (var i = 0; i < KNOWN_ERROR_PREFIXES.length; i++) {
                 var prefix = KNOWN_ERROR_PREFIXES[i];
@@ -395,14 +405,35 @@
     }
     _bridgeReady.then(function(bridge) {
         if (!bridge) return;
+        // 🛡️ security_audit No.5: Python側のdeviceConnected/deviceDisconnected
+        // シグナルは、QWebChannelにフレーム単位配信の仕組みが無いため、ページ内の
+        // 全フレームへブロードキャストされる。発火条件も「トップレベルページの
+        // 許可状況」だけで、"このイベントを受け取っている個々のフレーム自身"の
+        // オリジンは一切見ていない(bridge.pyの_poll_hotplug()のコメント参照)。
+        // その結果、トップレベルページが許可したデバイスの抜き挿しが、同じページに
+        // 埋め込まれた無関係なクロスオリジンiframe(そのデバイスへの許可を一度も
+        // 得ていない第三者広告等)にまで届いてしまう。
+        // QWebChannel/Qt Signal自体をフレーム単位配信に作り直すことはできないが、
+        // 受け取った側であるここで、getDevices()と同じ判定(=このフレーム自身の
+        // オリジンが実際にこのvendorId/productIdへの許可を持っているか)を
+        // isGrantedToThisFrame()で再検証し、許可が無ければpageへdispatchせずに
+        // 静かに捨てる。これによりobservableな挙動としては正しく
+        // フレームごとにスコープされる。
+        function _dispatchIfGrantedToThisFrame(type, info) {
+            try {
+                bridge.isGrantedToThisFrame(info.vendorId, info.productId, _frameToken(), function(granted) {
+                    if (granted) _dispatchUsbEvent(type, new OpenWebUSBDevice(info));
+                });
+            } catch (e) { /* 判定できなければ安全側(dispatchしない) */ }
+        }
         if (bridge.deviceConnected && bridge.deviceConnected.connect) {
             bridge.deviceConnected.connect(function(infoJson) {
-                try { _dispatchUsbEvent('connect', new OpenWebUSBDevice(JSON.parse(infoJson))); } catch (e) {}
+                try { _dispatchIfGrantedToThisFrame('connect', JSON.parse(infoJson)); } catch (e) {}
             });
         }
         if (bridge.deviceDisconnected && bridge.deviceDisconnected.connect) {
             bridge.deviceDisconnected.connect(function(infoJson) {
-                try { _dispatchUsbEvent('disconnect', new OpenWebUSBDevice(JSON.parse(infoJson))); } catch (e) {}
+                try { _dispatchIfGrantedToThisFrame('disconnect', JSON.parse(infoJson)); } catch (e) {}
             });
         }
     });
@@ -445,10 +476,24 @@
                 return Promise.reject(new DOMException(
                     'Must be handling a user gesture to call navigator.usb.requestDevice().', 'SecurityError'));
             }
-            return callBridge('requestDeviceChooser', JSON.stringify({
-                filters: _options.filters,
-                exclusionFilters: exclusionFilters,
-            }), _frameToken()).then(function(res) {
+            // 🛡️ security_audit No.2: 直前で確認した「本物のユーザー操作から
+            //    呼ばれている」という事実を、Python側(requestDeviceChooser)が
+            //    独立に検証できる形にするため、短命・使い切りのトークンを
+            //    発行してもらってから渡す(see: bridge.pyのmintGestureToken/
+            //    __init__のself._gesture_tokensのコメント、および既知の限界)。
+            //    mintGestureTokenはJSONではなく生のトークン文字列を返す設計
+            //    なので、常にJSON.parseする callBridge は使わず直接呼ぶ。
+            return _bridgeReady.then(function(bridge) {
+                return new Promise(function(resolve) {
+                    if (!bridge) return resolve('');
+                    bridge.mintGestureToken(function(token) { resolve(token || ''); });
+                });
+            }).then(function(gestureToken) {
+                return callBridge('requestDeviceChooser', JSON.stringify({
+                    filters: _options.filters,
+                    exclusionFilters: exclusionFilters,
+                }), _frameToken(), gestureToken);
+            }).then(function(res) {
                 if (res.cancelled) {
                     // 🛡️ res.errorがある場合(再入防止ガード発火・pyusbバックエンド不通・
                     //    ダイアログ例外など)は実際の理由を伝える。無い場合(=ユーザーが

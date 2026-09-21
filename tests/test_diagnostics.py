@@ -103,6 +103,51 @@ def test_rust_accel_status_reflects_import_success_without_being_a_problem(monke
     print("test_rust_accel_status_reflects_import_success_without_being_a_problem: OK")
 
 
+def test_environment_report_detects_missing_qtwebengine(monkeypatch):
+    """🆕 v0.0.5.post2: PySide6-Addonsは入っているが、QtWebEngineCore/
+    QtWebEngineWidgetsだけがimportできない環境(PySide6 6.12.0a1開発版で
+    実機確認された、QtWebEngineがPySide6-WebEngineという別パッケージへ
+    分離される変更を想定)を切り分けて検出できることを確認する。sys.modules
+    へNoneを仕込む定石はtest_environment_report_detects_missing_pyside6と同じ。"""
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineCore", None)
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineWidgets", None)
+    report = environment_report()
+    assert report["pyside6_version"] is not None, "PySide6自体は正しくimportできているはず"
+    assert report["qtwebengine_importable"] is False
+    assert any(
+        "QtWebEngineCore" in p or "PySide6-WebEngine" in p for p in report["problems"]
+    ), report["problems"]
+    print("test_environment_report_detects_missing_qtwebengine: OK")
+
+
+def test_environment_report_reports_frame_origin_isolation_availability(monkeypatch):
+    """この検証環境(PySide6 6.11.2)にはQWebEngineFrameが実在する
+    (frame_origin.py/CHANGELOGが記録するとおり、実機確認された導入版は6.8.0)ため、
+    frame_origin_isolation_availableはまずTrueになることを確認する。続けて、
+    QWebEngineFrame属性を持たない偽のQtWebEngineCoreモジュールに差し替え
+    (test_rust_accel_status_reflects_import_success_without_being_a_problemと同じ、
+    偽モジュールをsys.modulesへ仕込む手法)、6.7以前を模してFalseに切り替わり、
+    かつ人間可読な注記が添えられることを確認する。"""
+    report = environment_report()
+    assert report["frame_origin_isolation_available"] is True
+    assert report["frame_origin_isolation_note"] is not None
+
+    # `import PySide6.QtWebEngineCore as _qtwec` は、PySide6が既にimport済みの
+    # このプロセスでは実質 `_qtwec = PySide6.QtWebEngineCore`(PySide6モジュール
+    # オブジェクト自身への属性アクセス)に等しく、sys.modulesの当該エントリを
+    # 差し替えるだけでは効かない(test_environment_report_detects_missing_pyside6の
+    # docstringが記録する、PySide6.QtCoreの子モジュールキャッシュと同じ種類の
+    # CPythonのimport実装の詳細)。親パッケージ側の属性も揃えて差し替える必要がある。
+    import PySide6
+    fake_qtwec = type(sys)("PySide6.QtWebEngineCore")  # QWebEngineFrame属性を持たない空モジュール
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineCore", fake_qtwec)
+    monkeypatch.setattr(PySide6, "QtWebEngineCore", fake_qtwec)
+    report2 = environment_report()
+    assert report2["frame_origin_isolation_available"] is False
+    assert "6.8" in report2["frame_origin_isolation_note"]
+    print("test_environment_report_reports_frame_origin_isolation_availability: OK")
+
+
 def test_format_environment_report_lists_detected_problems():
     dirty_report = {
         "pyside6_webusb_version": "0.0.5a0", "python_version": "3.14.7",
@@ -213,7 +258,7 @@ print("ALL_OK")
     assert result.returncode == 0, (
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
-    assert "import_ok=0.0.5.post1" in result.stdout, result.stdout
+    assert f"import_ok={pyside6_webusb.__version__}" in result.stdout, result.stdout
     assert "pyside6_version=None" in result.stdout, result.stdout
     assert "install=CLEAN_IMPORTERROR" in result.stdout, result.stdout
     assert "WebUSBBridge=CLEAN_IMPORTERROR" in result.stdout, result.stdout

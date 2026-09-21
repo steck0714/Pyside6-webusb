@@ -67,8 +67,26 @@ const fakeBridge = {
         }));
     },
     listDevices: function(frameToken, cb) { fakeBridgeCalls.push(['listDevices', frameToken]); cb(JSON.stringify({ devices: fakeDevices })); },
-    requestDeviceChooser: function(optionsJson, frameToken, cb) {
-        fakeBridgeCalls.push(['requestDeviceChooser', optionsJson, frameToken]);
+    // 🩹 v0.0.5.post2: security_audit No.2(0.0.4b3)がrequestDeviceChooser()に
+    // gestureTokenを追加した際、このフェイクブリッジ側は更新されないまま
+    // 取り残されていた。mintGestureToken自体がモックに存在せず、実際に
+    // `node tests/test_polyfill.js` を実行すると
+    // 「bridge.mintGestureToken is not a function」で即座に失敗する状態
+    // だった(pytestとは別プロセスのテストのため、通常のテスト実行では
+    // 気づかれていなかった)。mintGestureTokenはJSONではなく生の文字列を
+    // 返す設計(polyfill.py側のコメント参照)なのでモックもそれに合わせる。
+    mintGestureToken: function(cb) { cb('fake-gesture-token'); },
+    // 🩹 v0.0.5.post2: 上と同じ理由(0.0.4b3のsecurity_audit No.5)で、こちらも
+    // フェイクブリッジから抜け落ちていた。polyfill.py側はdeviceConnected/
+    // deviceDisconnected受信のたびにisGrantedToThisFrame()で再検証してから
+    // dispatchする設計のため、モックに無いと"connect"/"disconnect"イベントが
+    // 一切dispatchされず(呼び出しがtry/catchで握りつぶされ無言で失敗する)、
+    // 該当テストが検出できないまま静かに壊れていた。このモックには実際の
+    // 許可状態の概念が無いため、常にgranted=trueを返す(=dispatch経路自体の
+    // 検証が目的で、許可判定ロジック自体はPython側test_bridge.pyの領分)。
+    isGrantedToThisFrame: function(vid, pid, frameToken, cb) { cb(true); },
+    requestDeviceChooser: function(optionsJson, frameToken, gestureToken, cb) {
+        fakeBridgeCalls.push(['requestDeviceChooser', optionsJson, frameToken, gestureToken]);
         cb(JSON.stringify({ device: fakeDevices[0] }));
     },
     openDevice: function(vid, pid, frameToken, cb) { fakeBridgeCalls.push(['openDevice', vid, pid, frameToken]); cb(JSON.stringify(openDeviceResponse)); },
