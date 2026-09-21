@@ -2,6 +2,172 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5.post2]
+
+Merge of two independent verification passes run in parallel against the same `0.0.5.post1`
+starting point — one against a real **Python `3.15.0rc2`** / **`PySide6 6.12.0a1.dev1789538080`**
+environment focused on this project's *test harness and Rust build*, the other against the same
+pre-release wheels/source tree focused on this project's *shipped Python logic* — plus one
+further, structural bug this merge itself found by actually re-running the combined result
+rather than assuming two independently-green test runs stay green once spliced together. Nothing
+under `src/pyside6_webusb/` needed any change to keep working on 3.15/6.12.0a1 beyond what's
+listed below; both starting passes independently re-confirmed the `178 passed/1 skipped`
+`0.0.5a0` baseline held before either touched anything.
+
+**Version:** continuing the `.post` line from the already-published `0.0.5.post1` — `0.0.5a1`
+would sort *before* `0.0.5.post1` under PEP 440 and would never be installed by default, the same
+"labeled `0.0.5a0`, shipped `0.0.5.post1`" discrepancy this project's own `0.0.5a0` entry already
+flagged in its own "Project metadata" below. Referred to informally as `v0.0.5a1` during
+development (both merged sources' own `_version.py` said this, one of them explicitly "per
+instruction"); `0.0.5.post2` is the one version string this release actually ships under,
+everywhere, to avoid repeating that exact discrepancy a second time.
+
+### Security
+
+- **`_b64decode()` (`bridge.py`) now rejects non-canonical base64** — e.g. `"Zh=="`, which
+  `base64.b64decode()` has always decoded leniently to the same bytes as the correct `"Zg=="`
+  (RFC 4648 §3.5: non-zero padding bits). `data_b64` arguments to `controlTransferOut`/
+  `bulkTransferOut`/`isochronousTransferOut` reach this function via `QWebChannel`, which exposes
+  `WebUSBBridge` as a plain JS object — a frame that skips `WEBUSB_POLYFILL_JS` and calls these
+  slots directly can pass any string it likes, not only what a real `btoa()`-based encoder would
+  produce. On Python 3.15+, uses the native `canonical=True` parameter `base64.b64decode()`
+  gained in that release — confirmed by reading `Lib/base64.py` and `Modules/binascii.c` directly
+  in the `Python-3.15.0rc2` source tree, not just `Doc/whatsnew/3.15.rst`'s prose. On 3.9–3.14,
+  falls back to a version-independent equivalent (decode leniently, then verify
+  `b64encode(decoded) == original`), guarded by a narrow `except TypeError` in case
+  `canonical=`'s exact shape changes before 3.15's final release. **Known gap, left as such
+  rather than guessed at**: the optional Rust acceleration path
+  (`native/pyside6_webusb_accel`'s `decode_base64`) does not get this check — no Rust toolchain
+  was available in the environment this fix was written in (only a detached `.asc` signature for
+  `rust-1.98.1`, not the toolchain itself), and this project's policy is not to ship a Rust-side
+  "fix" that wasn't actually built and run. Anyone building the accelerated extension should
+  apply the same check to `decode_base64` before relying on it for the same guarantee the
+  pure-Python path now has.
+
+### Fixed
+
+- **`install()` could raise a raw `ImportError`/`ModuleNotFoundError` instead of the `None` its
+  own docstring promises** ("QWebChannel自体が使えない環境では例外を送出せず None を返す").
+  `from PySide6.QtWebChannel import QWebChannel` and
+  `from PySide6.QtWebEngineCore import QWebEngineScript` sat *before* `install()`'s own
+  `try`/`except Exception: return None`, not inside it — so if either import itself failed (as
+  opposed to `QWebChannel(page)`/`registerObject()` failing at the following lines, which *were*
+  already covered), the promised graceful-`None` path was never reached. Found while checking
+  this package against the `PySide6 6.12.0a1` package split described under "Added" below. Moved
+  both imports inside the existing `try` block; no behavior change for the already-covered
+  failure modes. Covered by
+  `test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable`.
+- **Malformed `data_b64` surfaced to JS as a generic `NetworkError` instead of the `DataError`
+  real Chrome uses for malformed transfer data.** `controlTransferOut`/`bulkTransferOut`/
+  `isochronousTransferOut` all called `_b64decode(data_b64)` directly; a `binascii.Error` from it
+  fell through to each method's own generic `except Exception` handler, which has no
+  `errors.py`-style prefix, so `polyfill.py`'s `throwFromResult()` couldn't match it to any
+  `DOMException` and fell back to its default. A new `_b64decode_or_data_error()` wrapper
+  (matching the existing `_control_transfer_validation_error()` early-return shape) is now used
+  at all three call sites. Covered by
+  `test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError`.
+- **`node tests/test_polyfill.js` failed immediately with `TypeError: bridge.mintGestureToken is
+  not a function`, and would still have failed on a later assertion (`connect`/`disconnect`
+  event dispatch never firing) once that first error was fixed.** This Node-based harness's fake
+  bridge object had never been updated for either of two bridge methods `0.0.4b3`'s security
+  audit added — `mintGestureToken` (user-gesture verification) and `isGrantedToThisFrame` (the
+  hotplug-leak fix) — so calling either from the real `polyfill.py` JS crashed the script
+  outright, or threw inside a `try`/`catch` that silently swallowed the failure. Neither was
+  caught by `pytest tests/ security_audit/` passing, since this is a separate Node process this
+  project's own README already documents as a distinct step. Added both to the fake bridge;
+  `requestDeviceChooser`'s mock signature also updated to accept the `gestureToken` parameter the
+  real bridge now requires.
+- **`tests/test_diagnostics.py::test_package_import_and_install_survive_pyside6_being_unavailable`
+  hardcoded `"import_ok=0.0.5.post1"` as a literal**, which would have needed a manual edit on
+  every future version bump — and, in one of this release's two starting points, did get one, to
+  a second hardcoded literal (`"0.0.5a1"`) that this merge did not keep, for the same reason.
+  Changed to compare against `pyside6_webusb.__version__` read dynamically from the outer test
+  process, matching the pattern this same file's
+  `test_environment_report_reflects_the_running_interpreter_and_is_clean` already used a few
+  lines above it.
+- **A structural bug this merge itself introduced was caught before shipping, not after.**
+  Combining the two starting points' independent edits to `tests/test_bridge.py` briefly lost the
+  `def test_bulk_transfer_rejects_out_of_range_endpoint_number():` line — the same "silently
+  becomes an unlabeled tail of the previous test" failure mode this project's own `0.0.4b1`/
+  `0.0.4b2`/`0.0.5a0` entries have each hit before, this time surfacing while splicing in this
+  release's two new base64 tests immediately above it. Caught by actually running
+  `pytest tests/test_bridge.py --collect-only` and checking the count against expectations before
+  trusting the merge — the same practice this project always applies to a single change, applied
+  here to the merge step itself — rather than assuming two independently-green test files stay
+  green once spliced together. Restored; `tests/test_bridge.py`'s own
+  `if __name__ == "__main__":` block (a second, pytest-independent way this file can be run) also
+  gained calls for the two new tests it was still missing.
+
+### Added
+
+- **`diagnostics.environment_report()`: `qtwebengine_importable`.** Installed `PySide6 6.12.0a1`
+  (2026-09 development build) `pyside6-addons`/`pyside6-webengine`/`pyside6-essentials` dev
+  wheels into separate venvs and compared their contents directly (`unzip -l`):
+  `QtWebEngineCore.abi3.so`/`QtWebEngineWidgets.abi3.so`, present inside `pyside6-addons` in
+  every released version through `6.11.2`, have moved into a new, separate `pyside6-webengine`
+  wheel — not yet published to PyPI under any released version as of this writing, so this
+  package's `pyproject.toml` dependencies are deliberately **not** changed to require it yet.
+  This field, and the accompanying `problems` entry naming `PySide6-WebEngine` specifically,
+  exist so that failure is diagnosable rather than a bare `ModuleNotFoundError` with no further
+  guidance if/when that split reaches a real release.
+- **`diagnostics.environment_report()`: `frame_origin_isolation_available` /
+  `frame_origin_isolation_note`.** Installed `PySide6-Essentials`/`Addons` `6.6.0`, `6.7.0`, and
+  `6.8.0` into separate venvs to binary-search exactly which release first shipped
+  `QWebEngineFrame` (absent in `6.6.0`/`6.7.0`; present from `6.8.0`) — the class
+  `frame_origin.FrameOriginTracker` (`0.0.2b0`/`0.0.3`/`0.0.3a0`/`0.0.3b0`) depends on for
+  cross-origin iframe spoofing protection. This project's declared floor is
+  `PySide6-Addons>=6.5`, meaning `6.5`–`6.7` were, until now, silently falling back to the weaker
+  pre-`0.0.2b0` `page.url()`-based origin model with no way for a host app to know.
+  `frame_origin.py`'s `is_functional` docstring updated with the same concrete `6.8.0` figure.
+  Both new fields got their own dedicated tests during this merge
+  (`test_environment_report_detects_missing_qtwebengine`,
+  `test_environment_report_reports_frame_origin_isolation_availability`) — the starting point
+  that added the fields had also wired them into `format_environment_report()` and the README,
+  but had not yet added direct unit tests for either one.
+- **Optional Rust acceleration crate now builds an `abi3` wheel** (`pyo3`'s `abi3-py39` feature),
+  fixing `maturin build` failing outright against Python 3.15 (`error: the configured Python
+  version (3.15) is newer than PyO3's maximum supported version (3.14)` against the pinned
+  `pyo3 =0.27.2`). Built with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`; the resulting `cp39-abi3`
+  wheel imports and round-trips correctly under `3.15.0rc2`. Independent of the 3.15 issue that
+  surfaced it, this is a net improvement: one `abi3` build now covers this package's entire
+  `requires-python = ">=3.9"` range instead of a separate version-specific build per Python minor
+  version. See the README's new "Building against very new Python versions" section.
+
+### Tests
+
+- `tests/` + `security_audit/`: **183 passed, 1 skipped** in the environment this merge itself
+  ran in (up from the `0.0.5a0` baseline's 178 passed/1 skipped by +5 genuinely new tests: the
+  three from "Fixed"/"Added" above plus the two this merge itself wrote for the new diagnostics
+  fields; the `def`-line restoration is a wash against this baseline since it only repairs a
+  regression this merge's own splicing step introduced partway through, not a net-new test).
+  The 1 skip is the same pre-existing, environment-dependent "Rust extension not built" skip in
+  `test_rust_accel.py` (no Rust toolchain in this merge's own environment).
+  One of the two starting points' own environments did have a working Rust toolchain and
+  separately reported **188 passed, 0 skipped** there with the new `abi3` extension actually
+  built — not independently reproduced by this merge, whose own environment had no toolchain
+  either, consistent with the "Security" section's known Rust-side gap above. `node
+  tests/test_polyfill.js`: all assertions pass with the fake-bridge fix above — but only once
+  `tests/_polyfill_extracted.js` (the generated file this harness actually loads, per
+  `extract_polyfill_js.py`'s own documented usage) is regenerated from the current
+  `polyfill.py` first; the copy that arrived checked into this merge's own starting tree had
+  drifted stale (predating the `mintGestureToken`/`isGrantedToThisFrame` codepaths it needed to
+  exercise), which read as a fake-bridge-mock failure until re-running the extraction step
+  confirmed the actual mismatch. Re-running `python tests/extract_polyfill_js.py` before
+  `node tests/test_polyfill.js` is required after any change to `polyfill.py`, generated file
+  or not.
+
+### Project metadata
+
+- Version: `0.0.5.post2`.
+- This entry merges two independent verification passes that were run in parallel against the
+  same `0.0.5.post1` starting point. Their changes were almost entirely non-overlapping by file:
+  one touched only this project's test harness (`tests/test_polyfill.js`) and Rust build config
+  (`native/pyside6_webusb_accel/Cargo.toml`); the other touched only `src/pyside6_webusb/`'s
+  actual logic (`bridge.py`, `diagnostics.py`, `frame_origin.py`, `polyfill.py`) and its matching
+  tests. `README.md` and `tests/test_diagnostics.py`'s version-literal assertion were the only
+  two files both touched; both are reconciled above (taking the more general, non-hardcoded fix
+  for the latter) rather than picked from one side arbitrarily.
+
 ## [0.0.5a0]
 
 Feature release on top of `0.0.4b3`: one new host-app-facing capability
