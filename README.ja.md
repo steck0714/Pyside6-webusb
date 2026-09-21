@@ -481,9 +481,9 @@ v0.x系であり、API、互換性、実機サポートは今後変更される�
 
 ## Related Projects
 
-- Mock-webusb
-- fox-webusb
+- [Mock-webusb](https://github.com/steck0714/Mock-webusb)
+- [fox-webusb](https://github.com/steck0714/fox-webusb)
 
 ## License
 
-MIT License.
+[MIT License](https://github.com/steck0714/Mock-webusb/blob/main/LICENSE)

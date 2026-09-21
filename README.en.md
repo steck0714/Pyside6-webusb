@@ -477,9 +477,9 @@ For production use, validate the complete target environment, including the OS, 
 
 ## Related projects
 
-- Mock-webusb
-- fox-webusb
+- [Mock-webusb](https://github.com/steck0714/Mock-webusb)
+- [fox-webusb](https://github.com/steck0714/fox-webusb)
 
 ## License
 
-MIT License.
+[MIT License](https://github.com/steck0714/Mock-webusb/blob/main/LICENSE)
