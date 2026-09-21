@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5.post3]
+
+Continues the `.post` line from `0.0.5.post2` for the same reason that release continued it
+from `0.0.5.post1`: this project's own `0.0.5a1`-style alpha naming would sort *before* any
+already-published `.post` release under PEP 440 and would never be installed by default.
+Referred to informally as `v0.0.5a2` during development; `0.0.5.post3` is the version string
+this release actually ships under, everywhere.
+
+### Added
+
+- **`pyside6-webusb-doctor --json` / `python -m pyside6_webusb --json`.** Prints
+  `environment_report()`'s dict as JSON on stdout instead of `format_environment_report()`'s
+  human-readable text — same exit-code meaning (non-zero on a real problem) as the existing
+  text mode, which remains the default when `--json` isn't given. This project's own
+  `__main__.py` docstring already documented a CI use case for the plain text mode
+  ("このジョブのPySide6/libusbセットアップは壊れていないか"); `--json` extends that same use
+  case to CI jobs that want to archive the report as a structured artifact or branch on
+  specific `problems` entries programmatically, rather than pattern-matching the text output.
+  `main(argv=None)` had accepted (but never read) an `argv` parameter since `0.0.5a0` — this is
+  its first actual use. Confirmed necessary, not just tidy, by reading the actual
+  `pyside6-webusb-doctor` script `pip install` generates: it calls `sys.exit(main())` with no
+  arguments, so `main()` reading `sys.argv[1:]` itself (when `argv` isn't explicitly passed) is
+  what makes a real `pyside6-webusb-doctor --json` invocation from a shell work at all, not only
+  the explicit-`argv` form used in this project's own tests.
+
+### Compatibility
+
+- **`diagnostics.environment_report()`: `pyusb_backend_note`.** Set when `pyusb_backend`
+  resolves to `"libusb0"` — pyusb's older backend, reached only as a fallback when its newer
+  `libusb1` backend's shared library isn't found. Not a `problems` entry (`libusb0` is still a
+  working backend), but this project's own `security_report/VULNERABILITY_REPORT.md`
+  ("Environment note") already recorded that `pyusb 1.3.1`'s `libusb0.py` emits a
+  `DeprecationWarning` under Python 3.14 about a `ctypes.Structure` `_pack_`/`_fields_` pattern
+  scheduled to become an error in Python 3.19 — an upstream `pyusb` issue, confirmed by reading
+  `usb/backend/libusb1.py`'s own source in the installed `pyusb 1.3.1` package, not just
+  restating the earlier note secondhand. Re-checked whether the warning fires under this
+  release's own Python (3.12.3): it does not, consistent with the original note being specific
+  to 3.14+ rather than a regression introduced here. The note points at installing an OS-level
+  `libusb1` shared library as the practical way to stop depending on the `libusb0` path at all.
+  Wired into `format_environment_report()` the same way `frame_origin_isolation_note` is: an
+  extra "参考:" line, only when the note is actually set.
+
+### Investigated, not changed
+
+- **Isochronous IN transfers' per-packet fidelity, revisited.** `security_report/
+  VULNERABILITY_REPORT.md`'s "Noted but not scored" entry already flagged that a short
+  `isochronousTransferIn()` result can leave later reconstructed packets silently truncated or
+  empty while still reporting `status: "ok"`. Traced this to its root cause this time by reading
+  the installed `pyusb 1.3.1`'s `usb/backend/libusb1.py` directly: libusb's own
+  `_libusb_iso_packet_descriptor` struct *does* carry a per-packet `actual_length` (and status)
+  for every packet in an isochronous transfer, but pyusb's public `iso_read()` only returns the
+  *sum* of every packet's `actual_length` as one combined integer — the per-packet breakdown
+  this project's code would need exists inside pyusb's C-level transfer struct, but never
+  reaches pyusb's own Python API surface. Getting genuine per-packet fidelity would mean
+  reaching past `iso_read()` into pyusb's private transfer-handling internals, which is exactly
+  the kind of "riskier... rather than a rushed half-solution" change `0.0.4b2`'s isochronous
+  entry already declined to make without real hardware to verify against, and this release has
+  no more access to real isochronous hardware than that one did. Left as-is, with this concrete
+  root cause now recorded in case a future release has real hardware to verify a fix against.
+
+### Tests
+
+- `tests/` + `security_audit/`: **184 passed, 2 skipped** in the environment this release ran
+  in, up from `0.0.5.post2`'s 183 passed/1 skipped: +1 genuinely new test
+  (`test_main_json_flag_prints_the_raw_report_as_json_with_the_same_exit_code`) plus one new
+  test that itself skips in this particular environment
+  (`test_environment_report_notes_libusb0_fallback_without_treating_it_as_a_problem`, added to
+  cover `pyusb_backend_note` — skips here because this sandbox's `libusb0.get_backend()` fails
+  too once `libusb1`'s is forced to fail, so the specific "`libusb1` absent, `libusb0` present"
+  fallback this test targets can't be reproduced in this environment; the existing, similarly
+  environment-dependent `test_rust_accel.py` skip is unrelated and unchanged). Also updated
+  `test_main_returns_zero_when_clean_and_nonzero_when_problems` to pass `argv=[]` explicitly
+  rather than relying on `main()`'s (now meaningful, not just accepted-and-ignored) default —
+  otherwise this test would have started depending on whatever arguments the outer `pytest`
+  invocation itself happened to receive. `node tests/test_polyfill.js` and
+  `tsc --strict --noEmit` against both `types/*.ts` files: unaffected by this release (no
+  changes to `polyfill.py`'s embedded JS or to `types/`), re-run anyway and still pass.
+
+### Project metadata
+
+- Version: `0.0.5.post3`.
+
 ## [0.0.5.post2]
 
 Merge of two independent verification passes run in parallel against the same `0.0.5.post1`
