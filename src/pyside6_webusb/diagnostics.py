@@ -55,7 +55,7 @@ def _pyside6_versions():
 
 
 def _pyusb_backend_info():
-    """(pyusb_version, backend_name_or_None, problem_or_None) を返す。
+    """(pyusb_version, backend_name_or_None, problem_or_None, backend_note_or_None) を返す。
 
     pyusbが「importできる」ことと「実際にUSBデバイスへアクセスできる」ことは
     別問題: pyusb自体は純Pythonパッケージなのでpipで必ず入るが、実際の通信は
@@ -63,13 +63,26 @@ def _pyusb_backend_info():
     そちらが無いと`usb.core.find()`などが常に失敗する。この2段階を切り分けて
     報告することで、「pipでは入っているのになぜか動かない」という、この種の
     問い合わせで最も多いパターンを診断できるようにする。backend_nameは
-    実際に解決できたバックエンド名('libusb1'/'libusb0')。"""
+    実際に解決できたバックエンド名('libusb1'/'libusb0')。
+
+    🆕 v0.0.5.post3: backend_noteは、backend_nameが解決できた場合の追加の
+    注記(現状はlibusb0へフォールバックした場合のみ非None)。problemとは違い
+    「動作はするが知っておいた方がよい」情報であり、environment_report()の
+    problemsリストには含めない(frame_origin_isolation_note等と同じ扱い)。
+    security_report/VULNERABILITY_REPORT.mdの「Environment note」の追跡:
+    Python 3.14でpyusb 1.3.1のlibusb0.pyバックエンドがctypes.Structureの
+    _pack_/_fields_の組み合わせについてDeprecationWarningを出すことが
+    その監査時点で確認されていた(将来のPythonでエラーになりうる、upstream
+    pyusb側の課題)。この実装のこのPython(3.12系)では当該警告は再現しない
+    ことを確認済みだが、libusb0への実際のフォールバックが起きた環境でのみ
+    意味を持つ注記なので、フォールバックが実際に発生した場合にのみ表示する。
+    """
     pyusb_version = None
     try:
         import usb
         pyusb_version = getattr(usb, "__version__", None)
     except Exception as e:
-        return None, None, f"pyusb自体がimportできません('pip install pyusb'を確認してください): {e}"
+        return None, None, f"pyusb自体がimportできません('pip install pyusb'を確認してください): {e}", None
 
     backend_name = None
     try:
@@ -93,7 +106,17 @@ def _pyusb_backend_info():
             "Linux: 'libusb-1.0-0' パッケージ / macOS: 'brew install libusb' / "
             "Windows: libusbのDLLを配置、のいずれかが必要です。"
         )
-    return pyusb_version, backend_name, problem
+    backend_note = None
+    if backend_name == "libusb0":
+        backend_note = (
+            "現在のバックエンドはlibusb0です(pyusbがlibusb1を見つけられなかった場合の"
+            "フォールバック)。動作はしますが、Python 3.14以降でpyusb 1.3.1のlibusb0.py"
+            "バックエンドがctypes.Structureの_pack_/_fields_の組み合わせについて"
+            "DeprecationWarningを出すことを確認済みです(upstream pyusb側の課題。"
+            "security_report/VULNERABILITY_REPORT.mdの「Environment note」参照)。"
+            "可能であればOS側にlibusb1の共有ライブラリを導入してください。"
+        )
+    return pyusb_version, backend_name, problem, backend_note
 
 
 def _rust_accel_status():
@@ -193,7 +216,7 @@ def environment_report() -> dict:
     無い、等)。Rustアクセラレーション未ビルドはproblemsに含めない
     ——それ自体は正常な状態(フォールバックが正しく機能している)であるため。"""
     pyside6_version, shiboken6_version, qt_runtime_version = _pyside6_versions()
-    pyusb_version, pyusb_backend, pyusb_problem = _pyusb_backend_info()
+    pyusb_version, pyusb_backend, pyusb_problem, pyusb_backend_note = _pyusb_backend_info()
     rust_accelerated, rust_accel_version = _rust_accel_status()
     qtwebengine_importable, qtwebengine_note = _qtwebengine_status()
     frame_isolation_available, frame_isolation_note = _frame_origin_isolation_status()
@@ -221,6 +244,7 @@ def environment_report() -> dict:
         "qtwebengine_importable": qtwebengine_importable,
         "pyusb_version": pyusb_version,
         "pyusb_backend": pyusb_backend,
+        "pyusb_backend_note": pyusb_backend_note,
         "rust_accelerated": rust_accelerated,
         "rust_accel_version": rust_accel_version,
         # 🆕 v0.0.5a1: PySide6 6.8.0で追加されたQWebEngineFrameの静的な有無
@@ -278,4 +302,7 @@ def format_environment_report(report: dict = None) -> str:
     if report.get("frame_origin_isolation_available") is False and report.get("frame_origin_isolation_note"):
         lines.append("")
         lines.append(f"参考: {report['frame_origin_isolation_note']}")
+    if report.get("pyusb_backend_note"):
+        lines.append("")
+        lines.append(f"参考: {report['pyusb_backend_note']}")
     return "\n".join(lines)
