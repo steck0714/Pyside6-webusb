@@ -108,7 +108,18 @@ class FrameOriginTracker:
         古いPySide6/Qt(このシグナルやQWebEngineFrameが無いバージョン)や、
         pageがQWebEnginePageと十分互換のオブジェクトでない場合はFalseになる。
         install()はこれを見てsetRunsOnSubFrames()を決めるべき
-        (Falseなら安全側に倒し、サブフレームへは注入しない)。"""
+        (Falseなら安全側に倒し、サブフレームへは注入しない)。
+
+        🔍 実機検証(v0.0.5a1): QWebEngineFrameクラス自体は、PySide6 6.6.0/
+        6.7.0には存在せず、6.8.0で初めて追加されたことを、3バージョンを
+        実際に別々の環境へインストールしバイナリサーチして確認した
+        (diagnostics.environment_report()の"frame_origin_isolation_available"
+        で同じ判定を報告している)。つまりPySide6-Addons>=6.5という現在の
+        サポート下限では、6.5〜6.7で本クラスが常にFalseとなり、
+        WebUSBBridge._current_origin()はpage.url()を見る後方互換パス
+        (0.0.2b0より前の、cross-origin iframeのなりすましに弱い判定)へ
+        フォールバックする。バグではなく設計上のフォールバックだが、
+        ホストアプリ開発者が気づけるようdiagnostics側で明示している。"""
         return self._navigation_signal_connected
 
     # ---- 配線 ----

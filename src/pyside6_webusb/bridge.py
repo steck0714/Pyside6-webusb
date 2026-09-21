@@ -24,13 +24,24 @@ or manually::
     # at DocumentCreation time. See polyfill.install() for the full wiring.
 """
 import base64
+import binascii
 import json
 import secrets
+import sys
 import time
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
 
 from ._version import __version__
+
+# 🆕 v0.0.5a1: Python 3.15 (Doc/whatsnew/3.15.rst, Lib/base64.py,
+# Modules/binascii.c を実ソース確認済み)でbase64.b64decode()にcanonical
+# 引数が追加された。canonical=Trueだとパディングビットが非ゼロ等の
+# 「非正規(non-canonical)」なbase64をbinascii.Errorで拒否する
+# (RFC 4648 §3.5「Decoders MAY reject non-zero padding bits」)。
+# 3.15未満にはこの引数自体が無い(TypeErrorになる)ため、バージョンで
+# 分岐する。
+_B64_DECODE_SUPPORTS_CANONICAL = sys.version_info >= (3, 15)
 
 # 🦀 大容量転送(WebADB等)向けのオプショナルなRustアクセラレーション。
 # `native/pyside6_webusb_accel/`(maturinでビルドするPyO3拡張)がビルド済みで
@@ -53,9 +64,67 @@ def _b64encode(data) -> str:
 
 
 def _b64decode(s: str) -> bytes:
+    """base64文字列をbytesへ。
+
+    🛡️ 入力検証(v0.0.5a1): QWebChannelは素のJSオブジェクトとして公開される
+    ため、悪意あるフレームはWEBUSB_POLYFILL_JSを経由せずcontrolTransferOut等の
+    data引数へ任意の文字列を直接渡せる。正規のエンコーダ(_b64encode/JSの
+    btoa())は常に正規形のbase64しか生成しないため、以下の正規性
+    (canonical)チェックで正規の呼び出しが壊れることはない——弾かれるのは
+    非ゼロパディングビットや代替アルファベット混入を意図的に仕込んだ
+    入力のみ。失敗時はbinascii.Errorを送出する(呼び出し元は
+    _b64decode_or_data_error()経由でDataErrorとしてJSへ届けること)。
+
+    Python 3.15+ではbase64.b64decode()自身のcanonical引数(C実装の
+    binascii.a2b_base64側で判定)を使う。3.15未満ではその引数が無いため、
+    デコード結果を再エンコードして入力文字列と一致するかで同じ判定を行う
+    (RFC 4648の正規形かどうかを、バージョンに依存せず判定できる同値な
+    方法——実際にcanonical=Trueが内部でしている「非ゼロパディングビットの
+    拒否」は、正規のエンコーダなら絶対に作らないビット列を弾くことと
+    等価なので、round-trip比較で同じ結果になる)。
+
+    ⚠️ 既知の制約: Rust高速パス(_rust_accel.decode_base64)はこの検証を
+    行わない。native/pyside6_webusb_accel はこの変更を行った環境に
+    Rustツールチェーンが無くビルド・実機検証ができなかったため、今回は
+    意図的に手を入れていない(CHANGELOG参照)。Rust拡張を使わない
+    デフォルトの実行環境では以下のPure Pythonパスが必ず通る。"""
     if HAVE_RUST_ACCEL:
         return bytes(_rust_accel.decode_base64(s))
-    return base64.b64decode(s)
+    if _B64_DECODE_SUPPORTS_CANONICAL:
+        try:
+            return base64.b64decode(s, canonical=True)
+        except TypeError:
+            # 保険: rc2〜正式版の間でcanonical引数の名前/対応状況が変わって
+            # いた場合でも、データ検証自体(binascii.Error)は握りつぶさず
+            # 下のround-trip判定へフォールバックする。
+            pass
+    decoded = base64.b64decode(s)
+    if base64.b64encode(decoded).decode("ascii") != s:
+        raise binascii.Error("Non-canonical base64 string (unexpected padding bits or alphabet)")
+    return decoded
+
+
+def _b64decode_or_data_error(s: str):
+    """_b64decode()のラッパー。戻り値は(data, error_json)のタプルで、
+    data is Noneのときerror_jsonをそのままreturnすべきことを示す
+    (_control_transfer_validation_error()等、既存の「検証NGならJSON文字列を
+    返す/OKならNoneを返す」パターンに合わせた形)。
+
+    🛡️ バグ修正(v0.0.5a1): 従来はbase64.b64decode()が送出する
+    binascii.Errorが個別のtry/exceptで捕まえられず、呼び出し元メソッド
+    末尾の`except Exception as e: return _json_dumps({"error": safe_error_str(e)})`
+    まで素通りしていた。この経路にはerrors.pyの規約上の接頭辞
+    ("DataError: "等)が付かないため、polyfill.py側のthrowFromResult()が
+    どのDOMExceptionにも振り分けられず、デフォルトのNetworkErrorへ
+    フォールバックしていた——不正なbase64という「データの中身がおかしい」
+    ケースにも関わらず、実Chromeが使うDataErrorにならないという仕様不一致。"""
+    try:
+        return _b64decode(s), None
+    except (binascii.Error, ValueError) as e:
+        return None, _json_dumps({
+            "success": False,
+            "error": data_error(f"Invalid base64 data: {safe_error_str(e)}"),
+        })
 
 
 def _json_dumps(obj) -> str:
@@ -1456,7 +1525,9 @@ class WebUSBBridge(QObject):
             )
             if validation_error is not None:
                 return validation_error
-            data = _b64decode(data_b64)
+            data, _b64_error = _b64decode_or_data_error(data_b64)
+            if _b64_error is not None:
+                return _b64_error
             self._busy_handles.add(handle_id)
             try:
                 written = self._chunked_bulk_write(dev, endpoint, data)
@@ -1620,7 +1691,9 @@ class WebUSBBridge(QObject):
             validation_error = self._control_transfer_validation_error(handle_id, dev, request_type, request, index)
             if validation_error is not None:
                 return validation_error
-            data = _b64decode(data_b64)
+            data, _b64_error = _b64decode_or_data_error(data_b64)
+            if _b64_error is not None:
+                return _b64_error
             try:
                 written = dev.ctrl_transfer(
                     request_type, request, value, index, data,
@@ -1890,7 +1963,9 @@ class WebUSBBridge(QObject):
                 if total_length > CHROME_USB_TRANSFER_LENGTH_LIMIT else None
             )
 
-            data = _b64decode(data_b64)
+            data, _b64_error = _b64decode_or_data_error(data_b64)
+            if _b64_error is not None:
+                return _b64_error
             if len(data) != total_length:
                 # 🛡️ バグ修正(v0.0.4b2, 実Blinkソース確認済み): dataの長さが
                 # packetLengths合計と一致しない場合、実Chromeは

@@ -108,6 +108,83 @@ def _rust_accel_status():
         return False, None
 
 
+def _qtwebengine_status():
+    """(importable: bool | None, note_or_None) を返す。Noneは
+    「PySide6自体が無いので判定不能(=既にpyside6_versionのNoneで報告済み)」。
+
+    🔍 実機検証(v0.0.5a1、2026-09時点のPySide6 6.12.0a1開発版wheelを実際に
+    展開して確認): QtWebEngineCore/QtWebEngineWidgetsの実体(.abi3.so/.pyi)
+    が、もはやPySide6-Addonsのwheelには含まれておらず、新設の
+    PySide6-WebEngineという別wheelへ分離されていた
+    (`unzip -l pyside6_addons-*.whl`にQtWebEngineCore.abi3.soが無いことを
+    確認/`unzip -l pyside6_webengine-*.whl`にはあることを確認)。
+    この分離はまだ正式リリースには来ていない(PyPI上のpyside6-webengineは
+    2026-09時点で存在しない=pip install pyside6-webengineは失敗する)ため、
+    本パッケージのpyproject.tomlをこの時点でPySide6-WebEngine依存に
+    変更することはできない(存在しないパッケージへの依存は
+    `pip install pyside6-webusb`自体を壊す)。そのため今はここでの実行時
+    診断としてのみ備え、正式リリースの動向を見て追従する
+    (CHANGELOG参照)。"""
+    try:
+        import PySide6  # noqa: F401
+    except Exception:
+        return None, None
+    missing = []
+    try:
+        from PySide6.QtWebEngineCore import QWebEngineScript  # noqa: F401
+    except Exception:
+        missing.append("QtWebEngineCore")
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    except Exception:
+        missing.append("QtWebEngineWidgets")
+    if not missing:
+        return True, None
+    return False, (
+        f"PySide6は見つかりましたが、{'/'.join(missing)} をimportできません。"
+        "PySide6のバージョンによっては、QtWebEngineがPySide6-Addonsとは別の"
+        "PySide6-WebEngineパッケージに分離されている場合があります"
+        "('pip install PySide6-WebEngine' を追加で試してください)。"
+        "あるいはPySide6-Addonsのインストール自体が不完全な可能性があります。"
+    )
+
+
+def _frame_origin_isolation_status():
+    """(available: bool | None, note: str) を返す。
+
+    availableは「QWebEngineFrameクラスがこの環境のPySide6に存在するか」の
+    静的な可否のみを見る。実際にnavigationRequestedへ接続できるか
+    (frame_origin.FrameOriginTracker.is_functional)は生きたQWebEnginePageが
+    要るため、ここ(意図的にQApplicationを一切作らない診断ツール)では
+    判定できない。Noneは判定不能(PySide6/QtWebEngineCore自体が無い)。
+
+    🔍 実機検証(v0.0.5a1): PySide6 6.6.0/6.7.0にはQWebEngineFrameクラス
+    自体が存在せず、6.8.0で初めて追加されたことを、3バージョンを実際に
+    別々の venv へインストールしバイナリサーチして確認した。つまり
+    PySide6-Addons>=6.5と宣言している現在のサポート範囲のうち6.5〜6.7では、
+    frame_origin.pyによるcross-origin iframeのなりすまし対策は構造的に
+    有効化できず、WebUSBBridge._current_origin()はpage.url()を見る
+    後方互換パス(0.0.2b0より前の、より弱いオリジン判定)へ常に
+    フォールバックする。これは既知の制約であってバグではないが、
+    ホストアプリ開発者が気づけるよう明示的に報告する。"""
+    try:
+        import PySide6.QtWebEngineCore as _qtwec
+    except Exception:
+        return None, "PySide6/QtWebEngineCoreが利用できないため判定できません。"
+    if hasattr(_qtwec, "QWebEngineFrame"):
+        return True, (
+            "フレーム単位のオリジン分離(cross-origin iframeのなりすまし対策)を"
+            "有効化できます(実際に有効になるかはpolyfill.install()側の配線にも依存します)。"
+        )
+    return False, (
+        "この環境のPySide6にはQWebEngineFrameがありません(実機確認: 6.7.0以前には無く、"
+        "6.8.0で追加されました)。frame_origin.pyによるフレーム単位のオリジン分離は"
+        "有効化できず、page.url()を見る後方互換パスにフォールバックします——"
+        "cross-origin iframeによるなりすまし対策としては6.8以降より弱くなります。"
+        "この保護が必要な場合はPySide6>=6.8への更新を検討してください。"
+    )
+
+
 def environment_report() -> dict:
     """現在の実行環境の診断結果を辞書として返す。JSON化可能なプリミティブ型
     (str/bool/None/list)のみで構成する。
@@ -118,6 +195,8 @@ def environment_report() -> dict:
     pyside6_version, shiboken6_version, qt_runtime_version = _pyside6_versions()
     pyusb_version, pyusb_backend, pyusb_problem = _pyusb_backend_info()
     rust_accelerated, rust_accel_version = _rust_accel_status()
+    qtwebengine_importable, qtwebengine_note = _qtwebengine_status()
+    frame_isolation_available, frame_isolation_note = _frame_origin_isolation_status()
 
     problems = []
     if pyside6_version is None:
@@ -126,6 +205,8 @@ def environment_report() -> dict:
             "'pip install pyside6-webusb' の依存関係(PySide6-Essentials/PySide6-Addons)"
             "が正しく解決されているか確認してください。"
         )
+    if qtwebengine_importable is False:
+        problems.append(qtwebengine_note)
     if pyusb_problem is not None:
         problems.append(pyusb_problem)
 
@@ -137,10 +218,15 @@ def environment_report() -> dict:
         "pyside6_version": pyside6_version,
         "shiboken6_version": shiboken6_version,
         "qt_runtime_version": qt_runtime_version,
+        "qtwebengine_importable": qtwebengine_importable,
         "pyusb_version": pyusb_version,
         "pyusb_backend": pyusb_backend,
         "rust_accelerated": rust_accelerated,
         "rust_accel_version": rust_accel_version,
+        # 🆕 v0.0.5a1: PySide6 6.8.0で追加されたQWebEngineFrameの静的な有無
+        # (frame_origin.pyのフレーム単位オリジン分離が構造的に使えるか)。
+        "frame_origin_isolation_available": frame_isolation_available,
+        "frame_origin_isolation_note": frame_isolation_note,
         "problems": problems,
     }
 
@@ -165,6 +251,14 @@ def format_environment_report(report: dict = None) -> str:
     else:
         rust_line = "Rust acceleration: 無効(標準のPython実装にフォールバック中。動作には支障ありません)"
 
+    # 🆕 v0.0.5a1
+    if report.get("frame_origin_isolation_available") is True:
+        frame_line = "Frame-level origin isolation: 利用可能(PySide6にQWebEngineFrameあり)"
+    elif report.get("frame_origin_isolation_available") is False:
+        frame_line = "Frame-level origin isolation: 利用不可(PySide6<6.8。ページURLベースの後方互換パスにフォールバック中)"
+    else:
+        frame_line = "Frame-level origin isolation: 不明(PySide6/QtWebEngineCoreが利用できません)"
+
     lines = [
         f"pyside6-webusb {report['pyside6_webusb_version']}",
         f"Python: {report['python_version']} ({report['python_implementation']}) on {report['platform']}",
@@ -172,6 +266,7 @@ def format_environment_report(report: dict = None) -> str:
         f"Qt runtime: {report['qt_runtime_version'] or '不明'}",
         pyusb_line,
         rust_line,
+        frame_line,
         "",
     ]
     if report["problems"]:
@@ -180,4 +275,7 @@ def format_environment_report(report: dict = None) -> str:
             lines.append(f"  - {p}")
     else:
         lines.append("問題は検出されませんでした。")
+    if report.get("frame_origin_isolation_available") is False and report.get("frame_origin_isolation_note"):
+        lines.append("")
+        lines.append(f"参考: {report['frame_origin_isolation_note']}")
     return "\n".join(lines)

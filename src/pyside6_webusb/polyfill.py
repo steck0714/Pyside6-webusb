@@ -69,13 +69,27 @@ def install(page, browser_window=None,
         QWebChannel自体が使えない環境では例外を送出せず None を返す
         (WebUSB機能だけが無効になり、アプリ全体は落とさない設計)。
     """
-    from PySide6.QtWebChannel import QWebChannel
-    from PySide6.QtWebEngineCore import QWebEngineScript
-
     from .bridge import WebUSBBridge
     from .frame_origin import FrameOriginTracker
 
     try:
+        # 🛡️ バグ修正(v0.0.5a1): このimport 2行は、以前は本try節の外(関数の
+        # 冒頭)に置かれていた。QtWebChannel/QtWebEngineCoreはこのパッケージの
+        # どのモジュールもトップレベルではimportしていない(意図的な遅延
+        # import)ため、「QWebChannel自体が使えない環境ではNoneを返す」という
+        # 上のdocstringの約束にも関わらず、これらのimport自体が失敗する環境
+        # (例: PySide6-Addonsは入っているがQtWebEngineだけが欠けている、
+        # 壊れた/部分的なインストール)では生のImportError/ModuleNotFoundErrorが
+        # そのままここから送出され、約束が実際には守られていなかった
+        # (PySide6 6.12.0a1開発版でQtWebEngineがPySide6-WebEngineという別
+        # パッケージへ分離されたのを実機確認した際に、この経路で発見)。
+        # try節の中へ移すことで、他の失敗(QWebChannel(page)がpageの型を
+        # 受け付けない、等)と同じく静かにNoneを返すようになる——原因の
+        # 切り分けは`environment_report()`/`format_environment_report()`
+        # (診断専用に作られたモジュールで、意図的にPySide6非依存)に任せる。
+        from PySide6.QtWebChannel import QWebChannel
+        from PySide6.QtWebEngineCore import QWebEngineScript
+
         bridge = WebUSBBridge(browser_window=browser_window, parent=page,
                                settings_organization=settings_organization,
                                settings_application=settings_application)
