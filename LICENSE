@@ -1,6 +1,6 @@
-MIT License
+# MIT License
 
-Copyright (c) 2026 pyside6-webusb contributors
+Copyright (c) 2026 steck0714
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,10 +20,234 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
---------------------------------------------------------------------------
+---
 
-This project's runtime dependency on Qt's qwebchannel.js (loaded dynamically
-from your PySide6/Qt installation at runtime, not redistributed in this
-repository -- see pyside6_webusb/polyfill.py) is separately licensed by The Qt
-Company under the terms of the BSD 3-Clause License. No Qt source is included
-in this repository.
+# Third-Party Software and Reference Notice
+
+The MIT License above applies to the original source code of
+`pyside6-webusb`.
+
+Third-party software, specifications, data, and reference implementations
+remain subject to their respective copyrights and licenses.
+
+Nothing in this notice relicenses third-party material under the MIT License.
+
+## 1. Incorporated or Derived Material
+
+### 1.1 Chromium USB Blocklist Data
+
+The USB security hardening implementation contains VID/PID data derived from
+Chromium's USB blocklist.
+
+The corresponding Chromium source was reviewed during the project's license
+audit, and the relevant VID/PID entries were compared against Chromium's
+`usb_blocklist.cc`.
+
+The applicable Chromium source is distributed under Chromium's BSD-style
+licensing terms.
+
+SPDX identifier:
+
+`BSD-3-Clause`
+
+Chromium License:
+
+https://chromium.googlesource.com/chromium/src/+/HEAD/LICENSE
+
+Chromium source:
+
+https://chromium.googlesource.com/chromium/src/
+
+The Chromium-derived data is limited to the relevant USB blocklist entries.
+The surrounding Python implementation is independently implemented and is
+licensed under the MIT License stated above.
+
+### 1.2 W3C / WICG WebUSB WebIDL
+
+The TypeScript WebUSB definitions include WebIDL material derived from the
+WICG WebUSB specification.
+
+WebUSB specification:
+
+https://wicg.github.io/webusb/
+
+W3C Software and Document License:
+
+https://www.w3.org/copyright/software-license-2023/
+
+The W3C-derived specification material remains subject to the applicable W3C
+license.
+
+The independently written TypeScript implementation surrounding the
+specification-derived definitions remains subject to the MIT License stated
+above, to the extent permitted by applicable law and license terms.
+
+---
+
+# 2. Runtime Dependencies
+
+The following software is used as external runtime or build dependencies.
+
+They are not relicensed under the MIT License of `pyside6-webusb`.
+
+## 2.1 Qt / PySide6 / QtWebEngine / Qt WebChannel
+
+`pyside6-webusb` uses Qt and PySide6 APIs, including QtWebEngine and
+Qt WebChannel.
+
+The Qt WebChannel JavaScript implementation is obtained at runtime from the
+Qt resource:
+
+    :/qtwebchannel/qwebchannel.js
+
+`qwebchannel.js` is not bundled as an independent copy of the Qt source in
+this project.
+
+The applicable license of the runtime-provided Qt component is determined by
+the exact Qt/PySide6 distribution used by the host application.
+
+Qt licensing:
+
+https://doc.qt.io/qt-6/licensing.html
+
+Qt third-party licenses:
+
+https://doc.qt.io/qt-6/licenses-used-in-qt.html
+
+This project does not make an independent blanket licensing assertion for
+the runtime-provided Qt resource.
+
+## 2.2 pyusb
+
+`pyusb` is used as an external Python dependency for USB communication.
+
+Project:
+
+https://github.com/pyusb/pyusb
+
+`pyusb` retains its own copyright and license.
+
+## 2.3 libusb
+
+`libusb` may be used as the native USB backend.
+
+`libusb` is an external dependency and retains its own copyright and license.
+
+The applicable license depends on the version supplied by the operating
+system or host environment.
+
+## 2.4 PyO3
+
+The optional Rust implementation uses PyO3.
+
+PyO3 is an external dependency and retains its own copyright and license.
+
+## 2.5 Rust base64
+
+The optional Rust implementation uses the Rust `base64` crate.
+
+The crate is an external dependency and retains its own copyright and
+license.
+
+---
+
+# 3. References Only
+
+The following projects were used as references for implementation,
+compatibility, protocol verification, or security analysis.
+
+Reference use does not by itself mean that their source code has been copied
+into this project.
+
+## 3.1 Chromium WebUSB
+
+Chromium WebUSB behavior was used as a compatibility reference.
+
+This includes behavior relating to:
+
+- WebUSB API behavior
+- Origin and permission handling
+- protected USB interfaces
+- security-key handling
+- transfer behavior
+- transfer limits
+- device and hotplug behavior
+- WebUSB-related errors
+
+The `pyside6-webusb` implementation uses a different architecture based on
+PySide6 / QtWebEngine, QWebChannel, pyusb, and libusb.
+
+## 3.2 WebUSB Specification
+
+The WebUSB specification is used as an API and behavior reference.
+
+https://wicg.github.io/webusb/
+
+## 3.3 adb_client
+
+`tth0704/adb_client` was used as a protocol reference for the optional Rust
+ADB implementation.
+
+Project:
+
+https://github.com/tth0704/adb_client
+
+The project's ADB implementation was compared during the license audit.
+
+No verbatim source-code match was identified in the compared implementation.
+
+Shared elements are protocol-level information such as:
+
+- command constants
+- message field ordering
+- protocol structure
+- ADB header fields
+
+The `pyside6-webusb` implementation is independently written.
+
+`adb_client` retains its own copyright and license.
+
+If source code from `adb_client` is incorporated in a future version, the
+applicable upstream copyright and license notices must be retained.
+
+## 3.4 thegecko/webusb
+
+`thegecko/webusb` was used as a WebUSB implementation reference.
+
+Project:
+
+https://github.com/thegecko/webusb
+
+The project retains its own copyright and license.
+
+No license transfer is implied by reference to the project.
+
+## 3.5 node-usb
+
+`node-usb` was used as an implementation and USB API comparison reference.
+
+Project:
+
+https://github.com/node-usb/node-usb
+
+The project retains its own copyright and license.
+
+No license transfer is implied by reference to the project.
+
+---
+
+# 4. License Scope
+
+The MIT License at the beginning of this file applies to the original
+`pyside6-webusb` source code.
+
+It is the license of the `pyside6-webusb` project and is not limited to
+version `v0.0.5a2` or any other individual release.
+
+Third-party software, data, specifications, and reference material retain
+their applicable licenses and copyrights.
+
+This notice is intended as an interim consolidated third-party notice pending
+the project's formal license and attribution reorganization.
+
+The MIT License itself is unchanged.
