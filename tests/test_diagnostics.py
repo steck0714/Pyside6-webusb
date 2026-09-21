@@ -5,9 +5,12 @@ __main__.py(`python -m pyside6_webusb`)の新規テスト。
 このファイルは意図的にQApplicationを生成しない(test_bridge.py等のconftest.py
 経由のオフスクリーン設定に依存しない) -- diagnostics.py自身がQtCoreに一切
 依存しない設計であることを、テスト自身の作りでも裏付けるため。"""
+import json
 import os
 import platform
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -83,6 +86,33 @@ def test_environment_report_detects_pyusb_installed_without_libusb_backend(monke
     assert report["pyusb_backend"] is None
     assert any("libusb" in p for p in report["problems"]), report["problems"]
     print("test_environment_report_detects_pyusb_installed_without_libusb_backend: OK")
+
+
+def test_environment_report_notes_libusb0_fallback_without_treating_it_as_a_problem(monkeypatch):
+    """🆕 v0.0.5.post3: pyusbがlibusb1を見つけられずlibusb0へフォールバック
+    した場合、pyusb_backend_noteでその旨と既知の注意点(security_report/
+    VULNERABILITY_REPORT.mdの「Environment note」)を伝えるが、libusb0でも
+    実際に動作はするため、これはproblemsには含めない(motivating_bugと同じ
+    「動くが情報として伝えたい」区分。frame_origin_isolation_noteと同じ扱い)。
+    libusb1側のget_backend()だけをNoneにし、libusb0側は素通しにすることで
+    「libusb1は無いがlibusb0はある」を再現する
+    (test_environment_report_detects_pyusb_installed_without_libusb_backend
+    は両方Noneにして「どちらも無い」を再現しているのと対になる)。"""
+    import usb.backend.libusb1 as libusb1_mod
+    monkeypatch.setattr(libusb1_mod, "get_backend", lambda *a, **kw: None)
+
+    report = environment_report()
+    if report["pyusb_backend"] != "libusb0":
+        pytest.skip("この環境ではlibusb0側もget_backend()に失敗しており、"
+                     "libusb0へのフォールバックを再現できない")
+    assert report["pyusb_backend_note"] is not None
+    assert "libusb0" in report["pyusb_backend_note"]
+    assert not any("pyusb_backend_note" in p or report["pyusb_backend_note"] in p
+                   for p in report["problems"]), (
+        "動作するフォールバックなので、problemsではなくpyusb_backend_noteとして"
+        "伝えるべき"
+    )
+    print("test_environment_report_notes_libusb0_fallback_without_treating_it_as_a_problem: OK")
 
 
 def test_rust_accel_status_reflects_import_success_without_being_a_problem(monkeypatch):
@@ -188,7 +218,12 @@ def test_main_returns_zero_when_clean_and_nonzero_when_problems(monkeypatch, cap
         "rust_accelerated": False, "rust_accel_version": None,
         "problems": [],
     })
-    assert main_mod.main() == 0
+    # 🆕 v0.0.5.post3: argvを明示的に空リストで渡す(以前はmain()の唯一の
+    # 呼び出し方だった無引数呼び出しのままだと、main()が新設のsys.argv[1:]
+    # フォールバックへ通ることになり、たまたまpytest自身の起動引数に
+    # "--json"という文字列が紛れ込んでいた場合にテストの意味が変わってしまう
+    # ため、このテストが検証したい「引数無し」の状態を明示する)。
+    assert main_mod.main(argv=[]) == 0
     assert "問題は検出されませんでした" in capsys.readouterr().out
 
     monkeypatch.setattr(main_mod, "environment_report", lambda: {
@@ -199,9 +234,46 @@ def test_main_returns_zero_when_clean_and_nonzero_when_problems(monkeypatch, cap
         "rust_accelerated": False, "rust_accel_version": None,
         "problems": ["PySide6がインストールされていません"],
     })
-    assert main_mod.main() == 1
+    assert main_mod.main(argv=[]) == 1
     assert "検出された問題" in capsys.readouterr().out
     print("test_main_returns_zero_when_clean_and_nonzero_when_problems: OK")
+
+
+def test_main_json_flag_prints_the_raw_report_as_json_with_the_same_exit_code(monkeypatch, capsys):
+    """🆕 v0.0.5.post3: --jsonはformat_environment_report()の人間向けテキストでは
+    なく、environment_report()の辞書をそのままJSONとして書き出す。終了コードの
+    意味は変わらない(problemsが空なら0、そうでなければ1)。"""
+    import pyside6_webusb.__main__ as main_mod
+
+    fake_report = {
+        "pyside6_webusb_version": "0.0.5.post3", "python_version": "3.12.3",
+        "python_implementation": "CPython", "platform": "Linux-test",
+        "pyside6_version": "6.11.2", "shiboken6_version": "6.11.2", "qt_runtime_version": "6.11.2",
+        "pyusb_version": "1.3.1", "pyusb_backend": "libusb0",
+        "pyusb_backend_note": "現在のバックエンドはlibusb0です...",
+        "rust_accelerated": False, "rust_accel_version": None,
+        "qtwebengine_importable": True,
+        "frame_origin_isolation_available": True, "frame_origin_isolation_note": "...",
+        "problems": ["PySide6がインストールされていません"],
+    }
+    monkeypatch.setattr(main_mod, "environment_report", lambda: fake_report)
+
+    assert main_mod.main(argv=["--json"]) == 1
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed == fake_report, "environment_report()の辞書がそのまま、改変無くJSONになっていること"
+
+    # --jsonを付けない従来どおりの呼び出しでは、引き続き人間向けテキストのまま
+    # であること(このフラグが既定の出力形式を変えていないことの確認)。
+    assert main_mod.main(argv=[]) == 1
+    text_out = capsys.readouterr().out
+    assert "pyside6-webusb 0.0.5.post3" in text_out
+    try:
+        json.loads(text_out)
+        raise AssertionError("人間向けテキストが誤ってJSONとしてparseできてしまっている")
+    except json.JSONDecodeError:
+        pass  # 期待どおり: 人間向けテキストはJSONではない
+    print("test_main_json_flag_prints_the_raw_report_as_json_with_the_same_exit_code: OK")
 
 
 def test_package_import_and_install_survive_pyside6_being_unavailable():
