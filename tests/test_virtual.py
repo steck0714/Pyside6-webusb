@@ -189,5 +189,44 @@ if __name__ == "__main__":
     test_virtual_device_protected_interface_class_is_still_blocked()
     test_virtual_device_plug_unplug_is_detected_by_hotplug_watcher()
     test_virtual_device_unplugged_device_not_openable()
+    test_virtual_version_to_bcd_formats()
+    test_virtual_device_ctrl_transfer_with_buffer()
+    test_virtual_backend_find_custom_match_and_kwargs()
     print("ALL VIRTUAL USB DEVICE TESTS PASSED")
     sys.exit(0)
+
+
+def test_virtual_version_to_bcd_formats():
+    """_version_to_bcdがタプルだけでなく、文字列("2.1.0")や整数(0x0210, 2)も適切に変換できることを確認する。"""
+    from pyside6_webusb.virtual import _version_to_bcd
+    assert _version_to_bcd((2, 1, 0)) == 0x0210
+    assert _version_to_bcd([1, 2, 3]) == 0x0123
+    assert _version_to_bcd("2.1.0") == 0x0210
+    assert _version_to_bcd("3.0") == 0x0300
+    assert _version_to_bcd(0x0210) == 0x0210
+    assert _version_to_bcd(2) == 0x0200
+    assert _version_to_bcd(None) == 0x0000
+
+
+def test_virtual_device_ctrl_transfer_with_buffer():
+    """ctrl_transferでIN転送にbytearrayなどのバッファが渡された場合でも長さを正しく取得できることを確認する。"""
+    dev = _make_widget_device()
+    buf = bytearray(32)
+    res = dev.ctrl_transfer(0x80, 0x06, 0x0100, 0, buf)
+    assert len(res) == 32
+    assert res == bytes(32)
+
+
+def test_virtual_backend_find_custom_match_and_kwargs():
+    """VirtualUsbBackend.find()がcustom_matchや追加の属性フィルタ(kwargs)に対応していることを確認する。"""
+    dev1 = _make_widget_device(vendor_id=0x1234, product_id=0x0001, device_class=0xFF)
+    dev2 = _make_widget_device(vendor_id=0x1234, product_id=0x0002, device_class=0x02)
+    backend = make_virtual_usb_backend([dev1, dev2])[0]
+
+    # kwargsフィルタ
+    found = backend.find(bDeviceClass=0x02)
+    assert found is dev2
+
+    # custom_matchフィルタ
+    matched = backend.find(find_all=True, custom_match=lambda d: d.idProduct == 0x0001)
+    assert matched == [dev1]

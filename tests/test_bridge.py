@@ -2057,6 +2057,150 @@ def test_sustained_large_transfers_do_not_leak_state_or_corrupt_data():
     print("test_sustained_large_transfers_do_not_leak_state_or_corrupt_data (IN/OUT x50 alternating): OK")
 
 
+
+
+def test_openDevice_disambiguates_by_serial_number():
+    """同一VID/PIDを持つ複数デバイスが存在する場合、serial_numberが指定されていれば該当する個体が選ばれることを確認する。"""
+    class _Dev:
+        def __init__(self, vid, pid, serial):
+            self.idVendor = vid
+            self.idProduct = pid
+            self.serial = serial
+            self.iSerialNumber = 1
+            self.bDeviceClass = 0
+            self.bDeviceSubClass = 0
+            self.bDeviceProtocol = 0
+            self.bcdUSB = 0x0200
+            self.bcdDevice = 0x0100
+        def get_active_configuration(self):
+            class _Cfg:
+                bConfigurationValue = 1
+                def __iter__(self):
+                    return iter([])
+            return _Cfg()
+        def __iter__(self):
+            return iter([self.get_active_configuration()])
+
+    dev_a = _Dev(0x1234, 0x5678, "SN-ALPHA")
+    dev_b = _Dev(0x1234, 0x5678, "SN-BETA")
+
+    class _FakeUtil:
+        def get_string(self, dev, idx):
+            return getattr(dev, "serial", None)
+
+    class _FakeCore:
+        def find(self, find_all=False, idVendor=None, idProduct=None):
+            devs = [d for d in [dev_a, dev_b] if d.idVendor == idVendor and d.idProduct == idProduct]
+            if find_all:
+                return devs
+            return devs[0] if devs else None
+
+    bridge = WebUSBBridge(usb_backend=(_FakeCore(), _FakeUtil()))
+    bridge._is_granted = lambda *a, **kw: True
+    bridge._current_origin = lambda *a, **kw: "https://example.test"
+
+    # シリアル指定なし -> 先頭(dev_a)
+    res1 = json.loads(bridge.openDevice(0x1234, 0x5678))
+    assert res1["success"] is True
+    h1 = res1["handle"]
+    assert bridge._open_devices[h1]["device"].serial == "SN-ALPHA"
+
+    # シリアル指定あり -> dev_b
+    res2 = json.loads(bridge.openDevice(0x1234, 0x5678, "", "SN-BETA"))
+    assert res2["success"] is True
+    h2 = res2["handle"]
+    assert bridge._open_devices[h2]["device"].serial == "SN-BETA"
+
+
+def test_control_transfer_endpoint_recipient_blocks_protected_alternate():
+    """controlTransferでrecipient:endpointが指定された際、いずれかのalternate settingが
+    保護対象クラス(HID等)であれば拒否されることを確認する。"""
+    class _Ep:
+        def __init__(self, addr):
+            self.bEndpointAddress = addr
+            self.bmAttributes = 2
+            self.wMaxPacketSize = 64
+
+    class _Intf:
+        def __init__(self, num, alt, cls, eps):
+            self.bInterfaceNumber = num
+            self.bAlternateSetting = alt
+            self.bInterfaceClass = cls
+            self._eps = eps
+        def __iter__(self):
+            return iter(self._eps)
+
+    class _Cfg:
+        bConfigurationValue = 1
+        def __init__(self, intfs):
+            self._intfs = intfs
+        def __iter__(self):
+            return iter(self._intfs)
+
+    class _Dev:
+        idVendor = 0x2341
+        idProduct = 0x8036
+        iSerialNumber = 0
+        def __init__(self):
+            self.cfg = _Cfg([
+                _Intf(0, 0, 0xFF, [_Ep(0x81)]),  # alt 0: Vendor-specific
+                _Intf(0, 1, 0x03, [_Ep(0x81)]),  # alt 1: HID (Protected)
+            ])
+        def get_active_configuration(self):
+            return self.cfg
+        def __iter__(self):
+            return iter([self.cfg])
+        def ctrl_transfer(self, *a, **kw):
+            return b"ok"
+
+    dev = _Dev()
+    class _Core:
+        def find(self, find_all=False, **kw):
+            return [dev] if find_all else dev
+
+    bridge = WebUSBBridge(usb_backend=(_Core(), FakeUsbUtil()))
+    bridge._is_granted = lambda *a, **kw: True
+    bridge._current_origin = lambda *a, **kw: "https://example.test"
+
+    h = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    # claim interface 0 (alt 0 is vendor-specific)
+    assert json.loads(bridge.claimInterface(h, 0))["success"] is True
+
+    # recipient == 2 (endpoint 0x81). Since alt 1 declares HID, this MUST be rejected with SecurityError!
+    res = json.loads(bridge.controlTransferIn(h, 0x82, 0x00, 0, 0x81, 4))
+    assert res["success"] is False
+    assert res["error"].startswith("SecurityError:"), res
+
+
+def test_b64decode_rejects_oversized_and_non_string():
+    """_b64decode_or_data_errorが文字列以外の引数や異常に大きなbase64入力を即座にDataErrorで拒絶することを確認する。"""
+    from pyside6_webusb.bridge import _b64decode_or_data_error
+    data, err = _b64decode_or_data_error(12345)
+    assert data is None
+    assert "DataError:" in err
+
+    # 上限超過
+    huge_str = "A" * (700 * 1024 * 1024)  # 700MB
+    data, err = _b64decode_or_data_error(huge_str)
+    assert data is None
+    assert "DataError:" in err
+
+
+def test_requestDeviceChooser_rejects_oversized_options():
+    """requestDeviceChooserが64KBを超えるoptions_jsonや辞書以外のJSONをTypeErrorで拒絶することを確認する。"""
+    bridge = WebUSBBridge()
+    # 64KB超過
+    huge_options = json.dumps({"filters": []}) + (" " * 70000)
+    res = json.loads(bridge.requestDeviceChooser(huge_options, "", bridge.mintGestureToken()))
+    assert res.get("cancelled") is True
+    assert res.get("error", "").startswith("TypeError:")
+
+    # 辞書以外のJSON (配列)
+    res2 = json.loads(bridge.requestDeviceChooser("[1, 2, 3]", "", bridge.mintGestureToken()))
+    assert res2.get("cancelled") is True
+    assert res2.get("error", "").startswith("TypeError:")
+
+
 if __name__ == "__main__":
     class _FakeMonkeypatch:
         """pytestなしでも走らせられるよう、monkeypatch.setattr相当を素朴に実装したもの。"""

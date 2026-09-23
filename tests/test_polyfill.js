@@ -89,7 +89,11 @@ const fakeBridge = {
         fakeBridgeCalls.push(['requestDeviceChooser', optionsJson, frameToken, gestureToken]);
         cb(JSON.stringify({ device: fakeDevices[0] }));
     },
-    openDevice: function(vid, pid, frameToken, cb) { fakeBridgeCalls.push(['openDevice', vid, pid, frameToken]); cb(JSON.stringify(openDeviceResponse)); },
+    openDevice: function(vid, pid, frameToken, serialOrCb, maybeCb) {
+        var cb = typeof serialOrCb === 'function' ? serialOrCb : maybeCb;
+        fakeBridgeCalls.push(['openDevice', vid, pid, frameToken]);
+        if (cb) cb(JSON.stringify(openDeviceResponse));
+    },
     // closeDeviceはPython側で@Slot(int, str)(result=無し)として登録されており、
     // callBridge()を経由しない直接呼び出しのため、他のブリッジ関数と違い
     // コールバック引数(cb)を取らない。
@@ -577,6 +581,10 @@ async function main() {
     assert.strictEqual(limits.chromeCompatibleWarnThreshold, 33554432);
     console.log('window.__pysideWebUSB debug namespace (listGrantedDevices/bridgeInfo/explainTransferLimits): OK');
 
+    assert(window.USB, 'window.USB must be defined');
+    assert(window.USBDevice, 'window.USBDevice must be defined');
+    assert(window.USBConnectionEvent, 'window.USBConnectionEvent must be defined');
+    console.log('window WebUSB interface exposure: OK');
     console.log('ALL WEBUSB POLYFILL JS TESTS PASSED');
 }
 main().catch((e) => { console.error('TEST FAILED:', e); process.exit(1); });

@@ -71,6 +71,12 @@
         if (('productId' in f) && !('vendorId' in f)) return false;
         if (('subclassCode' in f) && !('classCode' in f)) return false;
         if (('protocolCode' in f) && !('subclassCode' in f)) return false;
+        if (('vendorId' in f) && (typeof f.vendorId !== 'number' || f.vendorId < 0 || f.vendorId > 0xFFFF || Math.floor(f.vendorId) !== f.vendorId)) return false;
+        if (('productId' in f) && (typeof f.productId !== 'number' || f.productId < 0 || f.productId > 0xFFFF || Math.floor(f.productId) !== f.productId)) return false;
+        if (('classCode' in f) && (typeof f.classCode !== 'number' || f.classCode < 0 || f.classCode > 0xFF || Math.floor(f.classCode) !== f.classCode)) return false;
+        if (('subclassCode' in f) && (typeof f.subclassCode !== 'number' || f.subclassCode < 0 || f.subclassCode > 0xFF || Math.floor(f.subclassCode) !== f.subclassCode)) return false;
+        if (('protocolCode' in f) && (typeof f.protocolCode !== 'number' || f.protocolCode < 0 || f.protocolCode > 0xFF || Math.floor(f.protocolCode) !== f.protocolCode)) return false;
+        if (('serialNumber' in f) && typeof f.serialNumber !== 'string') return false;
         return true;
     }
 
@@ -193,7 +199,7 @@
         //    (closeDevice()を呼ぶ手段が失われるリーク)。
         if (this.opened) return Promise.resolve();
         var self = this;
-        return callBridge('openDevice', this.vendorId, this.productId, _frameToken()).then(function(res) {
+        return callBridge('openDevice', this.vendorId, this.productId, _frameToken(), this.serialNumber || '').then(function(res) {
             if (!res.success) throwFromResult(res, 'Failed to open device');
             self._handle = res.handle;
             self.opened = true;
@@ -677,4 +683,9 @@
             });
         },
     };
+
+    // 🌐 WebUSB標準クラス群をwindowへ公開(実ブラウザ同様、Windowコンテキストから参照可能にする)
+    if (typeof window.USB === 'undefined') window.USB = USB;
+    if (typeof window.USBConnectionEvent === 'undefined') window.USBConnectionEvent = USBConnectionEvent;
+    if (typeof window.USBDevice === 'undefined') window.USBDevice = OpenWebUSBDevice;
 })();

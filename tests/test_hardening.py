@@ -325,6 +325,13 @@ def test_is_valid_usb_device_filter():
     assert h.is_valid_usb_device_filter({"classCode": 3, "subclassCode": 1, "protocolCode": 2}) is True
     assert h.is_valid_usb_device_filter({"classCode": 3, "protocolCode": 2}) is False  # subclassCode無しでprotocolCodeだけ
     assert h.is_valid_usb_device_filter("not a dict") is False
+    # 🆕 型および数値範囲の検証 (0.0.5.post5)
+    assert h.is_valid_usb_device_filter({"vendorId": -1}) is False
+    assert h.is_valid_usb_device_filter({"vendorId": 0x10000}) is False
+    assert h.is_valid_usb_device_filter({"vendorId": True}) is False
+    assert h.is_valid_usb_device_filter({"classCode": 256}) is False
+    assert h.is_valid_usb_device_filter({"serialNumber": 123}) is False
+    assert h.is_valid_usb_device_filter({"serialNumber": "SN-001"}) is True
     print("test_is_valid_usb_device_filter: OK")
 
 
