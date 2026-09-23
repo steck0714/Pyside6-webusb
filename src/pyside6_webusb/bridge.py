@@ -83,13 +83,22 @@ def _b64decode(s: str) -> bytes:
     拒否」は、正規のエンコーダなら絶対に作らないビット列を弾くことと
     等価なので、round-trip比較で同じ結果になる)。
 
-    ⚠️ 既知の制約: Rust高速パス(_rust_accel.decode_base64)はこの検証を
-    行わない。native/pyside6_webusb_accel はこの変更を行った環境に
-    Rustツールチェーンが無くビルド・実機検証ができなかったため、今回は
-    意図的に手を入れていない(CHANGELOG参照)。Rust拡張を使わない
-    デフォルトの実行環境では以下のPure Pythonパスが必ず通る。"""
+    🐛 バグ修正(v0.0.5a3): 従来はRust高速パス(_rust_accel.decode_base64)が
+    この正規性チェックを一切行わず(そのままの生バイト列を返すだけ)、
+    非正規base64の拒否はPure Pythonパスでしか効いていなかった
+    (v0.0.5a1〜post3のCHANGELOGに「既知の制約」として明記していたギャップ)。
+    Rust側のデコード結果そのものは信頼しつつ、Pythonの標準ライブラリで
+    再エンコードした結果と入力文字列を比較する同じround-trip判定を
+    Rust経路にも適用することで、デコード自体の速度は落とさずに
+    (再エンコード1回ぶんのコストのみ追加)検証だけを両経路で揃えた。
+    比較対象は常にPython標準ライブラリのbase64.b64encode()の出力とする
+    (Rust側のエンコーダを検証の基準に使うと、エンコーダ自身に不具合が
+    あった場合に検証がすり抜けてしまう自己参照になるため)。"""
     if HAVE_RUST_ACCEL:
-        return bytes(_rust_accel.decode_base64(s))
+        decoded = bytes(_rust_accel.decode_base64(s))
+        if base64.b64encode(decoded).decode("ascii") != s:
+            raise binascii.Error("Non-canonical base64 string (unexpected padding bits or alphabet)")
+        return decoded
     if _B64_DECODE_SUPPORTS_CANONICAL:
         try:
             return base64.b64decode(s, canonical=True)
@@ -238,7 +247,8 @@ class WebUSBBridge(QObject):
     deviceDisconnected = Signal(str)
 
     def __init__(self, browser_window=None, parent=None,
-                 settings_organization="pyside6-webusb", settings_application="WebUSBBridge"):
+                 settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
+                 usb_backend=None):
         """
         browser_window: 任意。`.settings` 属性(QSettingsオブジェクト)を持つホストアプリの
             メインウィンドウ等を渡すと、許可の永続化にそれを使う。渡さない場合は
@@ -248,11 +258,20 @@ class WebUSBBridge(QObject):
         settings_organization / settings_application: browser_windowが無い場合に使う
             QSettingsの組織名・アプリ名。ホストアプリ独自の値を渡すことを推奨する
             (省略時は "pyside6-webusb"/"WebUSBBridge" になる)。
+        usb_backend: 🆕 v0.0.5a3。省略時は実機を操作するpyusb(usb.core/usb.util)を
+            遅延importして使う(従来どおり)。`(usb_core, usb_util)` のタプルを渡すと、
+            以降このインスタンスの全操作がそちらへ差し替わる——実USBハードウェアを
+            挿さずに開発・自動テストするための「仮想USBデバイス」機能
+            (pyside6_webusb.virtual.make_virtual_usb_backend())が使う差し込み口。
+            usb.core/usb.util と同じ最小限のインターフェースを満たす自作オブジェクトを
+            渡しても良い(pyside6_webusb.virtual、またはsecurity_audit/_fixtures.pyの
+            FakeUsbCore/FakeUsbUtilを参照)。
         """
         super().__init__(parent)
         self.browser_window = browser_window
         self._settings_organization = settings_organization
         self._settings_application = settings_application
+        self._usb_backend_override = usb_backend
         self._open_devices = {}   # handle_id(int) -> {"device":.., "origin":.., "claimed_interfaces": set()}
         # 🧵 大容量bulk転送のチャンク分割(BULK_TRANSFER_CHUNK_SIZE)を行う際、
         #    サブチャンクの合間にQCoreApplication.processEvents()を挟んで
@@ -359,7 +378,11 @@ class WebUSBBridge(QObject):
             print(f"[pyside6-webusb] _poll_hotplug: 例外を無視: {e}")
 
     def _pyusb(self):
-        """pyusbを遅延インポートし、未インストール環境でも他機能に影響を与えないようにする"""
+        """pyusbを遅延インポートし、未インストール環境でも他機能に影響を与えないようにする。
+        🆕 v0.0.5a3: コンストラクタへ usb_backend=(usb_core, usb_util) が渡されていれば
+        実pyusbのimport自体を行わずそちらを返す(pyside6_webusb.virtual参照)。"""
+        if self._usb_backend_override is not None:
+            return self._usb_backend_override
         import usb.core
         import usb.util
         return usb.core, usb.util
@@ -994,7 +1017,14 @@ class WebUSBBridge(QObject):
             usb_core, _usb_util = self._pyusb()
             dev = usb_core.find(idVendor=vendor_id, idProduct=product_id)
             if dev is None:
-                return _json_dumps({"success": False, "error": "Device not found"})
+                # 🐛 バグ修正(v0.0.5a3): 実仕様のUSBDevice.open()は「このデバイスが
+                # もうシステムに接続されていない」場合をNotFoundErrorと定めている
+                # (wicg.github.io/webusb §USBDevice.open())。旧実装はプレフィックス無しの
+                # 生文字列を返しており、polyfill.pyのthrowFromResult()がどの
+                # KNOWN_ERROR_PREFIXESにも一致せずデフォルトのNetworkErrorへ
+                # フォールバックしてしまっていた(=許可済みだが抜かれた/未接続の
+                # デバイスをopen()した際、DOMExceptionの.nameが仕様と異なっていた)。
+                return _json_dumps({"success": False, "error": not_found_error("device not found")})
             handle_id = self._next_handle
             self._next_handle += 1
             self._open_devices[handle_id] = {"device": dev, "origin": origin, "claimed_interfaces": set()}
@@ -1073,10 +1103,22 @@ class WebUSBBridge(QObject):
         だけを見て行う(alternate_setting未指定時の保守的フォールバックだと、
         「無害なalt 0だが、別のalt設定が保護対象クラスを持つ」デバイスまで
         claim自体を拒否してしまい、実害のない構成まで過剰に締め出すことになる
-        —実際の防御は_endpoint_available_or_error側の
-        interface_alt_settings追跡で行う)。claim成功時にはそのalternate
+        — alt 0以外への実際の防御はselectAlternateInterface()自身が切替先
+        alternateのクラスを検証することで行う(v0.0.5a3で追加、詳細はそちらの
+        docstring及びVULNERABILITY_REPORT.md No.1参照)。claim成功時にはそのalternate
         settingの記録(interface_alt_settings)も0で初期化し、
-        selectAlternateInterface()が呼ばれるまでこの前提を維持する。"""
+        selectAlternateInterface()が呼ばれるまでこの前提を維持する。
+        🐛 バグ修正(v0.0.5a3、WebUSB仕様の該当アルゴリズムを実際に取得して確認):
+        - 既にclaim済みのinterfaceへの再度のclaimInterface()は、仕様上は実機操作も
+          保護対象クラス判定も行わない単純な成功のno-op。旧実装はこの分岐が無く、
+          再claimのたびにinterface_alt_settingsを無条件に0へ書き戻していたため、
+          「selectAlternateInterface()で正当に別のalternateへ切り替えた後、同じ
+          interfaceをもう一度claimInterface()した」だけで、実機は元のalternateの
+          ままなのに追跡側だけ0へ巻き戻る状態不整合が起きていた。
+        - 指定interface_numberがそもそも存在しない場合は仕様上NotFoundError。
+          旧実装はこの区別をせず、interface_class_for()がNoneを返す→
+          is_protected_interface_class(None)がTrue(安全側フォールバック)経由で
+          誤ってSecurityError「interface X is class 'Unknown'」を返していた。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1090,6 +1132,17 @@ class WebUSBBridge(QObject):
                 })
 
             info = self._open_devices.get(handle_id)
+            if info is not None and interface_number in info.get("claimed_interfaces", set()):
+                # 仕様どおりの単純な成功no-op。実機操作・保護対象クラス判定・
+                # interface_alt_settingsのリセットのいずれも行わない。
+                return _json_dumps({"success": True})
+
+            if interface_class_for(dev, interface_number, alternate_setting=None) is None:
+                return _json_dumps({
+                    "success": False,
+                    "error": not_found_error(f"interface {interface_number} does not exist on this device"),
+                })
+
             iface_class = interface_class_for(dev, interface_number, alternate_setting=0)
             if is_protected_interface_class(iface_class):
                 name = protected_class_name(iface_class)
@@ -1121,7 +1174,15 @@ class WebUSBBridge(QObject):
         Python側に一切届いておらず、一度claimしたインターフェースは
         デバイスを閉じるまで解放されなかった。
         🛡️ claimInterfaceと同様、実Chromeが要求するEnsureDeviceConfigured()相当の
-        チェック(configurationが選択されていること)も行う。"""
+        チェック(configurationが選択されていること)も行う。
+        🐛 バグ修正(v0.0.5a3、WebUSB仕様の該当アルゴリズムを実際に取得して確認):
+        - claimしていないinterfaceへのreleaseInterface()は、仕様上は実機操作を
+          一切行わない成功のno-op。旧実装はこの分岐が無く、claim済みかどうかに
+          関わらず常にusb_util.release_interface()を実機へ呼んでいたため、
+          未claimのinterfaceに対して呼ぶと(バックエンド次第で)libusb側の
+          エラーを誘発し、本来仕様上は常に成功するはずの呼び出しが不定形の
+          エラー(接頭辞規約に沿わないためNetworkError扱い)になり得ていた。
+        - 指定interface_numberがそもそも存在しない場合は仕様上NotFoundError。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1134,11 +1195,18 @@ class WebUSBBridge(QObject):
                     "error": invalid_state_error("the device must have a configuration selected"),
                 })
             info = self._open_devices.get(handle_id)
+            if info is None or interface_number not in info.get("claimed_interfaces", set()):
+                if interface_class_for(dev, interface_number, alternate_setting=None) is None:
+                    return _json_dumps({
+                        "success": False,
+                        "error": not_found_error(f"interface {interface_number} does not exist on this device"),
+                    })
+                # 仕様どおりの単純な成功no-op(実機操作は行わない)。
+                return _json_dumps({"success": True})
             _usb_core, usb_util = self._pyusb()
             usb_util.release_interface(dev, interface_number)
-            if info is not None:
-                info.get("claimed_interfaces", set()).discard(interface_number)
-                info.get("interface_alt_settings", {}).pop(interface_number, None)
+            info.get("claimed_interfaces", set()).discard(interface_number)
+            info.get("interface_alt_settings", {}).pop(interface_number, None)
             return _json_dumps({"success": True})
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
@@ -1182,10 +1250,20 @@ class WebUSBBridge(QObject):
         旧実装はこの確認が完全に欠落しており、claimInterface()を一度も呼ばずに
         (=保護対象クラスの拒否を経由せずに)任意のインターフェース番号の
         alternate settingを変更できてしまっていた。
-        ★ 保護対象インターフェースクラスの判定は「インターフェース番号」単位で
-        行っており、alternate setting違いでクラスが変わるような変則的デバイスは
-        (稀だが)想定していない。claimInterfaceの時点で拒否されていれば
-        そもそもこのSlotへは到達しない。"""
+        🛡️ セキュリティ修正(v0.0.5a3、VULNERABILITY_REPORT.md No.1の残存部分):
+        claimInterface()はalternate setting 0のクラスだけを見て許可するため、
+        「alternate 0は無害なvendor-specificクラス、alternate 1は保護対象クラス
+        (HID等)」という複合デバイスをclaimすること自体は許可される
+        (claimInterfaceのdocstring参照——意図的にそうなっている)。旧実装はこの
+        selectAlternateInterface()自体には保護対象クラスの検証が一切無かったため、
+        一度そのようなinterfaceをclaimしてしまえば、selectAlternateInterface()を
+        呼ぶだけで保護対象クラス側のalternateへ実際に切り替えられてしまい
+        (_endpoint_available_or_error()は「今まさに選択されているalternate」の
+        endpointを正しく探し出す設計になっているため、切替後はそのendpointへの
+        bulk/interrupt転送も普通に成功してしまう)、claimInterface()による
+        入り口での防御が実質的に迂回できてしまっていた。切替先alternateの
+        クラスをここでも検証することで閉じる(★の「(稀だが)想定していない」と
+        していた変則的デバイスへの対応が、この修正そのものにあたる)。"""
         try:
             dev = self._get_open_device(handle_id, frame_token)
             if dev is None:
@@ -1196,6 +1274,28 @@ class WebUSBBridge(QObject):
                 return _json_dumps({
                     "success": False,
                     "error": invalid_state_error("the specified interface has not been claimed"),
+                })
+            # 🐛 バグ修正(v0.0.5a3): 実仕様は切替先alternate_settingが存在しない
+            # 場合をNotFoundErrorと定めている。旧実装はこの検証をpyusb/libusbへの
+            # 生呼び出し任せにしており(不明なalternateを渡した際の挙動は
+            # バックエンド依存で、接頭辞規約に沿わないエラーになり得ていた)、
+            # ここで事前に構造的に検証する。
+            target_class = interface_class_for(dev, interface_number, alternate_setting=alternate_setting)
+            if target_class is None:
+                return _json_dumps({
+                    "success": False,
+                    "error": not_found_error(
+                        f"interface {interface_number} has no alternate setting {alternate_setting}"
+                    ),
+                })
+            if is_protected_interface_class(target_class):
+                name = protected_class_name(target_class)
+                return _json_dumps({
+                    "success": False,
+                    "error": security_error(
+                        f"interface {interface_number} alternate setting {alternate_setting} is class "
+                        f"'{name}', which is a protected interface class and cannot be selected via WebUSB"
+                    ),
                 })
             dev.set_interface_altsetting(interface=interface_number, alternate_setting=alternate_setting)
             # 🛡️ security_audit No.1: _endpoint_available_or_error()が

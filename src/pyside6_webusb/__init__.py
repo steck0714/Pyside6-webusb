@@ -32,6 +32,13 @@ entry) -- the diagnostic has to survive the exact condition it's meant to diagno
 
 from .diagnostics import environment_report, format_environment_report
 from ._version import __version__
+from .virtual import (
+    VirtualUsbConfiguration,
+    VirtualUsbDevice,
+    VirtualUsbEndpoint,
+    VirtualUsbInterface,
+    make_virtual_usb_backend,
+)
 
 try:
     from .bridge import WebUSBBridge
@@ -88,4 +95,9 @@ __all__ = [
     "WEBUSB_POLYFILL_JS",
     "environment_report",
     "format_environment_report",
+    "VirtualUsbDevice",
+    "VirtualUsbConfiguration",
+    "VirtualUsbInterface",
+    "VirtualUsbEndpoint",
+    "make_virtual_usb_backend",
 ]

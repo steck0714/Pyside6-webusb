@@ -53,10 +53,14 @@ UsbHotplugWatcher をアプリ起動時に起動する、という使い方を�
   - 参考実装 thegecko/webusb (Node.js): 2024年に非推奨化され、後継は
     npm "usb" パッケージ内蔵のWebUSB実装 (node-usb)。API形状
     (configurations/selectAlternateInterface/clearHalt/reset/serialNumber等)
-    の突き合わせに使用した。isochronousTransferはnode-usb側でも
-    「現状未対応」とされており、本実装でも同様に非対応として明示する
-    (中途半端な実装で「動いているように見えて実は壊れている」状態を
-    避けるため)。
+    の突き合わせに使用した。この参照比較を行った時点ではisochronousTransferは
+    node-usb側でも「現状未対応」だったため、当初は本実装でも同様に非対応として
+    明示していた(中途半端な実装で「動いているように見えて実は壊れている」
+    状態を避けるため)。
+    🆕 v0.0.4a0でisochronousTransferIn/Out自体は実装済み(bridge.py参照、
+    libusb1のiso転送APIをベストエフォートで利用)。ただし個々のパケット単位の
+    正確性(actual per-packet fidelity)には既知の制約が残っており、詳細は
+    CHANGELOG.mdの`0.0.5.post3`「Investigated, not changed」を参照。
 """
 
 import time
@@ -407,14 +411,37 @@ class UsbHotplugWatcher:
         # (vendor_id, product_id)のsetを返す callable
         self._pyusb_finder = pyusb_finder
         self._known = set()
+        self._initialized = False
         self._lock = threading.Lock()
         self._last_poll = 0.0
 
     def poll(self):
+        """🐛 バグ修正(v0.0.5a3): 監視開始前から挿さっていたデバイスは、
+        「今まさに接続された」わけではないにもかかわらず、旧実装では最初の
+        poll()が必ず「現在のデバイス一覧 - 空集合」を差分として返すため、
+        起動直後に接続中の全デバイスぶんのconnectイベントが一度にJSへ
+        配送されてしまっていた(実ブラウザは起動時に既に挿さっている
+        デバイスについてconnectイベントを発火しない — それらは
+        getDevices()で最初から見えるだけ)。初回のpoll()は現在の状態を
+        「基準」として記録するだけにとどめ、connected/disconnectedは
+        どちらも空のまま返す。2回目以降のpoll()は従来どおり差分検出する。
+        ⚠️ 既知の制約: 識別子として(vendor_id, product_id)のみを使うsetの
+        ため、全く同じVID/PIDの機器を2台同時に挿している場合、片方だけを
+        抜いても(もう片方がまだ挿さっている限り)差分が検出できない
+        (setからは消えない)。これはpyusbが安定した個体識別子
+        (シリアル番号は未取得の機器では読めないことが多く、bus/address等の
+        識別情報はOS/接続ポートの都合で抜き挿しのたびに変わりうる)を
+        持たないことに由来する既知の限界であり、README「Known
+        limitations」に明記する。"""
         with self._lock:
             try:
                 current = self._pyusb_finder()
             except Exception:
+                return [], []
+            if not self._initialized:
+                self._known = current
+                self._initialized = True
+                self._last_poll = time.time()
                 return [], []
             connected = sorted(current - self._known)
             disconnected = sorted(self._known - current)
