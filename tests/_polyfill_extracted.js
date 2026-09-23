@@ -199,7 +199,36 @@
             self.opened = true;
         });
     };
+    // 🐛 バグ修正(v0.0.5a3、実仕様のUSBDevice.close()/selectConfiguration()/
+    //    reset()アルゴリズムを実際に取得して確認): この3つはいずれも、成功後は
+    //    [[claimedInterface]]を全interfaceにわたって全てfalseへリセットすると
+    //    定めている(close()は「全claim済みinterfaceに対してreleaseInterface()が
+    //    呼ばれたのと同じ状態」、selectConfiguration()/reset()は明示的に
+    //    [[claimedInterface]]を全てfalseで埋め直す)。旧実装はPython側
+    //    (bridge.py)ではこれを正しく行っていたが、JS側のOpenWebUSBDeviceオブジェクト
+    //    自身が持つ各interfaceの.claimed/.alternateはどの経路でもリセットして
+    //    いなかった。結果として、例えば「interface 0をclaimし、
+    //    selectConfiguration()で別のconfigurationへ移り、元のconfigurationへ
+    //    selectConfiguration()で戻る」といった操作をすると、Python側は
+    //    正しくclaimed_interfacesを空に戻しているにもかかわらず、JS側の
+    //    device.configuration.interfaces[0].claimedはtrueのまま残り続け、
+    //    ページ側のコードが「既にclaim済みのはず」と誤認したままbulk/interrupt
+    //    転送を試みてNotFoundError(claim済みかつ選択中のalternateとしては
+    //    見つからない)になる、という実害のある状態不整合だった。
+    function resetAllClaimedInterfaces(device) {
+        (device.configurations || []).forEach(function(cfg) {
+            (cfg.interfaces || []).forEach(function(iface) {
+                iface.claimed = false;
+                var alts = iface.alternates || [];
+                var zero = alts.filter(function(a) { return a.alternateSetting === 0; })[0];
+                iface.alternate = zero || alts[0] || null;
+            });
+        });
+    }
     OpenWebUSBDevice.prototype.close = function() {
+        // 🛡️ 実仕様: openedがfalse(既に閉じている/一度も開いていない)なら
+        //    ブリッジへは何も送らず、即座に成功解決するno-op。
+        if (!this.opened) return Promise.resolve();
         var self = this;
         return _bridgeReady.then(function(bridge) {
             // 🛡️ バグ修正(v0.0.4): frame_tokenを渡し忘れていた。closeDevice()は
@@ -211,6 +240,8 @@
             //    残り続け)、close()を呼んでも何も起きていなかった。
             if (bridge && self._handle != null) bridge.closeDevice(self._handle, _frameToken());
             self.opened = false;
+            self._handle = null;
+            resetAllClaimedInterfaces(self);
         });
     };
     OpenWebUSBDevice.prototype.selectConfiguration = function(configurationValue) {
@@ -220,6 +251,7 @@
             // 実仕様どおり、選択成功後はconfigurationが新しい設定を指すよう更新する。
             var match = (self.configurations || []).filter(function(c) { return c.configurationValue === configurationValue; })[0];
             if (match) self.configuration = match;
+            resetAllClaimedInterfaces(self);
         });
     };
     OpenWebUSBDevice.prototype.claimInterface = function(n) {
@@ -251,8 +283,10 @@
         });
     };
     OpenWebUSBDevice.prototype.reset = function() {
+        var self = this;
         return callBridge('resetDevice', this._handle, _frameToken()).then(function(res) {
             if (!res.success) throwFromResult(res, 'Failed to reset device');
+            resetAllClaimedInterfaces(self);
         });
     };
     OpenWebUSBDevice.prototype.clearHalt = function(direction, endpointNumber) {
@@ -387,17 +421,79 @@
         });
     };
 
-    // --- connect/disconnect イベント ---
+    // --- navigator.usb 本体、及びconnect/disconnect イベント ---
     // Python側(PyUsbBridge)がホットプラグ監視タイマーで差分検出し、許可済み
     // オリジンに関係するデバイスの抜き挿しだけをQtシグナルとして送ってくる。
-    // ここではEventTargetを継承する代わりに、addEventListener/removeEventListener/
-    // on(connect|disconnect)プロパティの両方に対応した最小限のディスパッチャを実装する。
-    var _listeners = { connect: [], disconnect: [] };
+    // 🐛 バグ修正(v0.0.5a3、実DevTools上で `navigator.usb instanceof EventTarget`
+    //    が false になることを確認して発覚): 旧実装はEventTargetを継承する
+    //    代わりに、addEventListener/removeEventListener/on(connect|disconnect)
+    //    プロパティへ個別対応した独自の最小ディスパッチャを実装していた
+    //    (types/webusb-polyfill.d.tsは`interface USB extends EventTarget`と
+    //    宣言しているにもかかわらず、実行時の実体はただのオブジェクトリテラルで
+    //    EventTargetを継承していなかった)。QtWebEngine(実質Chromium)を含む
+    //    現代的なJSエンジンはグローバルのEventTargetコンストラクタを持つため、
+    //    それを実際に継承したUSBクラス(及びEventを継承した本物の
+    //    USBConnectionEvent)へ差し替える。EventTarget自体が存在しない
+    //    (極めて古い/簡易な)実行環境向けに、その場合だけ従来の独自
+    //    ディスパッチャへフォールバックする防御的な作りにしてある。
+    var _HasNativeEventTarget = typeof EventTarget === 'function';
+
+    // ⚠️ EventTarget/EventはES5の「コンストラクタ借用」(Parent.call(this))では
+    //    継承できないネイティブのクラスコンストラクタ(`new`無しで呼ぶと
+    //    TypeErrorになる実機/Node.js双方で確認済み)。このファイルの他の部分は
+    //    意図的にES5関数式スタイルで統一しているが、ネイティブEventTarget/Event
+    //    を実際に継承するにはES6の`class ... extends`構文が必須なため、ここだけ
+    //    (_HasNativeEventTargetがtrueの、モダンなエンジンだと確定している枝の中でだけ)
+    //    使う。フォールバック側は従来どおりのES5スタイルを維持する。
+    var USBConnectionEvent, USB;
+    if (_HasNativeEventTarget) {
+        USBConnectionEvent = class extends Event {
+            constructor(type, eventInitDict) {
+                super(type, eventInitDict || {});
+                this.device = (eventInitDict || {}).device;
+            }
+        };
+        USB = class extends EventTarget {
+            constructor() {
+                super();
+                this.onconnect = null;
+                this.ondisconnect = null;
+            }
+        };
+    } else {
+        // フォールバック: 素のEventTargetが無い環境向けの最小限の自前実装
+        // (instanceof EventTargetにはならないが、機能自体はここまでと同じく動く)。
+        USBConnectionEvent = function(type, eventInitDict) {
+            var init = eventInitDict || {};
+            this.type = type;
+            this.device = init.device;
+        };
+        USB = function() {
+            this.onconnect = null;
+            this.ondisconnect = null;
+        };
+        var _fallbackListeners = { connect: [], disconnect: [] };
+        USB.prototype.addEventListener = function(type, fn) {
+            if (_fallbackListeners[type] && typeof fn === 'function') _fallbackListeners[type].push(fn);
+        };
+        USB.prototype.removeEventListener = function(type, fn) {
+            if (_fallbackListeners[type]) {
+                _fallbackListeners[type] = _fallbackListeners[type].filter(function(f) { return f !== fn; });
+            }
+        };
+        USB.prototype.dispatchEvent = function(evt) {
+            (_fallbackListeners[evt.type] || []).forEach(function(fn) {
+                try { fn(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
+            });
+            return true;
+        };
+    }
+
+    navigator.usb = new USB();
+
     function _dispatchUsbEvent(type, device) {
-        var evt = { type: type, device: device };
-        (_listeners[type] || []).forEach(function(fn) {
-            try { fn(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
-        });
+        var evt = new USBConnectionEvent(type, { device: device });
+        try { navigator.usb.dispatchEvent(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
         var handlerProp = 'on' + type;
         if (typeof navigator.usb[handlerProp] === 'function') {
             try { navigator.usb[handlerProp](evt); } catch (e) { /* 同上 */ }
@@ -438,15 +534,18 @@
         }
     });
 
-    navigator.usb = {
-        onconnect: null,
-        ondisconnect: null,
-        getDevices: function() {
-            return callBridge('listDevices', _frameToken()).then(function(res) {
-                return (res.devices || []).map(function(d) { return new OpenWebUSBDevice(d); });
-            });
-        },
-        requestDevice: function(_options) {
+    // 🐛 v0.0.5a3: 以前はここでnavigator.usbをオブジェクトリテラルとして丸ごと
+    // 代入していたが、今はnavigator.usb自体は既に(上でEventTargetを継承した
+    // USBのインスタンスとして)生成済みなので、残りのメソッドをその
+    // インスタンスへ生やす形にする。addEventListener/removeEventListener/
+    // dispatchEventはUSB.prototype側(EventTarget由来、またはフォールバック)に
+    // 既にあるため、ここで再定義しない。
+    navigator.usb.getDevices = function() {
+        return callBridge('listDevices', _frameToken()).then(function(res) {
+            return (res.devices || []).map(function(d) { return new OpenWebUSBDevice(d); });
+        });
+    };
+    navigator.usb.requestDevice = function(_options) {
             // 🛡️ 実仕様: USBDeviceRequestOptions.filtersは必須(required)フィールド。
             //    省略された場合、実ブラウザではWebIDLの辞書変換の時点でTypeErrorになる
             //    (wicg.github.io/webusb の USBDeviceRequestOptions定義)。旧実装は
@@ -507,13 +606,6 @@
                 }
                 return new OpenWebUSBDevice(res.device);
             });
-        },
-        addEventListener: function(type, fn) {
-            if (_listeners[type] && typeof fn === 'function') _listeners[type].push(fn);
-        },
-        removeEventListener: function(type, fn) {
-            if (_listeners[type]) _listeners[type] = _listeners[type].filter(function(f) { return f !== fn; });
-        },
     };
 
     // 🔧 v0.0.4b2: F12(DevTools Console)向けのデバッグ用ネームスペース。

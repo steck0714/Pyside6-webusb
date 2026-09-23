@@ -441,17 +441,33 @@ async function main() {
     window.__pyUsbFrameToken = 'close-test-frame-token';
     const closeDev = await navigator.usb.requestDevice({ filters: [{}] });
     await closeDev.open();
+    const handleBeforeClose = closeDev._handle;  // v0.0.5a3: close()後は_handleがnullへリセットされるため、呼び出し前に保存しておく
     fakeBridgeCalls.length = 0;
     await closeDev.close();
     assert.strictEqual(closeDev.opened, false, 'close()後はopened=falseになるべき');
     const closeCalls = fakeBridgeCalls.filter(c => c[0] === 'closeDevice');
     assert.strictEqual(closeCalls.length, 1, 'closeDevice()がちょうど1回ブリッジへ渡されるべき');
-    assert.strictEqual(closeCalls[0][1], closeDev._handle, 'closeDeviceへ渡すhandleが正しいはず');
+    assert.strictEqual(closeCalls[0][1], handleBeforeClose, 'closeDeviceへ渡すhandleが正しいはず');
     assert.strictEqual(closeCalls[0][2], 'close-test-frame-token',
         'closeDeviceへframe_tokenも渡されるべき(handleのみの1引数呼び出しは' +
         'QWebChannelにスロット呼び出しごと握りつぶされる実バグがあった)');
     delete window.__pyUsbFrameToken;
     console.log('close() forwards (handle, frame_token) to closeDevice -- regression test for v0.0.4 bug: OK');
+
+    // 🆕 v0.0.5a3の回帰テスト: close()成功後は(1) _handleがnullへリセットされ、
+    // (2) 開いていたconfigurationの全interfaceの.claimedがfalseへ戻ることを確認する。
+    assert.strictEqual(closeDev._handle, null, 'close()後は_handleがnullへリセットされるべき');
+    const closeDevIface = (closeDev.configuration && closeDev.configuration.interfaces) || [];
+    closeDevIface.forEach((iface) => {
+        assert.strictEqual(iface.claimed, false, `close()後はinterface ${iface.interfaceNumber} の claimed が false に戻るべき`);
+    });
+    // close()を(既に閉じている状態で)もう一度呼んでもブリッジへは何も送らない
+    // (実仕様: openedがfalseならno-opで即座に成功解決する)。
+    fakeBridgeCalls.length = 0;
+    await closeDev.close();
+    assert.strictEqual(fakeBridgeCalls.filter(c => c[0] === 'closeDevice').length, 0,
+        '既に閉じているデバイスへのclose()はブリッジへ何も送らないno-opであるべき');
+    console.log('close() resets _handle/claimed interfaces and is a no-op when already closed: OK');
 
     // 🛡️ frame_origin.FrameOriginTracker がPython側からwindow.__pyUsbFrameToken
     //    へ書き込んだ値が、実際に全てのブリッジ呼び出しの末尾引数として

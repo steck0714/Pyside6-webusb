@@ -265,10 +265,16 @@ def test_unknown_interface_number_treated_as_protected():
 
 
 def test_hotplug_watcher_diff():
+    """🐛 v0.0.5a3で挙動修正: 最初のpoll()は「起動前から挿さっていたデバイス」の
+    基準記録だけを行い、connected/disconnectedともに空を返す(実ブラウザは
+    起動時に既に挿さっているデバイスへconnectイベントを発火しない)。
+    差分検出そのものは2回目以降のpoll()から従来どおり行われることを確認する。"""
     state = {"devices": {(0x2341, 0x8036)}}
     watcher = h.UsbHotplugWatcher(lambda: set(state["devices"]))
+    # 初回pollは基準記録のみ: 起動前から挿さっていた(0x2341, 0x8036)は
+    # 「今接続された」わけではないので、connectイベントとして報告されない。
     connected, disconnected = watcher.poll()
-    assert connected == [(0x2341, 0x8036)] and disconnected == []
+    assert connected == [] and disconnected == [], (connected, disconnected)
     state["devices"].add((0x1050, 0x0407))
     connected, disconnected = watcher.poll()
     assert connected == [(0x1050, 0x0407)] and disconnected == []
@@ -276,6 +282,30 @@ def test_hotplug_watcher_diff():
     connected, disconnected = watcher.poll()
     assert connected == [] and disconnected == [(0x2341, 0x8036)]
     print("test_hotplug_watcher_diff: OK")
+
+
+def test_hotplug_watcher_first_poll_never_fires_spurious_connect_events():
+    """🐛 バグ修正(v0.0.5a3): 旧実装はUsbHotplugWatcherの生成時点(=通常は
+    アプリ起動時)に何台デバイスが挿さっていても、最初のpoll()で「現在の
+    デバイス一覧 - 空集合」をそのまま差分として返していたため、起動直後の
+    最初のタイマー発火(bridge.py: 1.5秒後)で、既に挿さっていた全デバイス
+    ぶんのconnectイベントがJSへ一気に配送されてしまっていた。これは
+    getDevices()で最初から見えているのと同じデバイスについて、さらに
+    偽のconnectイベントが重複して届く実害のある不具合だった。
+    大量のデバイスが最初から挿さっている状況を再現し、初回poll()が
+    どのデバイス数であっても connected == [] であることを確認する。"""
+    many_devices = {(0x0001, i) for i in range(1, 51)}
+    watcher = h.UsbHotplugWatcher(lambda: set(many_devices))
+    connected, disconnected = watcher.poll()
+    assert connected == [] and disconnected == [], (
+        f"起動前から挿さっていた{len(many_devices)}台ぶんの偽connectイベントが"
+        f"発生した: connected={connected!r}"
+    )
+    # 基準が正しく記録されているので、次にもう1台挿すとそれだけが報告される。
+    many_devices.add((0x0002, 0x0002))
+    connected, disconnected = watcher.poll()
+    assert connected == [(0x0002, 0x0002)] and disconnected == []
+    print("test_hotplug_watcher_first_poll_never_fires_spurious_connect_events: OK")
 
 
 # ==================== ここから: requestDevice()フィルタ照合 ====================
@@ -448,6 +478,7 @@ if __name__ == "__main__":
     test_unknown_interface_number_treated_as_protected()
     test_interface_class_for_scoped_to_active_configuration()
     test_hotplug_watcher_diff()
+    test_hotplug_watcher_first_poll_never_fires_spurious_connect_events()
     test_is_valid_usb_device_filter()
     test_device_matches_filter_vendor_and_product_id()
     test_device_matches_filter_serial_number()

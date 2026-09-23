@@ -1487,8 +1487,13 @@ def test_selectAlternateInterface_requires_claimed_interface():
     (EnsureInterfaceClaimed()、未claimならInvalidStateError)。旧実装はこの
     確認が完全に欠落しており、claimInterface()を一度も呼ばずに任意の
     インターフェース番号のalternate settingを変更できてしまっていた。"""
-    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
-    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    # alternate setting 1も(alt 0と同じ無害なvendor-specificクラスで)用意しておく
+    # ——v0.0.5a3でselectAlternateInterface()が切替先alternateの実在確認を
+    # 行うようになったため、実在しないalternateへの切替はこのテストが検証したい
+    # 「claim済みかどうか」とは別の理由(NotFoundError)で失敗してしまう。
+    intf_alt0 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    intf_alt1 = FakeInterface(0, 1, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf_alt0, intf_alt1])])
     bridge = make_bridge([dev_a])
     bridge._is_granted = lambda *a, **kw: True
     handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
@@ -1501,6 +1506,58 @@ def test_selectAlternateInterface_requires_claimed_interface():
     claimed = json.loads(bridge.selectAlternateInterface(handle, 0, 1))
     assert claimed["success"] is True, claimed
     print("test_selectAlternateInterface_requires_claimed_interface: OK")
+
+
+def test_selectAlternateInterface_rejects_nonexistent_alternate_setting():
+    """🆕 v0.0.5a3: 切替先(interface_number, alternate_setting)の組がそもそも
+    デバイス上に存在しない場合、実仕様どおりNotFoundErrorになることを確認する
+    (旧実装はpyusb/libusbへの生呼び出し任せで、規約に沿わないエラーになり得た)。"""
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+
+    result = json.loads(bridge.selectAlternateInterface(handle, 0, 9))
+    assert result["success"] is False
+    assert result["error"].startswith("NotFoundError:"), result
+    print("test_selectAlternateInterface_rejects_nonexistent_alternate_setting: OK")
+
+
+def test_selectAlternateInterface_rejects_switch_to_protected_class_alternate():
+    """🛡️ セキュリティ修正(v0.0.5a3、VULNERABILITY_REPORT.md No.1の残存部分):
+    interface 0のalternate setting 0が無害(vendor-specific)、alternate
+    setting 1がHID(保護対象)という複合デバイスをclaimInterface(0)で
+    claimすること自体は許可される(claimInterfaceはalt 0のクラスだけを見るため)。
+    その後selectAlternateInterface(0, 1)でHID側へ切り替えようとした場合、
+    旧実装は無条件で許可してしまっていた(_endpoint_available_or_error()は
+    「選択中のalternate」のendpointを正しく探すため、切替後はHID側endpointへの
+    転送すら成功してしまう)。ここでSecurityErrorとして拒否されることを確認する。"""
+    benign_alt0 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x01, 0x02)])
+    hid_alt1 = FakeInterface(0, 1, 0x03, 0x00, 0x00, [FakeEndpoint(0x81, 0x03)])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [benign_alt0, hid_alt1])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    claim_result = json.loads(bridge.claimInterface(handle, 0))
+    assert claim_result["success"] is True, (
+        "前提条件: alternate 0は無害なのでclaimInterface自体は許可されるはず"
+    )
+
+    switch_result = json.loads(bridge.selectAlternateInterface(handle, 0, 1))
+    assert switch_result["success"] is False, (
+        f"HID(保護対象クラス)のalternate settingへの切替が許可されてしまった: {switch_result!r}"
+    )
+    assert switch_result["error"].startswith("SecurityError:"), switch_result
+
+    # 切替が拒否された以上、実機のalternateもトラッキングもalt 0のまま
+    # ——HID側endpointへは(selectAlternateInterfaceを経由せず直接叩く既存の
+    # 回避経路も含め)到達できないはずである。
+    transfer_result = json.loads(bridge.bulkTransferIn(handle, 1, 4))
+    assert transfer_result.get("success") is not True, transfer_result
+    print("test_selectAlternateInterface_rejects_switch_to_protected_class_alternate: OK")
 
 
 def test_claimInterface_and_releaseInterface_require_configuration_selected():
@@ -1522,6 +1579,155 @@ def test_claimInterface_and_releaseInterface_require_configuration_selected():
     assert release_result["success"] is False
     assert release_result["error"].startswith("InvalidStateError:"), release_result
     print("test_claimInterface_and_releaseInterface_require_configuration_selected: OK")
+
+
+def test_claimInterface_redundant_reclaim_is_a_noop_and_preserves_alternate_tracking():
+    """🐛 バグ修正(v0.0.5a3、WebUSB仕様のclaimInterface()アルゴリズムを実際に
+    取得して確認): 既にclaim済みのinterfaceへ再度claimInterface()を呼ぶのは
+    仕様上単純な成功のno-opで、記録済みのalternate settingには一切触れない。
+    旧実装は再claimのたびにinterface_alt_settingsを無条件に0へ書き戻して
+    いたため、「selectAlternateInterface()で正当に別のalternateへ切り替えた後、
+    同じinterfaceをもう一度claimInterface()した」だけで、実機は元の
+    alternateのままなのに追跡側だけ0へ巻き戻る状態不整合が起きていた。"""
+    intf_alt0 = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [FakeEndpoint(0x81, 0x02)])
+    intf_alt1 = FakeInterface(0, 1, 0xFF, 0x00, 0x00, [FakeEndpoint(0x82, 0x02)])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf_alt0, intf_alt1])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    assert json.loads(bridge.claimInterface(handle, 0))["success"] is True
+    assert json.loads(bridge.selectAlternateInterface(handle, 0, 1))["success"] is True
+
+    # 再度claimInterface()を呼んでも(仕様どおりの単純なno-opとして)成功し、
+    # 追跡中のalternate settingは1のまま(0へ巻き戻らない)はずである。
+    reclaim_result = json.loads(bridge.claimInterface(handle, 0))
+    assert reclaim_result["success"] is True, reclaim_result
+    info = bridge._open_devices[handle]
+    assert info["interface_alt_settings"].get(0) == 1, (
+        f"再claim後にalternate setting追跡が巻き戻った: {info['interface_alt_settings']!r}"
+    )
+    # 巻き戻っていない証拠として、alt 1側のendpoint(0x82)への転送が
+    # 引き続き成功する(alt 0側のendpoint 0x81ではなく)ことも確認する。
+    transfer_result = json.loads(bridge.bulkTransferIn(handle, 2, 4))
+    assert transfer_result.get("success") is True, transfer_result
+    print("test_claimInterface_redundant_reclaim_is_a_noop_and_preserves_alternate_tracking: OK")
+
+
+def test_claimInterface_rejects_nonexistent_interface_with_NotFoundError():
+    """🐛 バグ修正(v0.0.5a3): 存在しないinterface_numberに対するclaimInterface()は
+    仕様上NotFoundError。旧実装はinterface_class_for()がNoneを返す経路を
+    経由してSecurityError「interface X is class 'Unknown'」という誤った理由の
+    エラーを返していた。"""
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    result = json.loads(bridge.claimInterface(handle, 5))  # interface 5は存在しない
+    assert result["success"] is False
+    assert result["error"].startswith("NotFoundError:"), result
+    print("test_claimInterface_rejects_nonexistent_interface_with_NotFoundError: OK")
+
+
+def test_releaseInterface_of_unclaimed_interface_is_a_noop():
+    """🐛 バグ修正(v0.0.5a3): claimしていないinterfaceへのreleaseInterface()は
+    仕様上、実機操作を一切行わない成功のno-op。旧実装は常にusb_util側の
+    release_interface()を実機へ呼んでいた。"""
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    result = json.loads(bridge.releaseInterface(handle, 0))
+    assert result["success"] is True, result
+    assert 0 not in getattr(dev_a, "claimed_by_util", set()), (
+        "claimしていないinterfaceに対してusb_util.release_interface()が実機へ呼ばれた"
+    )
+    print("test_releaseInterface_of_unclaimed_interface_is_a_noop: OK")
+
+
+def test_releaseInterface_rejects_nonexistent_interface_with_NotFoundError():
+    """🆕 v0.0.5a3: 存在しないinterface_numberへのreleaseInterface()もNotFoundError。"""
+    intf = FakeInterface(0, 0, 0xFF, 0x00, 0x00, [])
+    dev_a = FakeDevice(0x2341, 0x8036, [FakeConfiguration(1, [intf])])
+    bridge = make_bridge([dev_a])
+    bridge._is_granted = lambda *a, **kw: True
+    handle = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
+
+    result = json.loads(bridge.releaseInterface(handle, 5))
+    assert result["success"] is False
+    assert result["error"].startswith("NotFoundError:"), result
+    print("test_releaseInterface_rejects_nonexistent_interface_with_NotFoundError: OK")
+
+
+def test_openDevice_reports_missing_device_as_NotFoundError():
+    """🐛 バグ修正(v0.0.5a3): 実仕様のUSBDevice.open()は、デバイスがもう
+    システムに接続されていない場合をNotFoundErrorと定めている。旧実装は
+    接頭辞の無い生文字列("Device not found")を返しており、
+    polyfill.pyのthrowFromResult()がデフォルトのNetworkErrorへ
+    フォールバックしてしまっていた。"""
+    bridge = make_bridge([])  # デバイスが1台も無い
+    bridge._is_granted = lambda *a, **kw: True
+
+    result = json.loads(bridge.openDevice(0x2341, 0x8036))
+    assert result["success"] is False
+    assert result["error"].startswith("NotFoundError:"), result
+    print("test_openDevice_reports_missing_device_as_NotFoundError: OK")
+
+
+def test_b64decode_rust_path_also_rejects_non_canonical_base64():
+    """🐛 バグ修正(v0.0.5a3): 従来Rust高速パス(_rust_accel.decode_base64)は
+    正規性チェックを一切行わず、非正規base64の拒否はPure Pythonパスでしか
+    効いていなかった(_b64decodeのdocstring参照)。Rustツールチェーンが
+    無いこの環境では実際のRust拡張をビルドできないため、
+    「デコード自体は成功するがチェックはしない」という実際のRust拡張と
+    同じ振る舞いをするフェイクをbridge.HAVE_RUST_ACCEL/_rust_accel へ
+    差し込み、Pythonの標準ライブラリによるround-trip検証がRust経路にも
+    及んでいることを確認する。"""
+    import base64 as _stdlib_b64
+    from pyside6_webusb import bridge as bridge_module
+
+    class _FakeRustAccelNoValidation:
+        """実際のRust拡張(検証を一切しない)を模したフェイク: 標準ライブラリの
+        レニエントなb64decode()をそのまま呼ぶだけで、正規性は一切見ない。"""
+
+        @staticmethod
+        def decode_base64(s):
+            return _stdlib_b64.b64decode(s)
+
+        @staticmethod
+        def encode_base64(data):
+            return _stdlib_b64.b64encode(bytes(data)).decode("ascii")
+
+    noncanonical = "Zh=="  # 'Zg=='(b"f"の正規形)の非正規版、標準ライブラリはレニエントに受理する
+    assert _stdlib_b64.b64decode(noncanonical) == b"f"
+
+    original_have_rust, original_rust_accel = bridge_module.HAVE_RUST_ACCEL, bridge_module._rust_accel
+    try:
+        bridge_module.HAVE_RUST_ACCEL = True
+        bridge_module._rust_accel = _FakeRustAccelNoValidation()
+
+        # 正規形は引き続き通る。
+        assert bridge_module._b64decode("Zg==") == b"f"
+
+        # 非正規形は、Rust経路を通っていてもPython側のround-trip検証で拒否される。
+        try:
+            bridge_module._b64decode(noncanonical)
+            raise AssertionError("Rust経路で非正規base64が拒否されなかった")
+        except Exception as e:
+            assert isinstance(e, ValueError), f"binascii.Errorはvalueerrorのサブクラスのはず: {type(e)}"
+
+        data, err = bridge_module._b64decode_or_data_error(noncanonical)
+        assert data is None
+        parsed = json.loads(err)
+        assert parsed["success"] is False
+        assert parsed["error"].startswith("DataError: "), parsed["error"]
+    finally:
+        bridge_module.HAVE_RUST_ACCEL, bridge_module._rust_accel = original_have_rust, original_rust_accel
+    print("test_b64decode_rust_path_also_rejects_non_canonical_base64: OK")
 
 
 def test_selectConfiguration_resets_claimed_interfaces():
@@ -1883,6 +2089,14 @@ if __name__ == "__main__":
     test_isochronousTransfer_requires_claimed_isochronous_endpoint()
     test_isochronousTransfer_success_path_with_fake_backend()
     test_selectAlternateInterface_requires_claimed_interface()
+    test_selectAlternateInterface_rejects_nonexistent_alternate_setting()
+    test_selectAlternateInterface_rejects_switch_to_protected_class_alternate()
+    test_claimInterface_redundant_reclaim_is_a_noop_and_preserves_alternate_tracking()
+    test_claimInterface_rejects_nonexistent_interface_with_NotFoundError()
+    test_releaseInterface_of_unclaimed_interface_is_a_noop()
+    test_releaseInterface_rejects_nonexistent_interface_with_NotFoundError()
+    test_openDevice_reports_missing_device_as_NotFoundError()
+    test_b64decode_rust_path_also_rejects_non_canonical_base64()
     test_claimInterface_and_releaseInterface_require_configuration_selected()
     test_frame_tracker_wired_denies_empty_and_forged_tokens()
     test_frame_tracker_wired_isolates_handles_between_different_frame_origins()
