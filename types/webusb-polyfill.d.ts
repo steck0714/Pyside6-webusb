@@ -28,8 +28,10 @@
 // CHANGELOG.mdを参照してください(型定義そのものには影響しません — 例外は
 // どの名前であってもcatch (e)で受けられます)。
 //
-// バージョン対応: pyside6-webusb v0.0.4a0 時点のUSBDevice実装(babbleステータス
-// 対応後)を反映しています。
+// バージョン対応: pyside6-webusb v0.0.5a3 時点のUSBDevice/USB実装を反映しています
+// (v0.0.4a0のbabbleステータス対応以降の主な追従: navigator.usbが実際に
+// EventTargetを継承するようになった/close()・selectConfiguration()・reset()が
+// claim状態を正しくリセットするようになった、いずれもv0.0.5a3)。
 
 export {};
 
