@@ -1,0 +1,2 @@
+[console_scripts]
+pyside6-webusb-doctor = pyside6_webusb.__main__:main

@@ -1,9 +1,9 @@
 Metadata-Version: 2.4
 Name: pyside6-webusb
-Version: 0.0.4b2
+Version: 0.0.5.post5
 Summary: A WebUSB API implementation for PySide6/QtWebEngine apps (QWebChannel bridge + pyusb backend + JS polyfill)
 Author: pyside6-webusb contributors
-License: MIT
+License-Expression: MIT AND BSD-3-Clause AND W3C-20150513
 Project-URL: Homepage, https://github.com/steck0714/Pyside6-webusb
 Project-URL: Issues, https://github.com/steck0714/Pyside6-webusb/issues
 Project-URL: Mock-APIs (parent project), https://github.com/steck0714/Mock-webusb
@@ -11,7 +11,6 @@ Project-URL: Specification, https://wicg.github.io/webusb/
 Keywords: pyside6,qt,qtwebengine,webusb,usb,pyusb,qwebchannel,polyfill
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
-Classifier: License :: OSI Approved :: MIT License
 Classifier: Programming Language :: Python :: 3
 Classifier: Topic :: Software Development :: Libraries
 Classifier: Topic :: System :: Hardware
@@ -28,9 +27,11 @@ Dynamic: license-file
 
 # pyside6-webusb
 
-**Status:** `0.0.4b2` — early beta, working and tested (see [CHANGELOG.md](CHANGELOG.md)),
-but young. Treat pre-1.0 the way you'd treat any early-stage library. Isochronous transfer
-support in particular has not been verified against real hardware — see CHANGELOG.
+**Status:** `0.0.5.post4` (informally `v0.0.5a3`) — early beta, working and tested (see
+[CHANGELOG.md](CHANGELOG.md)), but young. Treat pre-1.0 the way you'd treat any early-stage
+library. Isochronous transfer *is* implemented (`bridge.py`'s `isochronousTransferIn/Out`), but
+per-packet fidelity on IN transfers has a known limitation traced to a pyusb API gap — see
+CHANGELOG. Not yet verified against real isochronous hardware.
 
 A [WebUSB API](https://wicg.github.io/webusb/) implementation for **PySide6 / QtWebEngine**
 apps.
@@ -140,6 +141,127 @@ public: `pyside6_webusb.bridge.WebUSBBridge`, `pyside6_webusb.polyfill.WEBUSB_PO
 `pyside6_webusb.hardening` (filter matching, blocklist checks, descriptor building — all
 independent of Qt, so you can unit test against them without a display).
 
+### Pre-authorizing devices without the chooser (`0.0.5a0`)
+
+`WebUSBBridge.grant_device_for_origin(origin, vendor_id, product_id)` lets your *host app*
+grant an origin access to a specific device up front, without the user ever seeing the chooser
+dialog — the same idea as Chrome's enterprise
+[`WebUsbAllowDevicesForUrls`](https://chromeenterprise.google/policies/#WebUsbAllowDevicesForUrls)
+policy, for kiosk/embedded deployments where the set of allowed origins and devices is decided
+by configuration rather than by an end user clicking "Connect":
+
+```python
+bridge = install(view.page())
+# e.g. read from your own kiosk config at startup
+bridge.grant_device_for_origin("https://kiosk.example", vendor_id=0x2341, product_id=0x8036)
+```
+
+It shares the exact same storage as a grant obtained through the normal chooser flow, so a
+pre-authorized device shows up immediately in `navigator.usb.getDevices()` and can later be
+taken away again with the existing `revoke_origin_grant()` — the two are symmetric, and neither
+the polyfill nor the page can tell which path a given grant came from. Like every other
+management method in this section, it's deliberately **not** a `@Slot`: call it only from your
+own trusted Python code, never anything reachable from web content. Blocklisted devices (known
+security keys) are rejected here too, for the same reason `openDevice()` rejects them.
+
+### Diagnosing your environment (`0.0.5a0`)
+
+Most "`navigator.usb` isn't working" reports turn out to be an environment problem (missing/old
+PySide6, or `pyusb` installed without an OS-level `libusb` backend) rather than a bug in this
+package. Check it in one line, in Python:
+
+```python
+from pyside6_webusb import environment_report, format_environment_report
+print(format_environment_report())        # human-readable text
+report = environment_report()             # or the same data as a plain dict
+```
+
+...or from the command line, either after `pip install`:
+
+```console
+$ pyside6-webusb-doctor
+```
+
+or without installing a console script at all:
+
+```console
+$ python -m pyside6_webusb
+```
+
+Both print the same report and exit non-zero if a real problem (not just a missing *optional*
+Rust extension, see below) was found — handy as a one-line sanity check in CI or in your own
+app's bug-report tooling. Add `--json` (`0.0.5.post3`) to either command to get
+`environment_report()`'s dict as JSON on stdout instead of the human-readable text above — same
+exit-code meaning, but easier for a CI job to archive as an artifact or parse directly instead of
+scraping the text form:
+
+```console
+$ pyside6-webusb-doctor --json
+```
+
+`environment_report()["pyusb_backend_note"]` (`0.0.5.post3`) is set when `pyusb_backend` resolved
+to `"libusb0"` — the older of pyusb's two backends, used only as a fallback when the newer
+`libusb1` backend's shared library isn't found. Still fully functional, but worth knowing about:
+this project's own security audit (`security_report/VULNERABILITY_REPORT.md`, "Environment
+note") found that `pyusb 1.3.1`'s `libusb0.py` backend emits a `DeprecationWarning` under Python
+3.14 about a `ctypes.Structure` pattern scheduled to become an error in Python 3.19 — an upstream
+`pyusb` issue, not something this package's own code can fix, but the note points at installing
+an OS-level `libusb1` shared library as the practical way to avoid depending on that path at all.
+
+`environment_report()["qtwebengine_importable"]` (`0.0.5.post2`) checks
+`QtWebEngineCore`/`QtWebEngineWidgets` specifically, separately from bare `PySide6` import
+success — worth knowing about because `PySide6 6.12.0a1` (2026-09 development build) moved
+those two out of `pyside6-addons` into a new, separate `pyside6-webengine` wheel (not yet on
+PyPI under any released version as of this writing, confirmed by comparing wheel contents
+directly). If that split reaches a real release, `PySide6-Essentials`/`PySide6-Addons` being
+correctly installed will no longer guarantee `QtWebEngineCore` importability the way it always
+has — `problems` will name `PySide6-WebEngine` specifically if that happens to you.
+
+### Testing hardware-free with virtual USB devices (`0.0.5a3`)
+
+`pyside6_webusb.virtual` lets you exercise `navigator.usb` end-to-end — chooser, permissions,
+`claimInterface()`, transfers, hotplug — without any real USB hardware plugged in, and without
+the `FakeDevice`-style fixtures this project's own test suite uses being private to the test
+suite. It's a small duck-typed stand-in for `pyusb`'s `usb.core`/`usb.util` that plugs into the
+exact same `WebUSBBridge` code path a real device does, so every security check in this README
+(protected interface classes, the blocklist, origin-scoped permissions) applies to a virtual
+device exactly as it would to real hardware:
+
+```python
+from pyside6_webusb import (
+    WebUSBBridge, VirtualUsbDevice, VirtualUsbConfiguration,
+    VirtualUsbInterface, VirtualUsbEndpoint, make_virtual_usb_backend,
+)
+
+dev = VirtualUsbDevice(
+    vendor_id=0x2341, product_id=0x8036,
+    manufacturer="Acme", product="Virtual Widget", serial_number="SN-0001",
+    configurations=[
+        VirtualUsbConfiguration(value=1, interfaces=[
+            VirtualUsbInterface(number=0, alternate=0, interface_class=0xFF, endpoints=[
+                VirtualUsbEndpoint(number=1, direction="in", transfer_type="bulk"),
+                VirtualUsbEndpoint(number=1, direction="out", transfer_type="bulk"),
+            ]),
+        ]),
+    ],
+)
+backend = make_virtual_usb_backend([dev])
+bridge = WebUSBBridge(usb_backend=backend)   # navigator.usb now talks to `dev`, no hardware needed
+```
+
+Bulk/interrupt/control transfers default to a zero-filled echo response; pass
+`on_bulk_read=`/`on_bulk_write=`/`on_control_transfer=` callables to a `VirtualUsbDevice` to
+simulate a real device's actual protocol instead. Hotplug is simulated too —
+`backend[0].unplug()` / `.plug()` — and is picked up by the *same* `UsbHotplugWatcher` polling
+loop the bridge already uses for real devices, so no separate code path needs testing.
+
+Known limitations as of `0.0.5a3`: transfers don't simulate isochronous timing/bandwidth (they're
+handled the same as bulk/interrupt); there's no kernel-driver concept, so
+`is_kernel_driver_active()` always reports `False`; and `reset()` keeps the same descriptor
+configuration rather than re-enumerating (the WebUSB spec itself leaves post-reset configuration
+state unspecified — [Issue #36](https://github.com/WICG/webusb/issues/36) — so this isn't a spec
+violation).
+
 ## Security model
 
 - **`navigator.usb` works inside iframes again, safely.** `0.0.2b0` disabled it entirely
@@ -148,9 +270,23 @@ independent of Qt, so you can unit test against them without a display).
   per-frame origin attribution instead of just re-enabling the old, vulnerable check — see
   [`frame_origin.py`](src/pyside6_webusb/frame_origin.py) and the `0.0.3b0` CHANGELOG entry
   for the full design and what it took to verify against a real `QWebEnginePage`. On a
-  PySide6/Qt version too old to have the signal this depends on
-  (`QWebEnginePage.navigationRequested`), it automatically falls back to the old
-  main-frame-only behavior rather than running with a broken security boundary.
+  PySide6/Qt version too old to have the `QWebEngineFrame` class this depends on — confirmed
+  by installing `6.6.0`/`6.7.0`/`6.8.0` directly: absent in the first two, present from
+  `6.8.0` (`0.0.5.post2`), meaning it is *not* available anywhere in this project's `6.5`–`6.7`
+  floor — it automatically falls back to the old main-frame-only behavior rather than running
+  with a broken security boundary. `environment_report()`'s
+  `frame_origin_isolation_available`/`frame_origin_isolation_note` (`0.0.5.post2`, see
+  "Diagnosing your environment," above) tell you which mode a given deployment is actually
+  getting, rather than leaving it silent.
+- **Base64 transfer payloads are checked for canonical encoding, not just decodability**
+  (`0.0.5.post2`). `data_b64` arguments to `controlTransferOut`/`bulkTransferOut`/
+  `isochronousTransferOut` reach `WebUSBBridge` via `QWebChannel`, which exposes it as a plain
+  JS object — a frame that skips `WEBUSB_POLYFILL_JS` entirely and calls these slots directly
+  can pass any string it likes, not only what a real encoder would produce. Non-canonical
+  base64 (RFC 4648 §3.5 non-zero padding bits — e.g. `"Zh=="`, which decodes leniently to the
+  same bytes as the correct `"Zg=="`) is now rejected as `DataError` rather than silently
+  accepted, using `Python 3.15`'s native `base64.b64decode(..., canonical=True)` where
+  available and an equivalent round-trip check on older Python.
 - **The site never sees your device list.** `getDevices()` only ever returns devices a
   *user* has explicitly picked for that *origin* before. `requestDevice()` always shows a
   native chooser dialog; there is no way for a page to silently enumerate or connect to
@@ -174,7 +310,7 @@ independent of Qt, so you can unit test against them without a display).
   require their target interface to actually be claimed, in addition to `requestType: 'class'`
   control requests being checked against the protected-class list regardless of recipient.
 - **Known security keys are blocklisted by vendor/product ID**, mirroring Chromium's
-  [usb_blocklist.cc](https://chromium.googlesource.com/chromium/src/+/main/services/device/usb/usb_blocklist.cc) —
+  [usb_blocklist.cc](https://github.com/chromium/chromium/blob/main/chrome/browser/usb/usb_blocklist.cc) —
   these devices don't even appear in the chooser dialog.
 - **`requestDevice()` guards against reentrancy.** The chooser dialog runs a nested Qt event
   loop (`QDialog.exec()`); a second call arriving while one is already open for the same page
@@ -196,7 +332,78 @@ independent of Qt, so you can unit test against them without a display).
   `list_granted_origins()`/`revoke_origin_grant()`/`revoke_all_for_origin()` right next to them
   already documented the opposite principle for the same category of operation. All six are now
   plain Python methods — call them from your own trusted host-app code (a settings screen, say),
-  never from web content.
+  never from web content. `grant_device_for_origin()` (`0.0.5a0`, see below) joins this same
+  group and was designed as a plain Python method from the start.
+- **`closeDevice()` can no longer dispose a device out from under an in-progress chunked bulk
+  transfer** (`0.0.5a0`, closing a gap the `0.0.4b` CHANGELOG had explicitly left for a later
+  release). `bulkTransferIn()`/`bulkTransferOut()` yield to the Qt event loop
+  (`processEvents()`) between sub-chunks of a large transfer so the UI doesn't freeze, which
+  means another `QWebChannel` call for the *same handle* can be serviced mid-transfer.
+  Transfer-vs-transfer reentrancy was already guarded; `closeDevice()` now checks the same
+  in-progress marker and rejects with `InvalidStateError` instead of disposing the device, so a
+  same-handle `close()` racing a large `transferIn()`/`transferOut()` can no longer pull the
+  device out from under the transfer loop.
+- **The protected-interface-class check can't be bypassed by hiding behind an alternate
+  setting either** (`0.0.4b3`, an independent security audit — see
+  [`security_report/`](security_report/) for the full writeup). A composite device is free to
+  declare alternate setting 0 of an interface as an innocuous vendor-specific class while
+  alternate setting 1 of that *same* interface number is actually HID or another protected
+  class — the same category of boundary CVE-2018-6125 found Chrome missing for its own
+  `claimInterface()`. `claimInterface()`, every transfer method, `clearHalt()`, and both the
+  `class`- and `interface`-recipient branches of control-transfer validation now all agree on
+  which alternate setting is actually selected (tracked from the moment an interface is
+  claimed, updated by `selectAlternateInterface()`, and invalidated by `selectConfiguration()`
+  or `resetDevice()`) rather than any of them trusting whichever alternate happens to be listed
+  first in the descriptor.
+- **`requestDevice()`'s user-gesture and filter-structure checks are enforced by Python, not
+  only by `polyfill.py`'s own JS** (`0.0.4b3`). A page with its own direct `QWebChannel`
+  connection could previously call `requestDeviceChooser()` any time, with no user interaction
+  at all, and with a structurally invalid `USBDeviceFilter` that widened the candidate list
+  instead of matching nothing. `polyfill.py` now mints a short-lived, single-use token at the
+  moment it confirms `navigator.userActivation.isActive`, and the bridge itself independently
+  validates every filter before ever constructing the chooser dialog — see `mintGestureToken()`
+  and `requestDeviceChooser()` in [`bridge.py`](src/pyside6_webusb/bridge.py) for exactly what
+  this does and does not guarantee (PySide6/QtWebEngine has no public API to observe a page's
+  real DOM user-activation state independently, so this raises the bar rather than closing it
+  perfectly against a sufficiently determined scripted attacker).
+- **Device-supplied strings can't spoof the chooser dialog or smuggle control characters into
+  logs/descriptors** (`0.0.4b3`). A USB device's manufacturer/product/serial/configuration/
+  interface name strings are entirely the device's own choice — nothing about connecting one
+  requires the host's consent the way granting an origin access does. These strings are now
+  stripped of control characters and bidirectional-override characters and length-capped before
+  they reach anything ([`sanitize_device_string()`](src/pyside6_webusb/hardening.py)), and the
+  chooser dialog forces every `QLabel` showing one to `Qt.TextFormat.PlainText` so an
+  HTML-formatted product name can't restyle the dialog itself — the same category of issue as
+  CVE-2020-16033.
+- **Hotplug `connect`/`disconnect` events don't leak a granted device's identity to unrelated
+  cross-origin frames sharing the same page** (`0.0.4b3`, mitigated but see the caveat below).
+  `deviceConnected`/`deviceDisconnected` are plain Qt signals with no per-frame delivery
+  mechanism, and whether one fires at all is decided from the *top-level* page's grants — so
+  every frame on the page technically receives the broadcast regardless of its own origin.
+  `polyfill.py` now re-checks, for its own frame's own origin specifically, whether it is
+  actually granted the device before ever dispatching a JS `connect`/`disconnect` event or
+  calling `onconnect`/`ondisconnect` (see `isGrantedToThisFrame()`) — so the *observable*
+  behavior is correctly scoped even though the underlying Qt signal still reaches every frame's
+  `polyfill.py` instance internally.
+- **Devices already plugged in when the bridge starts no longer fire spurious `connect`
+  events** (`0.0.5a3`, `UsbHotplugWatcher` in `hardening.py`). Real browsers don't dispatch
+  `connect` for devices that were already attached before the page loaded — they're just
+  visible via `getDevices()` from the start. The previous implementation's first poll always
+  diffed the current device set against an empty baseline, so every already-attached,
+  already-granted device fired a `connect` event once the hotplug timer's first tick landed,
+  on top of already being in `getDevices()`'s result. The first poll now only records a
+  baseline. **Known limitation, unchanged by this fix:** device identity in the watcher is
+  tracked by `(vendor_id, product_id)` only, so two physically distinct devices sharing the
+  same IDs can't be told apart — unplugging one while the other stays connected won't fire a
+  `disconnect` for either. This is a real constraint of not having a reliably stable
+  per-device identifier available from `pyusb` across replugs, not something `0.0.5a3` set out
+  to fix.
+- **A single granted device can no longer be turned into unbounded host-process memory growth**
+  (`0.0.4b3`). `openDevice()` didn't cap how many simultaneous handles one origin could hold —
+  an ordinary page calling `device.open()` in a loop without ever closing them (no `QWebChannel`
+  trickery required) could grow `WebUSBBridge`'s internal handle table without bound. Each
+  origin is now capped at a generous number of simultaneously open handles; opening past the cap
+  transparently releases that origin's oldest handle first rather than failing the call.
 
 None of this is a substitute for judgment about what you expose to what pages — it's the same
 baseline model real browsers use, reproduced faithfully.
@@ -421,6 +628,39 @@ enough that there's not much left to get wrong there. It's versioned independent
 Python package (currently `0.1.0`) since it's a genuinely separate, separately-buildable
 artifact, not something released in lockstep.
 
+### Building against very new Python versions (`0.0.5.post2`)
+
+`Cargo.toml` now builds this crate against Python's **stable ABI** (`pyo3`'s `abi3-py39`
+feature) instead of a version-specific extension. Found the hard way while verifying this
+release in a real **Python `3.15.0rc2`** environment: `maturin build` failed outright with
+`error: the configured Python version (3.15) is newer than PyO3's maximum supported version
+(3.14)` — the pinned `pyo3 =0.27.2` (see "Why `pyo3` is pinned" below) predates 3.15 support,
+and without `abi3` there's no fallback for a Python release PyO3 doesn't recognize yet. Adding
+`abi3-py39` and building with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` set (only needed for a
+Python version newer than this `pyo3` release knows about — a plain `maturin build` is enough
+once your `pyo3` version's own release notes confirm it supports your Python version) produced
+a working `cp39-abi3` wheel that imports and round-trips correctly under 3.15.0rc2 — confirmed
+by re-running this package's own `tests/test_rust_accel.py` against it (see "Project metadata,"
+below). This is a net improvement independent of the 3.15 issue that surfaced it: one `abi3`
+wheel now covers this package's entire `requires-python = ">=3.9"` range instead of needing a
+separate version-specific build per interpreter.
+
+```bash
+# Only when your pyo3 version's release notes don't yet list your Python version as supported
+# (e.g. building against a pre-release Python ahead of pyo3 catching up):
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release
+```
+
+#### Why `pyo3` is pinned
+
+`Cargo.toml` pins `pyo3 =0.27.2` rather than a plain `"0.27"` or newer range. `pyo3` 0.28+
+raises its MSRV to Rust 1.83; environments that only have an older `rustc` available (this
+project's own dev sandbox included — see "Project metadata" entries below for exactly which
+`rustc` was used at each release) can't build anything newer, so the pin keeps the crate
+buildable there. If your own `rustc` is 1.83+, a newer `pyo3` (with native, non-`abi3` Python
+3.15 support once its release notes confirm it) is a reasonable thing to move to; this project
+just hasn't had a Rust toolchain new enough to verify that path itself yet.
+
 ## TypeScript
 
 [`types/webusb-polyfill.d.ts`](types/webusb-polyfill.d.ts) provides ambient
@@ -523,5 +763,10 @@ device plugged in to manually verify end-to-end compatibility — see the sectio
 
 ## License
 
-MIT — see [LICENSE](LICENSE). `qwebchannel.js` is loaded at runtime from your own Qt
-installation (BSD-3-Clause, © The Qt Company) and is not redistributed in this repository.
+MIT AND BSD-3-Clause AND W3C-20150513 — see [LICENSE](LICENSE) for the full text of all three
+plus the itemized list of what each covers (Chromium-derived blocklist data, W3C-derived
+TypeScript WebIDL definitions, and this project's own original code). `qwebchannel.js` is
+loaded at runtime from your own Qt installation and is not redistributed in this repository;
+Qt typically ships it under BSD-3-Clause, but this project makes no independent licensing
+assertion about that runtime-provided Qt resource — see LICENSE §2.1 and confirm against the
+exact Qt/PySide6 distribution you're using.
