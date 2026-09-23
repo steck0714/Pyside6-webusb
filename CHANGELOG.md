@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5.post5]
+
+Referred to informally as `v0.0.5b1` during development; `0.0.5.post5` is the version string
+this release ships under under PEP 440 (`pyside6_webusb-0.0.5.post5-py3-none-any.whl` and
+`pyside6_webusb-0.0.5.post5.tar.gz`).
+
+### Security & Hardening
+- **Endpoint-targeted control transfer alternate setting protection**:
+  Hardened `_control_transfer_validation_error` for `recipient == "endpoint"`. In composite
+  devices where multiple alternate settings define an endpoint or where an alternate setting
+  belongs to a protected interface class (e.g. HID), control transfers to that endpoint are
+  strictly rejected with `SecurityError`, preventing bypass of `claimInterface` protections.
+- **Strict type & boundary validation for USB device filters**:
+  `hardening.is_valid_usb_device_filter` and polyfill's `isValidUsbDeviceFilter` now enforce
+  strict type checks and numerical ranges (`vendorId`/`productId` in 0..65535, `classCode`/
+  `subclassCode`/`protocolCode` in 0..255, and `serialNumber` must be a string).
+- **Hardened options and base64 payload boundaries**:
+  `requestDeviceChooser` rejects options JSON payloads exceeding 64KB and non-dictionary
+  options objects. `_b64decode_or_data_error` validates string type and rejects oversized
+  base64 payloads immediately with `DataError`.
+
+### Features & Usability
+- **Serial number device disambiguation in chooser dialog and `openDevice`**:
+  `openDevice` now supports targeting a specific device by serial number (overloaded `@Slot(int, int, str, str)`),
+  and `WebUsbDeviceChooserDialog` displays `SN: <serial>` in row details to easily distinguish
+  multiple connected devices sharing identical Vendor ID and Product ID.
+- **Standard WebUSB interface exposure on `window`**:
+  `window.USB`, `window.USBConnectionEvent`, and `window.USBDevice` (`OpenWebUSBDevice`)
+  are now exposed on `window` if not already defined, matching standard browser behavior.
+- **Enhanced `VirtualUsbDevice` & `VirtualUsbBackend`**:
+  `VirtualUsbDevice` now supports version input as integer (including BCD), string (e.g. `"2.1.0"`),
+  or tuple/list, and supports buffer-based IN control transfers (`bytearray`/`memoryview`).
+  `VirtualUsbBackend.find` supports `custom_match` and keyword-based attribute filtering.
+
 ## [0.0.5.post4]
 
 Continues the `.post` line for the same reason `0.0.5.post2`/`0.0.5.post3` did: this project's
