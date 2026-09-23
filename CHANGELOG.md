@@ -2,6 +2,194 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5.post4]
+
+Continues the `.post` line for the same reason `0.0.5.post2`/`0.0.5.post3` did: this project's
+`0.0.5aN`-style alpha naming would sort *before* any already-published `.post` release under
+PEP 440 and would never be installed by default. Referred to informally as `v0.0.5a3` during
+development (source zip filename); `0.0.5.post4` is the version string this release actually
+ships under, everywhere (`_version.py`, `pyproject.toml`, sdist, wheel).
+
+### Security
+
+- **`selectAlternateInterface()` now rejects switching into a protected interface class.**
+  Closes the residual half of `security_report/VULNERABILITY_REPORT.md` finding No.1.
+  `claimInterface()` only ever validates alternate setting 0's interface class (by design --
+  see its own docstring on why alt-0-only is the right tradeoff, unchanged by this release).
+  That means a composite device with a benign alt 0 and a protected-class alt 1 (HID, Mass
+  Storage, etc.) could legitimately be claimed. What was missing: nothing stopped a page from
+  then calling `selectAlternateInterface()` to switch straight into that protected alt --
+  `_endpoint_available_or_error()` correctly resolves endpoints against whatever alternate is
+  *currently selected*, so once switched, transfers to the protected alt's endpoints succeeded
+  normally. `selectAlternateInterface()` now runs the same `interface_class_for()` +
+  `is_protected_interface_class()` check claimInterface() already ran, against the *target*
+  alternate setting, before allowing the switch. New tests:
+  `test_selectAlternateInterface_rejects_switch_to_protected_class_alternate` (confirms the
+  switch itself is rejected, and that the HID endpoint stays unreachable afterward) and
+  `test_selectAlternateInterface_rejects_nonexistent_alternate_setting` (a target alternate
+  setting that doesn't exist at all is now `NotFoundError`, matching the spec's "finding the
+  alternate index" algorithm, rather than whatever error pyusb/libusb happened to raise).
+
+### Fixed
+
+- **`UsbHotplugWatcher`'s first `poll()` no longer fires spurious `connect` events for
+  devices that were already plugged in before it started watching.** Real browsers don't
+  dispatch `connect` for already-attached devices -- they're just visible via `getDevices()`
+  from the start. The previous implementation diffed the current device set against an empty
+  baseline on its very first poll, so every already-attached, already-granted device fired a
+  synthetic `connect` once the hotplug timer's first tick landed (on top of already appearing
+  in the initial `getDevices()` result). The first poll now only records a baseline;
+  connect/disconnect diffing behaves as before from the second poll onward.
+  `test_hotplug_watcher_diff` updated to reflect the corrected behavior; new test
+  `test_hotplug_watcher_first_poll_never_fires_spurious_connect_events`. Known limitation,
+  unchanged: identity is still `(vendor_id, product_id)` only, so two physically distinct
+  devices sharing the same IDs can't be told apart on unplug (see README).
+- **`claimInterface()` on an already-claimed interface is now the spec-correct no-op.** The
+  WebUSB spec's `claimInterface()` algorithm resolves immediately, without touching hardware or
+  re-checking the protected-class list, when the interface is already claimed. The previous
+  implementation had no such check and unconditionally reset the tracked "currently selected
+  alternate setting" back to 0 on every call -- so claiming an interface, legitimately
+  switching to a non-zero alternate via `selectAlternateInterface()`, and then redundantly
+  re-claiming the same interface would silently desync the tracked alternate (reset to 0) from
+  the device's real state (still on the switched-to alternate), which
+  `_endpoint_available_or_error()` relies on being accurate. New test:
+  `test_claimInterface_redundant_reclaim_is_a_noop_and_preserves_alternate_tracking`.
+- **`claimInterface()`/`releaseInterface()` on a nonexistent interface number now return
+  `NotFoundError`.** Previously, claiming a nonexistent interface fell through to
+  `interface_class_for()` returning `None`, which `is_protected_interface_class()` treats as
+  protected (a deliberate safe-side fallback for the *real* case it's meant for) -- so the
+  actual error was a misleading `SecurityError: interface X is class 'Unknown'`, blaming a
+  protected class for what was really a nonexistent interface. `releaseInterface()` on an
+  interface that was never claimed is now also a no-op that skips the hardware call entirely,
+  matching the spec, instead of always calling into pyusb regardless of claim state. New tests:
+  `test_claimInterface_rejects_nonexistent_interface_with_NotFoundError`,
+  `test_releaseInterface_of_unclaimed_interface_is_a_noop`,
+  `test_releaseInterface_rejects_nonexistent_interface_with_NotFoundError`.
+- **`openDevice()` on a device that isn't connected now reports `NotFoundError`.** The spec's
+  `open()` algorithm calls this out by name for a device that's no longer attached to the
+  system. The previous implementation returned an unprefixed string, which
+  `polyfill.py`'s `throwFromResult()` doesn't recognize, so it silently fell back to its
+  default `NetworkError` instead. New test:
+  `test_openDevice_reports_missing_device_as_NotFoundError`.
+- **`_b64decode()`'s non-canonical-base64 rejection now applies on the Rust-accelerated path
+  too.** Previously documented as a known gap (see `0.0.5.post2`/`.post3`): the optional Rust
+  extension's `decode_base64()` skipped the round-trip canonical-form check the pure-Python
+  path always ran. This release's environment still has no Rust toolchain to build and verify
+  the actual extension against, so instead of touching the Rust side blind, the round-trip
+  check (re-encode via Python's own `base64.b64encode()` and compare) now always runs in
+  Python regardless of which path decoded the bytes -- one extra re-encode's worth of cost,
+  applies uniformly either way. New test:
+  `test_b64decode_rust_path_also_rejects_non_canonical_base64`, which installs a fake
+  `_rust_accel` that deliberately skips validation (mirroring the documented real gap) and
+  confirms the Python-side check still catches it.
+- **JS: `close()`/`selectConfiguration()`/`reset()` now reset per-interface `claimed` state.**
+  All three reset `[[claimedInterface]]` to false for every interface per the spec (`close()`
+  as if `releaseInterface()` had been called for each claimed interface; the other two
+  explicitly). `bridge.py`'s server-side state was already correct; the JS-side
+  `OpenWebUSBDevice` object's own `iface.claimed`/`iface.alternate` were never being reset, so
+  e.g. claiming an interface, switching configurations, and switching back left the JS object
+  believing an interface was still claimed when the server-side handle had actually reset --
+  leading to real transfer failures once a page trusted the (stale) JS-side flag.
+  `close()` additionally now nulls `_handle` and is a true no-op (sends nothing to the bridge)
+  when called on a device that isn't open, per spec. `tests/test_polyfill.js` extended
+  accordingly; the existing close()-forwarding regression test was adjusted since `_handle` is
+  now legitimately `null` after a successful close (it used to compare against the device's
+  live `_handle`, which no longer holds the value it's checking for after this fix).
+
+### Added
+
+- **`navigator.usb` is now a real `EventTarget`.** `navigator.usb instanceof EventTarget` was
+  confirmed `false` in real DevTools despite `types/webusb-polyfill.d.ts` declaring
+  `interface USB extends EventTarget` -- the runtime object was a plain object literal with its
+  own hand-rolled `addEventListener`/`removeEventListener`, never actually inheriting from
+  `EventTarget`. `navigator.usb` is now an instance of a `USB` class that genuinely extends the
+  environment's native `EventTarget` (QtWebEngine's Chromium has one), and dispatched
+  `connect`/`disconnect` events are instances of a `USBConnectionEvent` class that genuinely
+  extends `Event`, carrying a real `.device` property. Native `EventTarget`/`Event` reject the
+  ES5 "constructor-stealing" pattern (`Parent.call(this)`) used everywhere else in this
+  file's otherwise-ES5 style -- they're real ES6 class constructors that require `new` --
+  so this one piece uses `class ... extends`, guarded behind a `typeof EventTarget === 'function'`
+  check with a full ES5 fallback (matching the old behavior, minus `instanceof EventTarget`) for
+  any environment without a native `EventTarget`. Existing `addEventListener`/`on(connect|
+  disconnect)` behavior is unchanged and covered by the existing tests; this is additive.
+- **`pyside6_webusb.virtual`: hardware-free virtual USB devices.** New module providing
+  `VirtualUsbDevice`/`VirtualUsbConfiguration`/`VirtualUsbInterface`/`VirtualUsbEndpoint` (duck
+  types matching the same minimal `usb.core`/`usb.util` surface this project's own
+  `FakeDevice`-style test fixtures already relied on) and `make_virtual_usb_backend()`, wired in
+  through a new `WebUSBBridge(usb_backend=...)` constructor parameter. Lets `navigator.usb` be
+  exercised end-to-end -- chooser, permissions, `claimInterface()`, transfers, hotplug -- with
+  no real hardware attached, through the *same* `bridge.py`/`hardening.py` code path a real
+  device uses, so every existing security check (protected interface classes, the blocklist,
+  origin-scoped permissions) applies to a virtual device exactly as it would to real hardware;
+  confirmed with a dedicated test that a HID-class virtual interface is rejected by
+  `claimInterface()` the same way a real one would be. Transfers default to a zero-filled echo
+  response; `on_bulk_read`/`on_bulk_write`/`on_control_transfer` callables let a device simulate
+  a real protocol instead. Hotplug simulation (`VirtualUsbDevice.plug()`/`.unplug()`) is picked
+  up by the real `UsbHotplugWatcher` polling loop with no changes to `bridge.py`'s hotplug code
+  at all -- confirmed by driving a real `UsbHotplugWatcher` instance against a virtual backend
+  in `test_virtual_device_plug_unplug_is_detected_by_hotplug_watcher`. New file
+  `tests/test_virtual.py` (5 tests). See README "Testing hardware-free with virtual USB
+  devices" for usage and known limitations (no isochronous timing simulation, no kernel-driver
+  concept, `reset()` keeps the same descriptor configuration).
+
+### Documentation
+
+- **License consolidated into a single `LICENSE` file.** Previously split across the MIT text
+  plus a short separate qwebchannel.js note; now one file covering (1) incorporated/derived
+  material with full upstream license text reproduced inline (Chromium's BSD-3-Clause USB
+  blocklist data, the W3C-derived WebIDL in `types/webusb-polyfill.d.ts`), (2) external runtime
+  dependencies (Qt/PySide6, pyusb, libusb, PyO3, the Rust `base64` crate), and (3) reference-only
+  projects consulted during development (adb_client, thegecko/webusb, node-usb) -- each with its
+  license type now individually confirmed by reading that project's own `LICENSE` file directly,
+  not assumed. Corrects two factual errors found while consolidating: the W3C license actually in
+  effect is the **2015-05-13** version (`W3C-20150513`), not 2023 -- confirmed by reading
+  WICG/webusb's own `LICENSE.md`, which points at the 2015 URL specifically; and the Chromium
+  blocklist source link (both here and in README) pointed at
+  `services/device/usb/usb_blocklist.cc`, which 404s -- the file actually lives at
+  `chrome/browser/usb/usb_blocklist.cc` (`hardening.py`'s own inline comment already had this
+  right; only README and the old license note had the stale path). `pyproject.toml`'s
+  `license` field updated from the inaccurate bare `"MIT"` to the PEP 639 expression
+  `"MIT AND BSD-3-Clause AND W3C-20150513"`, matching what's actually incorporated. Also softened
+  an over-definite "`qwebchannel.js` is BSD-3-Clause" claim (in `polyfill.py`'s docstring and
+  README) to match LICENSE §2.1's more careful wording -- the exact license depends on the
+  Qt/PySide6 distribution actually linked at runtime, which this project doesn't audit.
+- Corrected a stale `hardening.py` docstring that still said isochronous transfers were
+  unsupported "in this implementation" -- true when that comment was written (before
+  `0.0.4a0` added `isochronousTransferIn`/`Out`), not since. Reworded to past tense, pointing
+  at the actual current limitation (per-packet fidelity, documented in `0.0.5.post3`'s
+  "Investigated, not changed").
+- `types/webusb-polyfill.d.ts`'s version-tracking header comment updated from `v0.0.4a0` to
+  `v0.0.5a3`, noting the `EventTarget`/state-reset changes above.
+- README: fixed the same stale Chromium blocklist link noted above; updated the `Status` line's
+  version and isochronous wording (it now correctly says isochronous *is* implemented, with a
+  linked, specific known limitation, rather than implying it's entirely unverified); added a
+  "Testing hardware-free with virtual USB devices" section; added a hotplug bullet documenting
+  both the first-poll fix and the (unchanged, pre-existing) VID/PID-identity limitation.
+
+### Packaging
+
+- **Added `MANIFEST.in`.** The sdist and this source zip's `src/` tree have always been
+  byte-for-byte identical (verified again this release), but the *sdist* was missing
+  `tests/`, `security_audit/`, `security_report/`, `types/`, `examples/`, and `CHANGELOG.md`
+  entirely -- there was no `MANIFEST.in`, and `setuptools`' sdist defaults don't reach any of
+  those directories. Anyone installing from sdist rather than this zip had no way to run the
+  test suite described in README "Testing", and no access to the TypeScript definitions in
+  `types/`. Now included.
+
+### Tests
+
+- `tests/` + `security_audit/`: **198 passed, 2 skipped**, up from `0.0.5.post3`'s 184
+  passed/2 skipped: +9 new regression tests for the fixes above, +5 new tests in the new
+  `tests/test_virtual.py` (198 = 184 + 9 + 5). `node tests/test_polyfill.js`: all cases pass,
+  including the `EventTarget`/state-reset changes above.
+  `tsc --strict --noEmit` against both `types/*.ts` files: still passes (no breaking change to
+  the public type surface — `USB extends EventTarget` was already declared; the runtime now
+  actually matches it).
+
+### Project metadata
+
+- Version: `0.0.5.post4` (informally `v0.0.5a3`).
+
 ## [0.0.5.post3]
 
 Continues the `.post` line from `0.0.5.post2` for the same reason that release continued it

@@ -28,221 +28,314 @@ The MIT License above applies to the original source code of
 `pyside6-webusb`.
 
 Third-party software, specifications, data, and reference implementations
-remain subject to their respective copyrights and licenses.
+remain subject to their respective copyrights and licenses. This notice
+consolidates every third-party attribution for this project into a single
+file, for readability: the itemized list below is the authoritative record of
+what is incorporated, what is an external runtime dependency, and what was
+only used as a reference during development -- each has different
+obligations, and conflating them elsewhere in the past made those obligations
+harder to check at a glance.
 
 Nothing in this notice relicenses third-party material under the MIT License.
 
 ## 1. Incorporated or Derived Material
 
+This section covers material that is actually copied, ported, or derived
+into this project's own source files. Because it is redistributed as part of
+`pyside6-webusb` itself, the applicable upstream license text is reproduced
+in full below, not just linked.
+
 ### 1.1 Chromium USB Blocklist Data
 
-The USB security hardening implementation contains VID/PID data derived from
-Chromium's USB blocklist.
+`pyside6_webusb/hardening.py`'s USB security hardening implementation
+contains a `vendor_id`/`product_id` blocklist ported from Chromium's own
+security-key blocklist.
 
-The corresponding Chromium source was reviewed during the project's license
-audit, and the relevant VID/PID entries were compared against Chromium's
-`usb_blocklist.cc`.
+The corresponding Chromium source was reviewed during this project's license
+audit (most recently checked against the `main` branch as of 2026-07), and
+every entry was compared line-by-line against Chromium's `usb_blocklist.cc`:
 
-The applicable Chromium source is distributed under Chromium's BSD-style
-licensing terms.
+    https://github.com/chromium/chromium/blob/main/chrome/browser/usb/usb_blocklist.cc
 
-SPDX identifier:
+(Not `services/device/usb/usb_blocklist.cc` -- that path does not exist in
+the current tree; the file lives under `chrome/browser/usb/`.)
 
-`BSD-3-Clause`
+The applicable Chromium source is distributed under Chromium's BSD-3-Clause
+license. SPDX identifier: `BSD-3-Clause`. Full text, exactly as it appears at
+the top of Chromium's own `LICENSE` file:
 
-Chromium License:
+> Copyright 2015 The Chromium Authors
+>
+> Redistribution and use in source and binary forms, with or without
+> modification, are permitted provided that the following conditions are
+> met:
+>
+>    * Redistributions of source code must retain the above copyright
+> notice, this list of conditions and the following disclaimer.
+>    * Redistributions in binary form must reproduce the above
+> copyright notice, this list of conditions and the following disclaimer
+> in the documentation and/or other materials provided with the
+> distribution.
+>    * Neither the name of Google LLC nor the names of its
+> contributors may be used to endorse or promote products derived from
+> this software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+> LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+> A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+> OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+> SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+> LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+> DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+> THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+> (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+> OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-https://chromium.googlesource.com/chromium/src/+/HEAD/LICENSE
-
-Chromium source:
-
-https://chromium.googlesource.com/chromium/src/
-
-The Chromium-derived data is limited to the relevant USB blocklist entries.
-The surrounding Python implementation is independently implemented and is
-licensed under the MIT License stated above.
+The Chromium-derived data is limited to the relevant vendor/product ID
+blocklist entries (43 pairs as of the 2026-07 comparison). It is one layer of
+defense-in-depth; the interface-class-level protections in the same file are
+the more fundamental defense and are original to this project. The
+surrounding Python implementation is independently written and is licensed
+under the MIT License stated above.
 
 ### 1.2 W3C / WICG WebUSB WebIDL
 
-The TypeScript WebUSB definitions include WebIDL material derived from the
-WICG WebUSB specification.
+`types/webusb-polyfill.d.ts` includes TypeScript WebUSB definitions
+containing WebIDL material derived from the WICG WebUSB specification.
 
 WebUSB specification:
 
-https://wicg.github.io/webusb/
+    https://wicg.github.io/webusb/
 
-W3C Software and Document License:
+The WICG WebUSB repository's own `LICENSE.md` states that reports in that
+repository are licensed under the **W3C Software and Document License,
+2015-05-13 version** specifically:
 
-https://www.w3.org/copyright/software-license-2023/
+    http://www.w3.org/Consortium/Legal/2015/copyright-software-and-document
 
-The W3C-derived specification material remains subject to the applicable W3C
-license.
+(Not the 2023 revision -- the 2015 version is what WICG/webusb's own
+LICENSE.md actually points to, confirmed by reading that file directly; an
+earlier draft of this notice cited the 2023 URL in error.) SPDX identifier:
+`W3C-20150513`. Full text:
 
-The independently written TypeScript implementation surrounding the
-specification-derived definitions remains subject to the MIT License stated
-above, to the extent permitted by applicable law and license terms.
+> This work is being provided by the copyright holders under the following
+> license.
+>
+> ## License
+>
+> By obtaining and/or copying this work, you (the licensee) agree that you
+> have read, understood, and will comply with the following terms and
+> conditions.
+>
+> Permission to copy, modify, and distribute this work, with or without
+> modification, for any purpose and without fee or royalty is hereby
+> granted, provided that you include the following on ALL copies of the
+> work or portions thereof, including modifications:
+>
+> - The full text of this NOTICE in a location viewable to users of the
+>   redistributed or derivative work.
+> - Any pre-existing intellectual property disclaimers, notices, or terms
+>   and conditions. If none exist, the W3C Software and Document Short
+>   Notice should be included.
+> - Notice of any changes or modifications, through a copyright statement
+>   on the new code or document such as "This software or document
+>   includes material copied from or derived from \[title and URI of the
+>   W3C document\]. Copyright (c) \[YEAR\] W3C® (MIT, ERCIM, Keio,
+>   Beihang)."
+>
+> ## Disclaimers
+>
+> THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO
+> REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+> LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR
+> PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY
+> THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+>
+> COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR
+> CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+>
+> The name and trademarks of copyright holders may NOT be used in
+> advertising or publicity pertaining to the work without specific, written
+> prior permission. Title to copyright in this work will at all times
+> remain with copyright holders.
 
----
+Per the notice's own terms above, this reproduction of the full NOTICE text
+satisfies the first bullet point's requirement for any copy or derivative of
+the covered material. The W3C-derived specification material remains
+subject to this license. The independently written TypeScript implementation
+surrounding the specification-derived definitions remains subject to the MIT
+License stated above, to the extent permitted by applicable law and license
+terms.
 
-# 2. Runtime Dependencies
+## 2. Runtime Dependencies
 
-The following software is used as external runtime or build dependencies.
+The following software is used as an external runtime or build dependency.
+It is not incorporated into this project's own source, is not redistributed
+by this project, and is not relicensed under the MIT License above --
+whoever runs `pyside6-webusb` obtains it separately (via `pip install`, via
+their own Qt/PySide6 installation, or via an optional Rust build), under its
+own license.
 
-They are not relicensed under the MIT License of `pyside6-webusb`.
+### 2.1 Qt / PySide6 / QtWebEngine / Qt WebChannel
 
-## 2.1 Qt / PySide6 / QtWebEngine / Qt WebChannel
-
-`pyside6-webusb` uses Qt and PySide6 APIs, including QtWebEngine and
-Qt WebChannel.
+`pyside6-webusb` uses Qt and PySide6 APIs, including QtWebEngine and Qt
+WebChannel.
 
 The Qt WebChannel JavaScript implementation is obtained at runtime from the
-Qt resource:
+Qt resource `:/qtwebchannel/qwebchannel.js` (see
+`pyside6_webusb/polyfill.py`'s `_load_qwebchannel_js()`). It is not bundled
+as an independent copy of the Qt source in this project.
 
-    :/qtwebchannel/qwebchannel.js
+Qt typically distributes `qwebchannel.js` under BSD-3-Clause, © The Qt
+Company. This project makes no independent, blanket licensing assertion
+about that runtime-provided Qt resource, however: the applicable license
+depends on the exact Qt/PySide6 distribution actually linked at runtime, and
+this project has not audited every such distribution. Confirm against your
+own installation if this matters for your use case.
 
-`qwebchannel.js` is not bundled as an independent copy of the Qt source in
-this project.
+Qt licensing: https://doc.qt.io/qt-6/licensing.html
+Qt third-party licenses: https://doc.qt.io/qt-6/licenses-used-in-qt.html
 
-The applicable license of the runtime-provided Qt component is determined by
-the exact Qt/PySide6 distribution used by the host application.
-
-Qt licensing:
-
-https://doc.qt.io/qt-6/licensing.html
-
-Qt third-party licenses:
-
-https://doc.qt.io/qt-6/licenses-used-in-qt.html
-
-This project does not make an independent blanket licensing assertion for
-the runtime-provided Qt resource.
-
-## 2.2 pyusb
+### 2.2 pyusb
 
 `pyusb` is used as an external Python dependency for USB communication.
 
-Project:
+Project: https://github.com/pyusb/pyusb
 
-https://github.com/pyusb/pyusb
+Confirmed by reading pyusb's own `LICENSE` file directly: BSD-3-Clause,
+Copyright 2009-2017 Wander Lairson Costa, Copyright 2009-2021 PyUSB
+contributors. `pyusb` retains its own copyright and license; this project
+does not reproduce its full text here since `pyusb` is an unmodified,
+separately-installed dependency, not incorporated material (see §1 for the
+distinction).
 
-`pyusb` retains its own copyright and license.
+### 2.3 libusb
 
-## 2.3 libusb
+`libusb` may be used as the native USB backend underneath `pyusb`.
 
-`libusb` may be used as the native USB backend.
+Project: https://github.com/libusb/libusb
 
-`libusb` is an external dependency and retains its own copyright and license.
+Confirmed by reading libusb's own `COPYING` file directly: **GNU Lesser
+General Public License, version 2.1** (LGPL-2.1). `libusb` is an external
+dependency and retains its own copyright and license. The applicable license
+depends on the version supplied by the operating system or host environment;
+this project does not statically link or modify `libusb`.
 
-The applicable license depends on the version supplied by the operating
-system or host environment.
+### 2.4 PyO3
 
-## 2.4 PyO3
+The optional Rust implementation (`native/pyside6_webusb_accel/`) uses PyO3.
 
-The optional Rust implementation uses PyO3.
+PyO3 is an external dependency and retains its own copyright and license
+(dual MIT/Apache-2.0, per PyO3's own published licensing -- not
+independently re-audited for this notice, since it is an unmodified
+dependency of the optional acceleration crate, which is itself an external
+runtime dependency once built and installed).
 
-PyO3 is an external dependency and retains its own copyright and license.
-
-## 2.5 Rust base64
+### 2.5 Rust `base64` crate
 
 The optional Rust implementation uses the Rust `base64` crate.
 
 The crate is an external dependency and retains its own copyright and
-license.
+license (MIT/Apache-2.0 dual-licensed, per the crate's own published
+licensing).
 
----
-
-# 3. References Only
+## 3. References Only
 
 The following projects were used as references for implementation,
-compatibility, protocol verification, or security analysis.
+compatibility, protocol verification, or security analysis during
+development. Reference use does not by itself mean that their source code
+has been copied into this project -- each entry below states explicitly
+whether a source-level comparison found any verbatim match.
 
-Reference use does not by itself mean that their source code has been copied
-into this project.
+### 3.1 Chromium WebUSB
 
-## 3.1 Chromium WebUSB
-
-Chromium WebUSB behavior was used as a compatibility reference.
-
-This includes behavior relating to:
+Chromium's actual WebUSB implementation (`usb_device.cc` and related, under
+`third_party/blink/renderer/modules/webusb/`) was used as a compatibility
+reference, including for:
 
 - WebUSB API behavior
 - Origin and permission handling
-- protected USB interfaces
-- security-key handling
-- transfer behavior
-- transfer limits
-- device and hotplug behavior
-- WebUSB-related errors
+- Protected USB interfaces
+- Security-key handling
+- Transfer behavior and transfer limits
+- Device and hotplug behavior
+- WebUSB-related error names
 
-The `pyside6-webusb` implementation uses a different architecture based on
-PySide6 / QtWebEngine, QWebChannel, pyusb, and libusb.
+The `pyside6-webusb` implementation uses a different architecture, based on
+PySide6/QtWebEngine, QWebChannel, pyusb, and libusb, rather than Blink's own
+internals. Chromium's source is itself BSD-3-Clause (see §1.1); no source
+from `usb_device.cc` was copied into this project (see §1.1 for the one
+piece of Chromium-derived data that *was* incorporated -- the blocklist
+entries, a distinct file from `usb_device.cc`).
 
-## 3.2 WebUSB Specification
+### 3.2 WebUSB Specification
 
-The WebUSB specification is used as an API and behavior reference.
+The WebUSB specification is used as an API and behavior reference,
+including its actual algorithm steps (not just prose summaries) for
+`open()`, `close()`, `selectConfiguration()`, `claimInterface()`,
+`releaseInterface()`, `selectAlternateInterface()`, and `reset()`.
 
-https://wicg.github.io/webusb/
+    https://wicg.github.io/webusb/
 
-## 3.3 adb_client
+See §1.2 for the WebIDL material actually incorporated from this
+specification into `types/webusb-polyfill.d.ts`.
+
+### 3.3 adb_client
 
 `tth0704/adb_client` was used as a protocol reference for the optional Rust
 ADB implementation.
 
-Project:
+Project: https://github.com/tth0704/adb_client
 
-https://github.com/tth0704/adb_client
+The project's ADB implementation was compared during the license audit. No
+verbatim source-code match was identified in the compared implementation.
+Shared elements are protocol-level information such as command constants,
+message field ordering, protocol structure, and ADB header fields.
 
-The project's ADB implementation was compared during the license audit.
+Confirmed by reading `adb_client`'s own `LICENSE` file directly: MIT,
+Copyright (c) 2023-2024 Corentin LIAUD. `adb_client` retains its own
+copyright and license. If source code from `adb_client` is incorporated in
+a future version, the applicable upstream copyright and license notices
+must be retained, and that material would move to §1 of this notice.
 
-No verbatim source-code match was identified in the compared implementation.
-
-Shared elements are protocol-level information such as:
-
-- command constants
-- message field ordering
-- protocol structure
-- ADB header fields
-
-The `pyside6-webusb` implementation is independently written.
-
-`adb_client` retains its own copyright and license.
-
-If source code from `adb_client` is incorporated in a future version, the
-applicable upstream copyright and license notices must be retained.
-
-## 3.4 thegecko/webusb
+### 3.4 thegecko/webusb
 
 `thegecko/webusb` was used as a WebUSB implementation reference.
 
-Project:
+Project: https://github.com/thegecko/webusb
 
-https://github.com/thegecko/webusb
+Confirmed by reading the project's own `LICENSE` file directly: MIT,
+Copyright (c) 2017 Rob Moran. The project retains its own copyright and
+license. No license transfer is implied by reference to the project.
 
-The project retains its own copyright and license.
+### 3.5 node-usb
 
-No license transfer is implied by reference to the project.
+`node-usb` (the maintained successor to the now-deprecated
+`thegecko/webusb`, bundling its own WebUSB implementation) was used as an
+implementation and USB API comparison reference -- specifically for its
+`configurations`/`selectAlternateInterface`/`clearHalt`/`reset`/
+`serialNumber` API shape.
 
-## 3.5 node-usb
+Project: https://github.com/node-usb/node-usb
 
-`node-usb` was used as an implementation and USB API comparison reference.
+Confirmed by reading the project's own `LICENSE` file directly: MIT,
+Copyright (c) 2012 Nonolith Labs, LLC. The project retains its own copyright
+and license. No license transfer is implied by reference to the project.
 
-Project:
-
-https://github.com/node-usb/node-usb
-
-The project retains its own copyright and license.
-
-No license transfer is implied by reference to the project.
-
----
-
-# 4. License Scope
+## 4. License Scope
 
 The MIT License at the beginning of this file applies to the original
-`pyside6-webusb` source code.
+`pyside6-webusb` source code, and to the independently-written code
+surrounding the incorporated material described in §1.
 
 Third-party software, data, specifications, and reference material retain
-their applicable licenses and copyrights.
+their applicable licenses and copyrights, as itemized above.
 
-This notice is intended as an interim consolidated third-party notice pending
-the project's formal license and attribution reorganization.
+This notice is the single, consolidated record of every third-party
+attribution for this project -- earlier revisions split this information
+across multiple files and left some third-party license text linked rather
+than reproduced; this version merges everything into one file for
+readability, per this project's own stated preference, and reproduces the
+full text of every license that actually applies to incorporated (not
+merely referenced or dependency) material.
