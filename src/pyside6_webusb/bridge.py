@@ -114,6 +114,20 @@ def _b64decode(s: str) -> bytes:
 
 
 def _b64decode_or_data_error(s: str):
+    """_b64decode()のラッパー。"""
+    if not isinstance(s, str):
+        return None, _json_dumps({
+            "success": False,
+            "error": data_error("base64 payload must be a string"),
+        })
+    max_b64_len = ((HOST_SAFETY_MAX_TRANSFER_LENGTH + 2) // 3) * 4 + 64
+    if len(s) > max_b64_len:
+        return None, _json_dumps({
+            "success": False,
+            "error": data_error(
+                f"The data buffer exceeded supported maximum size of {HOST_SAFETY_MAX_TRANSFER_LENGTH} bytes"
+            ),
+        })
     """_b64decode()のラッパー。戻り値は(data, error_json)のタプルで、
     data is Noneのときerror_jsonをそのままreturnすべきことを示す
     (_control_transfer_validation_error()等、既存の「検証NGならJSON文字列を
@@ -210,6 +224,25 @@ from .hardening import (
     scaled_transfer_timeout_ms,
 )
 from .chooser_dialog import WebUsbDeviceChooserDialog
+
+
+def _find_usb_device(usb_core, usb_util, vendor_id, product_id, serial_number=None):
+    """vendorId/productIdに一致するデバイスを検索する。serial_numberが指定されている場合は
+    該当シリアル番号を持つデバイスを最優先で探索し、同一VID/PIDの複数機器が存在する環境でも
+    意図した実機を正確に特定できるようにする。"""
+    candidates = list(usb_core.find(find_all=True, idVendor=vendor_id, idProduct=product_id))
+    if not candidates:
+        return None
+    if serial_number:
+        for dev in candidates:
+            try:
+                if getattr(dev, "iSerialNumber", 0):
+                    s = usb_util.get_string(dev, dev.iSerialNumber)
+                    if s == serial_number:
+                        return dev
+            except Exception:
+                pass
+    return candidates[0]
 
 
 class WebUSBBridge(QObject):
@@ -866,13 +899,14 @@ class WebUSBBridge(QObject):
         requestDeviceChooser()(再入防止ガード込み)だけにするため。"""
         try:
             origin = self._current_origin(frame_token)
+            if len(options_json) > 65536:
+                return _json_dumps({"cancelled": True, "error": type_error("options payload too large")})
             try:
                 options = json.loads(options_json) if options_json else {}
                 if not isinstance(options, dict):
-                    options = {}
+                    return _json_dumps({"cancelled": True, "error": type_error("options must be a JSON object")})
             except Exception as e:
-                print(f"[pyside6-webusb] requestDeviceChooser(options parse): 例外を無視: {e}")
-                options = {}
+                return _json_dumps({"cancelled": True, "error": type_error(f"Malformed options JSON: {safe_error_str(e)}")})
             filters = options.get("filters")
             exclusion_filters = options.get("exclusionFilters")
             filters = filters if isinstance(filters, list) else []
@@ -958,7 +992,7 @@ class WebUSBBridge(QObject):
                 #    機能しない(旧実装はここが軽量記述子のまま返ってしまっていた)。
                 rich_selected = selected
                 try:
-                    real_dev = usb_core.find(idVendor=selected.get("vendorId"), idProduct=selected.get("productId"))
+                    real_dev = _find_usb_device(usb_core, usb_util, selected.get("vendorId"), selected.get("productId"), selected.get("serialNumber"))
                     if real_dev is not None:
                         rich_selected = build_device_descriptor(real_dev, usb_util, include_configurations=True)
                 except Exception as e:
@@ -970,7 +1004,8 @@ class WebUSBBridge(QObject):
             return _json_dumps({"cancelled": True, "error": f"Unexpected error: {e}"})
 
     @Slot(int, int, str, result=str)
-    def openDevice(self, vendor_id, product_id, frame_token=""):
+    @Slot(int, int, str, str, result=str)
+    def openDevice(self, vendor_id, product_id, frame_token="", serial_number=""):
         """requestDeviceChooser()で許可されたオリジンだけがデバイスを開けるようにする。
         旧実装はvendorId/productIdさえ知っていれば任意のサイトが直接開けてしまっていた
         (チューザーダイアログを経由しないバイパス経路)。ここで許可をゲートする。
@@ -1014,8 +1049,8 @@ class WebUSBBridge(QObject):
                         usb_util.dispose_resources(evicted["device"])
                     except Exception as e:
                         print(f"[pyside6-webusb] openDevice (LRU退去): 例外を無視: {e}")
-            usb_core, _usb_util = self._pyusb()
-            dev = usb_core.find(idVendor=vendor_id, idProduct=product_id)
+            usb_core, usb_util = self._pyusb()
+            dev = _find_usb_device(usb_core, usb_util, vendor_id, product_id, serial_number or None)
             if dev is None:
                 # 🐛 バグ修正(v0.0.5a3): 実仕様のUSBDevice.open()は「このデバイスが
                 # もうシステムに接続されていない」場合をNotFoundErrorと定めている
@@ -1712,30 +1747,44 @@ class WebUSBBridge(QObject):
             # 常に1バイトに収まる値なので & 0xFF は安全側の正規化として扱う。
             endpoint_address = index & 0xFF
             owner_number, owner_class = None, None
+            alt_settings = info.get("interface_alt_settings", {})
             try:
-                # 🛡️ interface_class_forと同じ理由で、探索は現在アクティブな
-                #    configurationだけに限定する(非アクティブなconfiguration側の
-                #    endpointを誤って拾わないため)。アクティブなconfiguration自体が
-                #    特定できない場合は探索せず「見つからない」扱い(=安全側)にする。
                 active_cfg = dev.get_active_configuration()
+                matching_alts = []
                 for intf in active_cfg:
                     for ep in intf:
                         if getattr(ep, "bEndpointAddress", None) == endpoint_address:
-                            owner_number, owner_class = intf.bInterfaceNumber, intf.bInterfaceClass
-                            raise StopIteration
-            except StopIteration:
-                pass
+                            matching_alts.append((
+                                intf.bInterfaceNumber,
+                                getattr(intf, "bAlternateSetting", 0),
+                                intf.bInterfaceClass,
+                            ))
+                if not matching_alts:
+                    return _err("NotFoundError", f"endpoint {endpoint_address:#04x} was not found on this device")
+
+                # 🛡️ security_audit No.1 拡張: このendpointを持ついずれかのalternateが
+                #    保護対象クラス(HID等)を宣言していれば一律に拒否する。
+                for iface_num, alt_num, cls in matching_alts:
+                    if is_protected_interface_class(cls):
+                        name = protected_class_name(cls)
+                        return _err(
+                            "SecurityError",
+                            f"endpoint {endpoint_address:#04x} belongs to interface class '{name}', "
+                            "a protected interface class",
+                        )
+                # 現在選択中のalternate settingに属しているかを確認
+                for iface_num, alt_num, cls in matching_alts:
+                    current_alt = alt_settings.get(iface_num, 0)
+                    if alt_num == current_alt:
+                        owner_number = iface_num
+                        owner_class = cls
+                        break
+                if owner_number is None:
+                    owner_number, _alt_num, owner_class = matching_alts[0]
             except Exception:
                 pass
             if owner_number is None:
                 return _err("NotFoundError", f"endpoint {endpoint_address:#04x} was not found on this device")
-            if is_protected_interface_class(owner_class):
-                name = protected_class_name(owner_class)
-                return _err(
-                    "SecurityError",
-                    f"endpoint {endpoint_address:#04x} belongs to interface class '{name}', "
-                    "a protected interface class",
-                )
             if owner_number not in claimed:
                 return _err("InvalidStateError", f"interface {owner_number} owning endpoint {endpoint_address:#04x} has not been claimed")
 

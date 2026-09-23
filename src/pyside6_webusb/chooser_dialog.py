@@ -45,13 +45,22 @@ DEFAULT_STRINGS = {
 
 def _device_name_and_detail(dev: dict):
     """(主表示名, 副次的な技術詳細)のタプルを返す。Chromeが製品名を主表示にし、
-    VID/PID等はあくまで補助情報として扱っているのに合わせた表示階層。"""
+    VID/PID等はあくまで補助情報として扱っているのに合わせた表示階層。
+    同一VID/PIDの機器が複数存在する場合でも識別できるよう、シリアル番号(serialNumber)が
+    あれば副次情報に含める。"""
     name = dev.get("productName") or dev.get("manufacturerName")
     vid, pid = dev.get("vendorId"), dev.get("productId")
     vid_pid = f"VID:{vid:04x} PID:{pid:04x}" if isinstance(vid, int) and isinstance(pid, int) else ""
+    serial = dev.get("serialNumber")
+    details = []
+    if vid_pid:
+        details.append(vid_pid)
+    if serial:
+        details.append(f"SN:{serial}")
+    detail_str = " · ".join(details)
     if not name:
-        return (vid_pid or "Unknown device", "")
-    return (name, vid_pid)
+        return (detail_str or "Unknown device", "")
+    return (name, detail_str)
 
 
 class _DeviceRowWidget(QWidget):

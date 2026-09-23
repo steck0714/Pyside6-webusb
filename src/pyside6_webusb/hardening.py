@@ -476,7 +476,9 @@ class UsbHotplugWatcher:
 def is_valid_usb_device_filter(filt) -> bool:
     """'A USBDeviceFilter filter is valid'(仕様7章相当)。より上位の
     フィールドを伴わない下位フィールドの指定はinvalid
-    (例: vendorId無しでproductIdだけを指定 等)。"""
+    (例: vendorId無しでproductIdだけを指定 等)。
+    さらに数値フィールドの型(int)および範囲(0-65535 / 0-255)、
+    serialNumberの型(str)も厳格に検証する。"""
     if not isinstance(filt, dict):
         return False
     if "productId" in filt and "vendorId" not in filt:
@@ -484,6 +486,19 @@ def is_valid_usb_device_filter(filt) -> bool:
     if "subclassCode" in filt and "classCode" not in filt:
         return False
     if "protocolCode" in filt and "subclassCode" not in filt:
+        return False
+    for key, max_val in (
+        ("vendorId", 0xFFFF),
+        ("productId", 0xFFFF),
+        ("classCode", 0xFF),
+        ("subclassCode", 0xFF),
+        ("protocolCode", 0xFF),
+    ):
+        if key in filt:
+            val = filt[key]
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > max_val:
+                return False
+    if "serialNumber" in filt and not isinstance(filt["serialNumber"], str):
         return False
     return True
 

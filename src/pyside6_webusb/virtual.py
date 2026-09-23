@@ -243,7 +243,7 @@ class VirtualUsbDevice:
             )
         is_device_to_host = bool(bmRequestType & 0x80)
         if is_device_to_host:
-            length = data_or_wLength if isinstance(data_or_wLength, int) else 0
+            length = data_or_wLength if isinstance(data_or_wLength, int) else (len(data_or_wLength) if data_or_wLength is not None else 0)
             return bytes(length)
         data = bytes(data_or_wLength or b"")
         return len(data)
@@ -263,8 +263,19 @@ class VirtualUsbDevice:
         return iter(self._configurations)
 
 
-def _version_to_bcd(version_tuple):
-    major, minor, sub = (list(version_tuple) + [0, 0, 0])[:3]
+def _version_to_bcd(version):
+    """バージョン表記(int, tuple, list, str)をBCD形式(例: 0x0200)の整数に変換する。"""
+    if isinstance(version, int):
+        if version > 0xFF:
+            return version & 0xFFFF
+        return (version & 0xFF) << 8
+    if isinstance(version, str):
+        parts = [int(p) for p in version.split(".") if p.isdigit()]
+    elif isinstance(version, (tuple, list)):
+        parts = [int(p) for p in version]
+    else:
+        parts = [0]
+    major, minor, sub = (parts + [0, 0, 0])[:3]
     return ((major & 0xFF) << 8) | ((minor & 0xF) << 4) | (sub & 0xF)
 
 
@@ -294,12 +305,14 @@ class VirtualUsbBackend:
         device._backend_ref = self
         self._devices.append(device)
 
-    def find(self, idVendor=None, idProduct=None, find_all=False, **_kwargs):
+    def find(self, idVendor=None, idProduct=None, find_all=False, custom_match=None, **kwargs):
         matches = [
             d for d in self._devices
             if d.is_plugged
             and (idVendor is None or d.idVendor == idVendor)
             and (idProduct is None or d.idProduct == idProduct)
+            and (custom_match is None or custom_match(d))
+            and all(getattr(d, k, None) == v for k, v in kwargs.items())
         ]
         if find_all:
             return matches
