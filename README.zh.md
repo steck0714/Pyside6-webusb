@@ -2,13 +2,13 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Alpha — v0.0.5a2**
+⚠️ **Experimental Beta — v0.0.5b1**
 
 面向 **PySide6 / QtWebEngine** 应用程序的 WebUSB API 实现。
 
-它结合 JavaScript Polyfill、QWebChannel Bridge 以及 **pyusb / libusb** 实际 USB 通信，为 QtWebEngine 提供通常不可直接使用的 `navigator.usb`。
+它结合 JavaScript WebUSB Polyfill、QWebChannel Bridge 以及 **pyusb / libusb** 实际 USB 通信，为 QtWebEngine 提供通常无法直接使用的 `navigator.usb`。
 
-> GitHub 上的开发/发布标识为 `v0.0.5a2`。按照 PyPI / PEP 440，实际打包版本字符串为 `0.0.5.post3`。
+> GitHub 上的开发标识为 `v0.0.5b1`。按照 PyPI / PEP 440，实际打包版本字符串为 `0.0.5.post5`。
 
 ## 特性
 
@@ -29,13 +29,14 @@
 - JSON 格式环境诊断
 - 主机应用程序预授权设备
 - TypeScript 类型定义
-- WebUSB 兼容的 DOMException 和 Transfer 行为
+- WebUSB 兼容的 DOMException 和 Transfer 模型
+- Virtual USB backend / Virtual USB device 测试支持
 
 ## 为什么需要它
 
-PySide6 的 QtWebEngine 基于 Chromium，但嵌入式 QtWebEngine 并不会像完整 Chrome 浏览器那样直接提供 WebUSB。
+PySide6 的 QtWebEngine 基于 Chromium，但嵌入式 QtWebEngine 并不会像完整 Chrome / Chromium 浏览器 shell 那样直接提供 WebUSB。
 
-如果 PySide6 应用加载了需要 `navigator.usb` 的设备配置工具、固件工具或硬件控制面板，页面可能无法使用该 API。
+如果 PySide6 应用加载了需要 `navigator.usb` 的设备配置工具、固件工具或硬件控制面板，页面通常无法使用该 API。
 
 `pyside6-webusb` 用于填补这一空缺。
 
@@ -47,7 +48,7 @@ from pyside6_webusb import install
 
 view = QWebEngineView()
 install(view.page())
-view.load("https://example.com")
+view.load("https://your-site.example")
 ```
 
 普通应用只需要在创建页面后调用一次 `install()`，即可连接 WebUSB Polyfill 和 Bridge。
@@ -90,7 +91,7 @@ WebUSBBridge
     ├── Origin / Frame 安全
     ├── 权限管理
     ├── 原生设备选择
-    ├── Filter / exclusion filter 匹配
+    ├── Filter / exclusionFilter 匹配
     ├── Transfer 验证
     ├── Protected class / 黑名单检查
     └── Device / handle 管理
@@ -104,7 +105,7 @@ USB 设备
 
 这不是 Chromium 内部 WebUSB 实现的直接移植。
 
-页面获得 WebUSB 兼容的 JavaScript API，而 Python 负责权限、安全、设备选择，并通过 pyusb/libusb 访问 USB 设备。
+页面获得 WebUSB 兼容的 JavaScript API，而 Python 负责权限、安全、设备选择等策略，并通过 pyusb/libusb 访问 USB 设备。
 
 ## API
 
@@ -197,7 +198,7 @@ const device = await navigator.usb.requestDevice({
 });
 ```
 
-Filter 结构也会在 Python 侧独立验证。
+Filter 结构也会在 Python 侧进行类型和数值范围验证。
 
 ## Transfer
 
@@ -215,7 +216,7 @@ Filter 结构也会在 Python 侧独立验证。
 
 `stall`、`babble` 等 Transfer 状态在适用情况下会转换为 WebUSB 结果模型。
 
-Isochronous Transfer 仍存在后端和真实硬件相关限制。
+Isochronous Transfer 已经实现，但由于 pyusb 公共 API 的限制，per-packet fidelity 目前仍属于 best-effort。
 
 ## 大容量 Transfer
 
@@ -231,7 +232,7 @@ Isochronous Transfer 仍存在后端和真实硬件相关限制。
 
 > **WebUSB-compatible ≠ Chrome clone**
 
-与 Chrome 的有意差异会被记录，而不是静默隐藏。
+与 Chrome 的有意差异会记录在 README 和 CHANGELOG 中，而不会被静默隐藏。
 
 ## DevTools / F12
 
@@ -249,7 +250,7 @@ window.__pysideWebUSB.bridgeInfo()
 window.__pysideWebUSB.explainTransferLimits()
 ```
 
-`bridgeInfo()` 可以显示 Bridge 版本、Rust acceleration 状态以及 Transfer 限制。
+`bridgeInfo()` 可以显示 Bridge 版本、Rust acceleration 状态以及 Transfer 限制等信息。
 
 ## 主机应用程序预授权
 
@@ -304,12 +305,9 @@ pyside6-webusb-doctor --json
 python -m pyside6_webusb --json
 ```
 
-`--json` 会把 `environment_report()` 的结果输出为 JSON。退出码规则保持不变：发现实际问题时返回 non-zero。
+诊断可以报告：
 
-诊断结果可以包含：
-
-- Python version
-- Python implementation
+- Python version / implementation
 - PySide6 version
 - shiboken6 version
 - Qt runtime version
@@ -317,34 +315,34 @@ python -m pyside6_webusb --json
 - 已解析的 libusb backend
 - `pyusb_backend_note`
 - `qtwebengine_importable`
-- Frame-origin isolation 是否可用
+- Frame-origin isolation 可用性
 - Rust acceleration 状态
 - 检测到的问题
 
-当 pyusb 回退到较旧的 `libusb0` backend 时，`pyusb_backend_note` 会提供额外参考信息。
+`qtwebengine_importable` 会实际检查 `QtWebEngineCore` / `QtWebEngineWidgets` 是否可以导入。
 
-`qtwebengine_importable` 会单独检查 `QtWebEngineCore` / `QtWebEngineWidgets` 是否能够实际导入。这对于 PySide6 6.12 开发版本中 QtWebEngine 被移动到独立 wheel 的打包变化尤其有用。
-
-Frame-origin isolation 会报告更强的 `QWebEngineFrame` 模型是否可用。较旧的 PySide6 环境会回退到能力更有限的 main-frame-only 行为。
+Frame-origin isolation 会根据当前 PySide6 API 选择可用模式，并在诊断结果中显示实际状态。
 
 ## Native Acceleration
 
-项目提供可选的 Rust 加速层。
+可以使用可选的 Rust 加速层。
 
-主要包括：
+主要处理：
 
-- Base64 编解码
+- Base64 encode / decode
 - 二进制处理
 - ADB wire-protocol message framing helper
-- Transfer response JSON 构造
+- Transfer response JSON construction
 
-Rust 加速不是必需组件。如果不可用，将回退到 Python 实现。
+Rust acceleration 不是必需的。不可用时会fallback到Python实现。
 
-Rust crate 使用 PyO3 的 `abi3-py39` 配置，因此可以使用一个 ABI 兼容 wheel 覆盖 Python >= 3.9 的范围；对于非常新的 Python，在需要时可以使用 forward-compatibility 构建模式。
+Rust crate 使用 PyO3 `abi3-py39` 构建方式，便于为更新版本的 Python 构建 ABI-compatible wheel。
 
 ## TypeScript
 
-`types/webusb-polyfill.d.ts` 提供 Polyfill 安装的 WebUSB API 的 TypeScript 类型定义。
+`types/webusb-polyfill.d.ts` 包含WebUSB API的TypeScript定义。
+
+例如：
 
 ```typescript
 USBDevice
@@ -353,11 +351,11 @@ USBInterface
 USBEndpoint
 ```
 
-`types/sample-usage.ts` 和 `types/negative-check.ts` 同时检查正确和错误的 API 使用方式。
+`types/sample-usage.ts` 和 `types/negative-check.ts` 同时覆盖正常使用和预期的类型错误。
 
 ## 测试
 
-本版本包含 Python 测试、安全审计测试、Node Polyfill 测试、TypeScript 检查以及 Rust 测试。
+本版本包含 Python tests、security audit、Node polyfill tests、TypeScript checks 以及 Rust tests。
 
 ```text
 Python Tests
@@ -371,7 +369,7 @@ Python Tests
 
 Security Audit
     ├── Resource exhaustion
-    ├── Altsetting class confusion
+    ├── Alternate-setting / protected-class bypass
     ├── Cross-origin hotplug leak
     ├── Direct channel bypass
     └── Malicious device / descriptor handling
@@ -386,25 +384,23 @@ Rust
     └── Native acceleration tests
 ```
 
-本版本运行结果：
-
-**184 passed, 2 skipped**
-
-Node Polyfill 和 TypeScript 检查也已重新运行。
-
-自动化测试不能完全替代真实 USB 设备上的测试。
+自动化测试不能完全替代真实 USB 设备测试。特别是 Isochronous Transfer 的真实硬件验证仍不完整。
 
 ## Isochronous Transfer
 
-Isochronous Transfer 目前以 best-effort 方式实现。
+Isochronous Transfer 已实现，但目前属于 best-effort。
 
-pyusb 的公开 API 无法提供完整的 per-packet 信息。具体来说，pyusb 1.3.1 底层的 libusb 数据结构确实保存每个 packet 的 `actual_length`，但公开的 `iso_read()` API 只提供合计长度。
+pyusb 公共 API 没有提供足够的 per-packet 信息，因此无法完全提供 WebUSB 所需的 per-packet fidelity。
 
-因此，目前没有在缺乏真实硬件验证的情况下直接深入 pyusb private internals，而是将其保留为已知限制。
+在 pyusb 1.3.1 中，底层 libusb 结构包含每个 packet 的 `actual_length`，但公开的 `iso_read()` API 只能提供合计长度。
+
+因此当前实现不会在没有真实硬件验证的情况下强行依赖 pyusb private internals，而是把该问题作为已知限制记录。
+
+真实设备上的 per-packet 验证以及非均一 packet length 的扩展支持属于后续工作。
 
 ## 当前状态
 
-**v0.0.5a2 — Experimental Alpha**
+**v0.0.5b1 — Experimental Beta**
 
 ### 已实现
 
@@ -433,11 +429,14 @@ pyusb 的公开 API 无法提供完整的 per-packet 信息。具体来说，pyu
 - [x] Canonical Base64 validation
 - [x] Malformed Base64 → `DataError`
 - [x] PySide6 / QtWebEngine import diagnostics
+- [x] Serial-number device disambiguation
+- [x] Protected alternate-setting checks
+- [x] `window.USB` / `window.USBDevice` / `window.USBConnectionEvent` exposure
 
 ### 仍处于实验阶段
 
-- [ ] 大量真实 USB 设备测试
-- [ ] 真实硬件上的 Isochronous Transfer 验证
+- [ ] 广泛的真实 USB 设备测试
+- [ ] Isochronous Transfer 真实硬件验证
 - [ ] 非均一 Isochronous packet length 的扩展支持
 - [ ] 更广泛的 OS / USB driver 兼容性
 - [ ] 长期 API 稳定化
@@ -445,7 +444,7 @@ pyusb 的公开 API 无法提供完整的 per-packet 信息。具体来说，pyu
 
 ## 与 Mock-webusb 的关系
 
-`pyside6-webusb` 是 **Mock-webusb** 下的 PySide6 / QtWebEngine 实现。
+`pyside6-webusb` 是 **Mock-webusb** 的 PySide6 / QtWebEngine 实现。
 
 相关的 Firefox 实现为 `fox-webusb`。
 
@@ -459,23 +458,23 @@ Mock-webusb
           └── Firefox / Native Messaging
 ```
 
-目标并不是完全复制 Chrome 内部的 WebUSB 实现，而是为不同宿主环境提供 WebUSB 兼容 API。
+目标并不是完全复制 Chrome 内部的 WebUSB 实现，而是在不同 Host 环境中提供 WebUSB-compatible API。
 
-与 Chrome 的有意差异会被记录，而不是静默隐藏。
+与 Chrome 的有意差异会被记录，而不会静默隐藏。
 
 ## 注意事项
 
 > ⚠️ `pyside6-webusb` 是实验性软件。
 
-目前仍处于 0.x 阶段，API、兼容性和真实设备支持都可能发生变化。
+这是一个 1.0 之前的项目。API、兼容性以及真实设备支持都可能继续变化。
 
-本项目可能包含 AI 生成的代码或 AI 辅助生成的代码。
+项目可能包含 AI 生成的代码或由 AI 协助产生的代码。
 
-因此可能存在 Bug、未完成行为、环境相关问题、兼容性差异以及尚未发现的安全问题。
+因此可能存在 bug、未完成行为、环境相关问题、兼容性差异以及尚未发现的安全问题。
 
-如果用于生产环境，请对目标 OS、USB 设备、驱动、libusb 以及实际 WebUSB 应用进行完整验证。
+如果用于生产环境，请完整验证目标 OS、USB 设备、驱动、libusb 以及 WebUSB 应用程序。
 
-## 相关项目
+## Related projects
 
 - [Mock-webusb](https://github.com/steck0714/Mock-webusb)
 - [fox-webusb](https://github.com/steck0714/fox-webusb)

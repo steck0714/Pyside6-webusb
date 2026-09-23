@@ -2,13 +2,13 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Alpha — v0.0.5a2**
+⚠️ **Experimental Beta — v0.0.5b1**
 
 **PySide6 / QtWebEngine** アプリケーション向けの WebUSB API 実装です。
 
-JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** による実USB通信を組み合わせ、QtWebEngine では標準提供されていない `navigator.usb` を提供します。
+JavaScript WebUSB Polyfill、QWebChannel Bridge、**pyusb / libusb** による実USB通信を組み合わせ、QtWebEngine では通常利用できない `navigator.usb` を提供します。
 
-> GitHub上の開発・リリース表記は `v0.0.5a2` です。PyPI/PEP 440上で実際にパッケージへ入るバージョン文字列は `0.0.5.post3` です。
+> GitHub上の開発表記は `v0.0.5b1` です。PyPI / PEP 440で実際にパッケージへ入るバージョン文字列は `0.0.5.post5` です。
 
 ## 特徴
 
@@ -18,10 +18,10 @@ JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** に�
 - Originごとのデバイス権限
 - Frame-awareなOrigin処理
 - WebUSBセキュリティ保護
-- Chromiumの既知セキュリティキー・ブロックリスト
+- Chromium由来の既知セキュリティキー・ブロックリスト
 - Transferの検証と安全制限
-- WebUSBフィルタ / `exclusionFilters` の照合
-- Hotplugの監視と `connect` / `disconnect` イベント
+- WebUSB `filters` / `exclusionFilters` の照合
+- Hotplug監視と `connect` / `disconnect` イベント
 - DevTools / F12向け `window.__pysideWebUSB`
 - オプションのRustネイティブアクセラレーション
 - ホスト環境診断ユーティリティ
@@ -29,11 +29,12 @@ JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** に�
 - JSON形式の環境診断
 - ホストアプリからのデバイス事前認可
 - TypeScript定義
-- WebUSB API互換性を意識したDOMException / Transferモデル
+- WebUSB互換のDOMException / Transferモデル
+- Virtual USB backend / Virtual USB deviceによるテスト支援
 
 ## なぜ必要なのか
 
-PySide6が提供するQtWebEngineはChromiumをベースにしていますが、埋め込み用のQtWebEngineでは通常のChromeブラウザと同じWebUSB機能をそのまま利用できません。
+PySide6のQtWebEngineはChromiumをベースにしていますが、埋め込み用のQtWebEngineでは通常のChrome/Chromiumブラウザシェルと同じWebUSB機能をそのまま利用できません。
 
 WebUSBを必要とするデバイス設定ツール、ファームウェアツール、ハードウェアダッシュボードなどをPySide6アプリ内で動かす場合、ページ側から `navigator.usb` が利用できない問題があります。
 
@@ -47,10 +48,10 @@ from pyside6_webusb import install
 
 view = QWebEngineView()
 install(view.page())
-view.load("https://example.com")
+view.load("https://your-site.example")
 ```
 
-通常のアプリケーションでは、ページ作成後に `install()` を一度呼ぶだけでWebUSBポリフィルとブリッジが接続されます。
+通常のアプリケーションでは、ページ作成後に `install()` を一度呼ぶだけでWebUSB PolyfillとBridgeが接続されます。
 
 ## インストール
 
@@ -90,7 +91,7 @@ WebUSBBridge
     ├── Origin / Frame security
     ├── Permission management
     ├── Native device chooser
-    ├── Filter / exclusion filter matching
+    ├── Filter / exclusionFilter matching
     ├── Transfer validation
     ├── Protected-class / blocklist checks
     └── Device / handle management
@@ -153,7 +154,7 @@ const device = await navigator.usb.requestDevice({
 await device.open();
 ```
 
-利用可能なデバイスや転送方式は、OS、USBドライバ、libusb、デバイス固有の実装などに依存します。
+実際に利用できるデバイスや転送方式は、OS、USBドライバ、libusb、デバイス固有の実装などに依存します。
 
 ## セキュリティモデル
 
@@ -173,7 +174,7 @@ await device.open();
 - 権限済みデバイスのみを対象とする `getDevices()`
 - `requestDevice()` のuser gesture検証
 - chooserの再入防止
-- 直接QWebChannel呼び出しを考慮したホスト管理APIの保護
+- Webページから直接QWebChannelを利用したHost-only管理APIの迂回防止
 - デバイス由来文字列のサニタイズ
 - HotplugイベントのOrigin単位での可視性確認
 - Originごとの同時open handle数制限
@@ -197,7 +198,7 @@ const device = await navigator.usb.requestDevice({
 });
 ```
 
-フィルタ構造についてもPython側で検証します。
+フィルタ構造についてもPython側で型・値域を検証します。
 
 ## Transfer
 
@@ -215,13 +216,13 @@ const device = await navigator.usb.requestDevice({
 
 `stall` や `babble` などのTransfer状態も、可能な範囲でWebUSBの結果モデルへ変換します。
 
-Isochronous Transferにはバックエンドや実機依存の制限が残っています。
+Isochronous Transferは実装されていますが、per-packet情報についてはpyusb公開APIの制約があり、現時点ではbest-effortです。
 
 ## 大容量Transfer
 
-Chrome / Chromiumの実装では32 MiBがTransferサイズの重要な基準値として扱われます。
+Chrome / Chromiumでは32 MiBがTransferサイズの重要な基準値として扱われます。
 
-`pyside6-webusb` では32 MiB超過をChromeと同様に即座に拒否するのではなく、互換性の差異を明示したうえで警告を出します。
+`pyside6-webusb` では32 MiB超過をChromeと同様に即座に拒否するのではなく、この互換性差異を明示します。
 
 - 32 MiB超過時に `console.warn()` を生成
 - DevTools / F12から確認可能
@@ -232,6 +233,8 @@ Chrome / Chromiumの実装では32 MiBがTransferサイズの重要な基準値�
 > **WebUSB-compatible ≠ Chrome clone**
 
 です。
+
+Chromeとの意図的な差異はREADMEやCHANGELOGに記録する方針です。
 
 ## DevTools / F12
 
@@ -271,7 +274,7 @@ bridge.grant_device_for_origin(
 
 ## 環境診断
 
-環境診断:
+Pythonから:
 
 ```python
 from pyside6_webusb import (
@@ -282,7 +285,7 @@ from pyside6_webusb import (
 print(format_environment_report())
 ```
 
-または:
+コマンドラインから:
 
 ```bash
 pyside6-webusb-doctor
@@ -304,12 +307,9 @@ pyside6-webusb-doctor --json
 python -m pyside6_webusb --json
 ```
 
-`--json` は `environment_report()` の結果をJSONとして標準出力へ出します。終了コードは通常の診断と同じで、実際の問題がある場合はnon-zeroになります。
-
 診断では、例えば次の情報を確認できます。
 
-- Python version
-- Python implementation
+- Python version / implementation
 - PySide6 version
 - shiboken6 version
 - Qt runtime version
@@ -321,11 +321,9 @@ python -m pyside6_webusb --json
 - Rust acceleration status
 - 検出された問題
 
-`pyusb_backend_note` は、pyusbが古い `libusb0` backendへfallbackした場合などに参考情報を示します。
+`qtwebengine_importable` は `QtWebEngineCore` / `QtWebEngineWidgets` が実際にimport可能かを確認します。
 
-`qtwebengine_importable` は `QtWebEngineCore` / `QtWebEngineWidgets` が実際にimport可能かを個別に確認します。将来のPySide6 6.12系でQtWebEngineが別wheelへ分離された場合にも、原因を診断しやすくするための情報です。
-
-Frame-origin isolationについては、`QWebEngineFrame` が利用できない古いPySide6環境では、より限定的なmain-frame-only動作へfallbackします。診断結果から実際にどのモードが利用されているか確認できます。
+Frame-origin isolationについては、利用可能なPySide6 APIに応じて適切なモードを選択し、診断結果から実際の状態を確認できます。
 
 ## Native Acceleration
 
@@ -340,7 +338,7 @@ Frame-origin isolationについては、`QWebEngineFrame` が利用できない�
 
 Rustアクセラレーションは必須ではありません。利用できない場合はPython実装へfallbackします。
 
-Rust crateはPyO3の `abi3-py39` を使用しており、Python 3.15のような新しいPythonでもABI互換wheelを構築できる構成になっています。
+Rust crateはPyO3の `abi3-py39` を使用する構成になっており、新しいPython向けにもABI互換wheelを構築しやすい設計です。
 
 ## TypeScript
 
@@ -357,7 +355,7 @@ USBEndpoint
 
 ## テスト
 
-このリリースでは、Python tests / security audit / Node polyfill tests / TypeScript checksを含む検証を行っています。
+このリリースでは、Python tests / security audit / Node polyfill tests / TypeScript checks / Rust testsを含む検証を行っています。
 
 ```text
 Python Tests
@@ -371,7 +369,7 @@ Python Tests
 
 Security Audit
     ├── Resource exhaustion
-    ├── Altsetting class confusion
+    ├── Alternate-setting / protected-class bypass
     ├── Cross-origin hotplug leak
     ├── Direct channel bypass
     └── Malicious device / descriptor handling
@@ -386,29 +384,21 @@ Rust
     └── Native acceleration tests
 ```
 
-このリリースの実行環境では:
-
-**184 passed, 2 skipped**
-
-でした。
-
-また、NodeのpolyfillテストとTypeScript定義のチェックも再実行されています。
-
-ただし、自動テストは実機USBデバイスでの検証を完全に置き換えるものではありません。
+自動テストは実機USBデバイスでの検証を完全に置き換えるものではありません。特にIsochronous Transferについては実機検証が残っています。
 
 ## Isochronous Transferについて
 
 Isochronous Transferは実装されていますが、現時点ではbest-effortです。
 
-pyusbの公開APIではIsochronous Transferのper-packet length / result情報を十分に扱えないため、現在の実装には制約があります。
+pyusbの公開APIではIsochronous Transferのper-packet length / result情報を十分に扱えません。
 
-特に `isochronousTransferIn()` のper-packet fidelityについては、pyusb 1.3.1内部のlibusb構造体には各packetの `actual_length` が存在する一方、pyusbの公開 `iso_read()` APIでは合計値としてしか取得できないことを確認しています。
+pyusb 1.3.1の内部libusb構造には各packetの `actual_length` が存在する一方、公開 `iso_read()` APIでは合計値としてしか取得できないため、現在の実装ではprivate internalsへ無理に依存せず、この制約を既知の制限として扱っています。
 
-そのため、現時点ではpyusbのprivate internalsへ無理に踏み込んで修正するのではなく、実機検証を伴う将来の改善事項として残しています。
+実機でのper-packet fidelity検証と、非均一packet lengthへの対応拡張は今後の課題です。
 
 ## 現在の状態
 
-**v0.0.5a2 — Experimental Alpha**
+**v0.0.5b1 — Experimental Beta**
 
 ### 実装済み
 
@@ -437,6 +427,9 @@ pyusbの公開APIではIsochronous Transferのper-packet length / result情報�
 - [x] Canonical Base64 validation
 - [x] Malformed Base64 → `DataError`
 - [x] PySide6 / QtWebEngine import diagnostics
+- [x] Serial-number device disambiguation
+- [x] Protected alternate-setting checks
+- [x] `window.USB` / `window.USBDevice` / `window.USBConnectionEvent` exposure
 
 ### まだ実験段階
 
@@ -463,9 +456,9 @@ Mock-webusb
           └── Firefox / Native Messaging
 ```
 
-Chromeの内部WebUSB実装を完全に複製することを目的とするのではなく、WebUSB互換APIを異なるホスト環境へ提供することを目的としています。
+Chromeの内部WebUSB実装を完全に複製することを目的とするのではなく、異なるホスト環境へWebUSB互換APIを提供することを目的としています。
 
-Chromeとの意図的な差異は隠さずREADMEやCHANGELOGに記録する方針です。
+Chromeとの意図的な差異は隠さずREADMEやCHANGELOGに記録します。
 
 ## 注意事項
 
@@ -477,7 +470,7 @@ v0.x系であり、API、互換性、実機サポートは今後変更される�
 
 そのため、バグ、未完成の挙動、環境依存の問題、互換性の違い、未発見のセキュリティ問題などが存在する可能性があります。
 
-本番環境で使用する場合は、対象OS・USBデバイス・ドライバ・WebUSBアプリケーションを含めて十分に検証してください。
+本番環境で使用する場合は、対象OS・USBデバイス・ドライバ・libusb・WebUSBアプリケーションを含めて十分に検証してください。
 
 ## Related Projects
 
