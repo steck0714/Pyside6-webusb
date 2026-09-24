@@ -224,6 +224,62 @@ def test_rescan_survives_exceptions_from_a_misbehaving_frame():
     print("test_rescan_survives_exceptions_from_a_misbehaving_frame: OK")
 
 
+def test_tracker_stops_reacting_after_page_is_destroyed():
+    """🐛 バグ修正(v0.0.5b2、checklog2.md「45. QWebEnginePage Lifetime
+    Observation」参照): 実機では、page破棄後もFrameOriginTrackerの定期
+    タイマーがrescan()を呼び続け、そのたびに
+    "libshiboken: Internal C++ object (...QWebEnginePage) already deleted"
+    というログが出ていた(例外は握りつぶすので落ちはしないが、pageが
+    死んでいることを知る手立てが無いまま2秒おきに同じ失敗を繰り返して
+    いた)。shiboken6.delete()で実際にpageのC++オブジェクトを破棄し、
+    destroyedシグナル経由でトラッカーが即座に反応し、以後rescan()を
+    呼んでもpageへ一切触れない(例外も出ない)ことを確認する。"""
+    import shiboken6
+    _make_app()
+    main = FakeFrame("https://top.example/")
+    page = FakePageWithNavigation(main)
+    tracker = FrameOriginTracker(page)
+    tracker.wire()
+    assert tracker._destroyed is False
+    assert tracker._periodic_timer is not None and tracker._periodic_timer.isActive() is True
+
+    shiboken6.delete(page)  # 実際にC++オブジェクトを破棄し、destroyedを同期的に発火させる
+
+    assert tracker._destroyed is True, "destroyedシグナルを受けて即座にフラグが立つはず"
+    # 破棄後にrescan()を呼んでも、もうpageのmainFrame()等には一切触れない
+    # (触れていれば「既に破棄済み」のRuntimeErrorが飛ぶはず)。
+    tracker.rescan()  # 例外が飛ばないこと自体がこのテストの主眼
+    print("test_tracker_stops_reacting_after_page_is_destroyed: OK")
+
+
+def test_tracker_disconnect_stops_timer_and_further_rescans_while_page_still_alive():
+    """🆕 v0.0.5b2: pageがまだ生きているうちに明示的にdisconnect()で
+    早期に後始末した場合も、以後の再走査が全て止まることを確認する
+    (checklog2.md「44. Cleanup Testing」で、ちょうどこのメソッドが
+    まだ無かったために `tracker.disconnect()` がAttributeErrorになった
+    のと同じ使い方に対応する)。"""
+    _make_app()
+    main = FakeFrame("https://top.example/")
+    page = FakePageWithNavigation(main)
+    tracker = FrameOriginTracker(page)
+    tracker.wire()
+    assert tracker._periodic_timer.isActive() is True
+    scripts_before = len(main.injected_scripts)
+
+    tracker.disconnect()
+
+    assert tracker._destroyed is True
+    assert tracker._periodic_timer.isActive() is False
+    # navigationRequestedが(まだ生きている)pageから再度飛んできても、
+    # もう再走査しない。
+    page.navigationRequested.emit(None)
+    tracker.rescan()
+    assert len(main.injected_scripts) == scripts_before, (
+        "disconnect()後はrescan()もnavigationRequestedも一切トークンを配り直さないはず"
+    )
+    print("test_tracker_disconnect_stops_timer_and_further_rescans_while_page_still_alive: OK")
+
+
 # ============================================================
 # 2) 本物のQWebEnginePageを使った統合テスト(1本のみ)
 # ============================================================
@@ -299,5 +355,7 @@ if __name__ == "__main__":
     test_origin_for_token_rejects_empty_and_unknown_tokens()
     test_tracker_caps_total_token_count()
     test_rescan_survives_exceptions_from_a_misbehaving_frame()
+    test_tracker_stops_reacting_after_page_is_destroyed()
+    test_tracker_disconnect_stops_timer_and_further_rescans_while_page_still_alive()
     test_real_qwebenginepage_attributes_iframe_to_its_own_origin()
     print("ALL FRAME_ORIGIN TESTS PASSED")

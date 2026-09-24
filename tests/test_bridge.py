@@ -2112,9 +2112,28 @@ def test_openDevice_disambiguates_by_serial_number():
     assert bridge._open_devices[h2]["device"].serial == "SN-BETA"
 
 
-def test_control_transfer_endpoint_recipient_blocks_protected_alternate():
-    """controlTransferでrecipient:endpointが指定された際、いずれかのalternate settingが
-    保護対象クラス(HID等)であれば拒否されることを確認する。"""
+def test_control_transfer_endpoint_recipient_alt_aware_protected_class_handling():
+    """controlTransferでrecipient:endpointが指定された際の、alternate setting
+    ごとの保護対象クラス判定を検証する。同一interface番号の異なるalternateが
+    同じendpointアドレスを共有するケース(USB仕様上合法で、実デバイスでも
+    珍しくない)について、以下の2方向を両方確認する:
+
+    (a) 現在選択中(claimInterface直後のデフォルト=alt 0)が無害なら、その
+        alt 0のendpointへの正当な転送は許可されるべき。
+    🐛 バグ修正(v0.0.5b2、実際に再現して確認): 以前の実装は「このendpoint
+        アドレスを持ついずれかのalternateが保護対象クラスなら一律拒否」を
+        どのaltが今選択されているかを見る前に判定していたため、この(a)の
+        完全に正当なケースまでSecurityErrorで拒否してしまっていた
+        (本テスト関数は元々「一律拒否」だけを検証しており、そのバグ込みの
+        挙動をテストとして固定してしまっていた——本バグ修正に合わせて
+        (a)(b)両方を検証するよう改めた)。
+
+    (b) 一方、alt 0には無い(alt 1=HIDだけが持つ)endpointアドレスを直接
+        指定した場合は、raw endpointアドレスで保護対象alternateへ間接的に
+        探りを入れようとしている可能性があるため、引き続き拒否されるべき
+        (security_audit/test_altsetting_class_confusion.pyの
+        test_control_transfer_endpoint_recipient_correctly_blocks_hidden_hid_endpoint
+        と同じ意図の変種をここでも確認する)。"""
     class _Ep:
         def __init__(self, addr):
             self.bEndpointAddress = addr
@@ -2141,10 +2160,10 @@ def test_control_transfer_endpoint_recipient_blocks_protected_alternate():
         idVendor = 0x2341
         idProduct = 0x8036
         iSerialNumber = 0
-        def __init__(self):
+        def __init__(self, alt0_eps, alt1_eps):
             self.cfg = _Cfg([
-                _Intf(0, 0, 0xFF, [_Ep(0x81)]),  # alt 0: Vendor-specific
-                _Intf(0, 1, 0x03, [_Ep(0x81)]),  # alt 1: HID (Protected)
+                _Intf(0, 0, 0xFF, alt0_eps),  # alt 0: Vendor-specific (無害)
+                _Intf(0, 1, 0x03, alt1_eps),  # alt 1: HID (保護対象)
             ])
         def get_active_configuration(self):
             return self.cfg
@@ -2153,23 +2172,37 @@ def test_control_transfer_endpoint_recipient_blocks_protected_alternate():
         def ctrl_transfer(self, *a, **kw):
             return b"ok"
 
-    dev = _Dev()
     class _Core:
+        def __init__(self, dev):
+            self._dev = dev
         def find(self, find_all=False, **kw):
-            return [dev] if find_all else dev
+            return [self._dev] if find_all else self._dev
 
-    bridge = WebUSBBridge(usb_backend=(_Core(), FakeUsbUtil()))
-    bridge._is_granted = lambda *a, **kw: True
-    bridge._current_origin = lambda *a, **kw: "https://example.test"
+    # (a) alt 0とalt 1が同じendpointアドレス0x81を共有する場合:
+    #     claim直後はalt 0(無害)が選択中のままなので、0x81への転送は許可されるべき。
+    dev_shared = _Dev(alt0_eps=[_Ep(0x81)], alt1_eps=[_Ep(0x81)])
+    bridge_a = WebUSBBridge(usb_backend=(_Core(dev_shared), FakeUsbUtil()))
+    bridge_a._is_granted = lambda *a, **kw: True
+    bridge_a._current_origin = lambda *a, **kw: "https://example.test"
+    h_a = json.loads(bridge_a.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge_a.claimInterface(h_a, 0))["success"] is True
+    res_a = json.loads(bridge_a.controlTransferIn(h_a, 0x82, 0x00, 0, 0x81, 4))
+    assert res_a["success"] is True, (
+        f"現在有効なalt 0(無害)が持つendpointへの正当な転送が拒否された: {res_a!r}"
+    )
 
-    h = json.loads(bridge.openDevice(0x2341, 0x8036))["handle"]
-    # claim interface 0 (alt 0 is vendor-specific)
-    assert json.loads(bridge.claimInterface(h, 0))["success"] is True
-
-    # recipient == 2 (endpoint 0x81). Since alt 1 declares HID, this MUST be rejected with SecurityError!
-    res = json.loads(bridge.controlTransferIn(h, 0x82, 0x00, 0, 0x81, 4))
-    assert res["success"] is False
-    assert res["error"].startswith("SecurityError:"), res
+    # (b) alt 1(HID)だけがendpoint 0x81を持ち、alt 0には無い場合:
+    #     claim直後はalt 0が選択中なので0x81は「今は存在しない」はずだが、
+    #     rawアドレス指定でHID側を狙う経路として引き続き拒否されるべき。
+    dev_hidden = _Dev(alt0_eps=[_Ep(0x01)], alt1_eps=[_Ep(0x81)])
+    bridge_b = WebUSBBridge(usb_backend=(_Core(dev_hidden), FakeUsbUtil()))
+    bridge_b._is_granted = lambda *a, **kw: True
+    bridge_b._current_origin = lambda *a, **kw: "https://example.test"
+    h_b = json.loads(bridge_b.openDevice(0x2341, 0x8036))["handle"]
+    assert json.loads(bridge_b.claimInterface(h_b, 0))["success"] is True
+    res_b = json.loads(bridge_b.controlTransferIn(h_b, 0x82, 0x00, 0, 0x81, 4))
+    assert res_b["success"] is False
+    assert res_b["error"].startswith("SecurityError:"), res_b
 
 
 def test_b64decode_rejects_oversized_and_non_string():
