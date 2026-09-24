@@ -1762,25 +1762,50 @@ class WebUSBBridge(QObject):
                 if not matching_alts:
                     return _err("NotFoundError", f"endpoint {endpoint_address:#04x} was not found on this device")
 
-                # 🛡️ security_audit No.1 拡張: このendpointを持ついずれかのalternateが
-                #    保護対象クラス(HID等)を宣言していれば一律に拒否する。
-                for iface_num, alt_num, cls in matching_alts:
-                    if is_protected_interface_class(cls):
-                        name = protected_class_name(cls)
-                        return _err(
-                            "SecurityError",
-                            f"endpoint {endpoint_address:#04x} belongs to interface class '{name}', "
-                            "a protected interface class",
-                        )
-                # 現在選択中のalternate settingに属しているかを確認
+                # 🐛 バグ修正(v0.0.5b2、実際に再現して確認): 以前は「このendpoint
+                # アドレスを持ついずれかのalternateが保護対象クラスなら一律拒否」を、
+                # どのaltが今選択されているかを見る前に判定してしまっていた。
+                # alt 0(無害・現在選択中)とalt 1(HID・現在は選択されていない)が
+                # 同じendpointアドレスを共有する複合デバイス(実デバイスでも
+                # 珍しくない——USB仕様上、同一interface番号の別alternateは
+                # 別々のbInterfaceClassとendpoint構成を持ってよい)に対して、
+                # claimInterface()は正しくalt 0を無害と判定してclaimを許可した
+                # にもかかわらず、その後の現在有効なalt 0への完全に正当な
+                # controlTransferIn/Out(recipient=endpoint)までSecurityErrorで
+                # 拒否してしまっていた(実際に再現して確認済み)。
+                # 先に「今どのaltが実際にこのendpointの持ち主か」
+                # (_endpoint_available_or_error()と同じく、alt_settingsが
+                # 追跡する「現在選択中のalternate」)を決定してから、その持ち主
+                # だけを保護対象クラス判定にかけるよう順序を入れ替える。
                 for iface_num, alt_num, cls in matching_alts:
                     current_alt = alt_settings.get(iface_num, 0)
                     if alt_num == current_alt:
-                        owner_number = iface_num
-                        owner_class = cls
+                        owner_number, owner_class = iface_num, cls
                         break
                 if owner_number is None:
+                    # 🛡️ 現在選択中のどのaltもこのendpointアドレスを持たない
+                    # (＝実機の現在の状態としてはそもそも到達できないはずの
+                    # endpoint)場合。素朴にNotFoundErrorにする前に、候補の
+                    # いずれかが保護対象クラスであれば、raw endpointアドレス
+                    # 指定で保護対象alternateへ間接的に探りを入れようとした
+                    # 可能性を疑い、引き続きSecurityErrorを優先する(安全側、
+                    # 元のsecurity_audit No.1拡張の意図はここで維持する)。
+                    for iface_num, alt_num, cls in matching_alts:
+                        if is_protected_interface_class(cls):
+                            name = protected_class_name(cls)
+                            return _err(
+                                "SecurityError",
+                                f"endpoint {endpoint_address:#04x} belongs to interface class '{name}', "
+                                "a protected interface class",
+                            )
                     owner_number, _alt_num, owner_class = matching_alts[0]
+                elif is_protected_interface_class(owner_class):
+                    name = protected_class_name(owner_class)
+                    return _err(
+                        "SecurityError",
+                        f"endpoint {endpoint_address:#04x} belongs to interface class '{name}', "
+                        "a protected interface class",
+                    )
             except Exception:
                 pass
             if owner_number is None:

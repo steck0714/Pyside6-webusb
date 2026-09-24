@@ -101,6 +101,7 @@ class FrameOriginTracker:
         self._periodic_timer = None
         self._wired = False
         self._navigation_signal_connected = False
+        self._destroyed = False  # 🆕 v0.0.5b2: __init__.wire()/_on_page_destroyed()参照
 
     @property
     def is_functional(self):
@@ -144,9 +145,65 @@ class FrameOriginTracker:
                 self._periodic_timer.start()
             except Exception as e:
                 print(f"[pyside6-webusb] FrameOriginTracker.wire: 定期再走査タイマーの起動に失敗(無視): {e}")
+        # 🐛 バグ修正(v0.0.5b2、実機のDevTools+ログ確認で発見。checklog2.md
+        #    「45. QWebEnginePage Lifetime Observation」参照): 定期タイマーは
+        #    QTimer(self._page) と親を指定しているため、page破棄時にQt自身が
+        #    連鎖的に破棄してくれるはずだが、実機では「page破棄後に
+        #    libshiboken: Internal C++ object (...QWebEnginePage) already
+        #    deleted」というログが実際に観測された——特にnavigationRequested
+        #    直後の遅延再走査(_on_navigation_requestedが使うQTimer.singleShot)
+        #    はどのオブジェクトにも親子付けされていないstaticコールのため、
+        #    親子関係による連鎖破棄の保護を一切受けない。rescan()自体は例外を
+        #    捕まえて無視するだけなので落ちはしないが、pageが死んでいることを
+        #    知る手立てがなく、以後も定期タイマーが2秒おきに同じ失敗を繰り返し、
+        #    ログを埋め続けていた。QObjectが実際に破棄される直前に必ず発火する
+        #    destroyedシグナルへ接続し、そこで即座にタイマーを止め以降の
+        #    走査を全て短絡させる。
+        try:
+            self._page.destroyed.connect(self._on_page_destroyed)
+        except Exception as e:
+            print(f"[pyside6-webusb] FrameOriginTracker.wire: destroyed接続に失敗(無視): {e}")
         self.rescan()
 
+    def _on_page_destroyed(self, _obj=None):
+        """🆕 v0.0.5b2: pageのC++オブジェクトが破棄される直前に呼ばれる。
+        この時点でpageへは(mainFrame()はおろか、いかなるメソッドも)もう
+        触れてはならないので、ここでは自分自身の後始末だけを行う。"""
+        self._destroyed = True
+        if self._periodic_timer is not None:
+            try:
+                self._periodic_timer.stop()
+            except Exception:
+                pass
+
+    def disconnect(self):
+        """🆕 v0.0.5b2: 明示的な後始末用の公開メソッド。pageがまだ生きている
+        うちにホストアプリ側からトラッカーを早期に止めたい場合(例:
+        install()を同じpageへ対して呼び直す前や、bridgeを明示的に
+        破棄する前)に使う。定期タイマーを止め、navigationRequested/
+        destroyedへの接続をいずれも解除する——以後rescan()を呼んでも
+        何もしない。pageが既に破棄済みでも安全に呼べる(各解除は
+        例外を無視する)。"""
+        self._destroyed = True
+        if self._periodic_timer is not None:
+            try:
+                self._periodic_timer.stop()
+            except Exception:
+                pass
+        if self._navigation_signal_connected:
+            try:
+                self._page.navigationRequested.disconnect(self._on_navigation_requested)
+            except Exception:
+                pass
+            self._navigation_signal_connected = False
+        try:
+            self._page.destroyed.disconnect(self._on_page_destroyed)
+        except Exception:
+            pass
+
     def _on_navigation_requested(self, _request):
+        if self._destroyed:
+            return
         # request自体からはisMainFrame()/url()が取れるが、実際にQWebEngineFrame
         # オブジェクトとして木に現れるまで(特に新規iframeの場合)わずかに遅延が
         # あるため、複数回タイミングをずらして再走査する。
@@ -163,6 +220,10 @@ class FrameOriginTracker:
 
     def rescan(self):
         """現在のフレーム木を走査し、各フレームへトークンを(再)配布する。"""
+        if self._destroyed:
+            # 🆕 v0.0.5b2: destroyedシグナルで既に検知済みなら、
+            # page.mainFrame()を試みることすらしない(上のwire()コメント参照)。
+            return
         try:
             main = self._page.mainFrame()
         except Exception as e:

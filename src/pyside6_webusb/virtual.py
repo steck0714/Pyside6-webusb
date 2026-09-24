@@ -121,10 +121,11 @@ class VirtualUsbConfiguration:
     def __init__(self, value=1, interfaces=(), description=None, self_powered=False, remote_wakeup=False,
                  max_power_ma=100):
         self.bConfigurationValue = value
-        self.iConfiguration = 0
+        self.iConfiguration = 0  # 🐛 v0.0.5b2: VirtualUsbDevice.__init__が実際の文字列indexへ差し替える(下記参照)
         self.bmAttributes = 0x80 | (0x40 if self_powered else 0) | (0x20 if remote_wakeup else 0)
         self.bMaxPower = max(0, int(max_power_ma) // 2)
         self._interfaces = list(interfaces)
+        self._description = description
 
     @property
     def bNumInterfaces(self):
@@ -158,6 +159,22 @@ class VirtualUsbDevice:
         self.iProduct = self._intern_string(product)
         self.iSerialNumber = self._intern_string(serial_number)
         self._configurations = list(configurations) or [VirtualUsbConfiguration(value=1, interfaces=[])]
+        # 🐛 バグ修正(v0.0.5b2): VirtualUsbConfiguration(description=...)/
+        # VirtualUsbInterface(name=...)は、渡した文字列をどこにも登録しない
+        # まま iConfiguration/iInterface を常に0に固定していたため、
+        # build_device_descriptor()のconfigurationName/interfaceName解決
+        # (usb_util.get_string(dev, cfg.iConfiguration)等)が常に何も
+        # 解決できず、指定したはずの名前が黙って消えていた(死んでいた
+        # パラメータ)。ConfigurationやInterfaceは(実際のpyusbと同じ設計で)
+        # 自分がどのDeviceに属すかを知らないまま独立して構築されるため、
+        # 所属先が決まるこの時点(Device.__init__)でまとめて文字列表を
+        # 登録し直す。
+        for cfg in self._configurations:
+            if getattr(cfg, "_description", None):
+                cfg.iConfiguration = self._intern_string(cfg._description)
+            for intf in cfg:
+                if getattr(intf, "_name", None):
+                    intf.iInterface = self._intern_string(intf._name)
         self._active_configuration_value = self._configurations[0].bConfigurationValue
         self._plugged = True
         self._claimed_interfaces = set()
@@ -262,19 +279,121 @@ class VirtualUsbDevice:
     def __iter__(self):
         return iter(self._configurations)
 
+    @classmethod
+    def from_descriptor(cls, descriptor, on_control_transfer=None, on_bulk_read=None, on_bulk_write=None):
+        """🆕 v0.0.5b2: 「実機を録って、後で仮想デバイスとして再生する」ための
+        新機能。hardening.build_device_descriptor()が作る辞書——つまり
+        listDevices()/getDevices()や window.__pysideWebUSB.listGrantedDevices()
+        がJSへ返すのと全く同じ形——から、そのままVirtualUsbDeviceを組み立てる。
+
+        典型的な使い方:
+            # 1) 実機を挿した状態で一度だけ記述子を取得して保存しておく
+            descriptor = json.loads(bridge.listDevices())["devices"][0]
+            json.dump(descriptor, open("my_device.json", "w"))
+
+            # 2) 以降は実機無しで、保存した記述子から仮想デバイスを再生する
+            descriptor = json.load(open("my_device.json"))
+            dev = VirtualUsbDevice.from_descriptor(descriptor)
+            bridge = WebUSBBridge(usb_backend=make_virtual_usb_backend([dev]))
+
+        on_control_transfer/on_bulk_read/on_bulk_writeは通常のコンストラクタと
+        同じく、転送の実応答をカスタマイズしたい場合に渡す(指定しなければ
+        既定のゼロ埋めエコー応答になる — 記述子には転送の中身までは
+        含まれないので、実プロトコルを模したい場合はここで指定する)。
+
+        欠けているフィールドは無害な既定値で補う(部分的にしか記録して
+        いない/手で書いた記述子でも使えるようにするため)。"""
+        configurations = []
+        for cfg in descriptor.get("configurations") or []:
+            interfaces = []
+            for iface in cfg.get("interfaces") or []:
+                iface_number = iface.get("interfaceNumber", 0)
+                for alt in iface.get("alternates") or []:
+                    endpoints = [
+                        VirtualUsbEndpoint(
+                            number=ep.get("endpointNumber", 1),
+                            direction=ep.get("direction", "in"),
+                            transfer_type=ep.get("type") if ep.get("type") in _TRANSFER_TYPE_TO_BMATTRIBUTES else "bulk",
+                            max_packet_size=ep.get("packetSize") or 64,
+                        )
+                        for ep in (alt.get("endpoints") or [])
+                    ]
+                    interfaces.append(VirtualUsbInterface(
+                        number=iface_number,
+                        alternate=alt.get("alternateSetting", 0),
+                        interface_class=alt.get("interfaceClass", 0xFF),
+                        interface_subclass=alt.get("interfaceSubclass", 0x00),
+                        interface_protocol=alt.get("interfaceProtocol", 0x00),
+                        endpoints=endpoints,
+                        name=alt.get("interfaceName"),
+                    ))
+            configurations.append(VirtualUsbConfiguration(
+                value=cfg.get("configurationValue", 1),
+                interfaces=interfaces,
+                description=cfg.get("configurationName"),
+            ))
+        return cls(
+            vendor_id=descriptor["vendorId"],
+            product_id=descriptor["productId"],
+            configurations=configurations,
+            manufacturer=descriptor.get("manufacturerName"),
+            product=descriptor.get("productName"),
+            serial_number=descriptor.get("serialNumber"),
+            device_class=descriptor.get("deviceClass", 0),
+            device_subclass=descriptor.get("deviceSubclass", 0),
+            device_protocol=descriptor.get("deviceProtocol", 0),
+            usb_version=(
+                descriptor.get("usbVersionMajor") or 0,
+                descriptor.get("usbVersionMinor") or 0,
+                descriptor.get("usbVersionSubminor") or 0,
+            ),
+            device_version=(
+                descriptor.get("deviceVersionMajor") or 0,
+                descriptor.get("deviceVersionMinor") or 0,
+                descriptor.get("deviceVersionSubminor") or 0,
+            ),
+            on_control_transfer=on_control_transfer,
+            on_bulk_read=on_bulk_read,
+            on_bulk_write=on_bulk_write,
+        )
+
 
 def _version_to_bcd(version):
-    """バージョン表記(int, tuple, list, str)をBCD形式(例: 0x0200)の整数に変換する。"""
+    """バージョン表記(int, tuple, list, str, またはNone)をBCD形式(例: 0x0200)の
+    整数に変換する。Noneは意図的な「指定なし」として0x0000(=0.0.0)を返す。
+    🐛 バグ修正(v0.0.5b2): 元の実装はNone以外の解釈できない入力(数字でない部分を含む
+    文字列、boolean、その他未対応の型)を例外を出さずに黙って0扱いにしていた
+    ため、例えば usb_version="2.1.x"(タイプミス)を渡しても、それと気づかず
+    BCD 0x0000(=バージョン0.0.0)の仮想デバイスが出来上がってしまっていた
+    ——テスト・開発支援用のツールとしては、黙って誤った値を作るより早期に
+    ValueErrorで知らせる方が有用と判断し、ここで例外を出すよう改めた
+    (hardening.is_valid_usb_device_filter()が数値フィールドでbool型を
+    明示的に弾いているのと同じ理由・同じ流儀で、ここでもboolを明示的に
+    弾く — Pythonではbool is a subclass of intのため、素のisinstance(x, int)
+    だけではTrue/Falseまで「整数」として素通りしてしまう)。"""
+    if isinstance(version, bool):
+        raise ValueError(f"usb_version/device_version must not be a bool: {version!r}")
+    if version is None:
+        return 0x0000  # 明示的な「指定なし」の意図的な扱い(0.0.0)
     if isinstance(version, int):
         if version > 0xFF:
             return version & 0xFFFF
         return (version & 0xFF) << 8
     if isinstance(version, str):
-        parts = [int(p) for p in version.split(".") if p.isdigit()]
+        raw_parts = version.split(".")
+        if not raw_parts or any(not p.isdigit() for p in raw_parts):
+            raise ValueError(
+                f"usb_version/device_version string must be dot-separated non-negative "
+                f"integers (e.g. \"2.1.0\"), got {version!r}"
+            )
+        parts = [int(p) for p in raw_parts]
     elif isinstance(version, (tuple, list)):
         parts = [int(p) for p in version]
     else:
-        parts = [0]
+        raise ValueError(
+            f"usb_version/device_version must be an int, a dot-separated version string, "
+            f"or a tuple/list of integers, got {type(version).__name__}: {version!r}"
+        )
     major, minor, sub = (parts + [0, 0, 0])[:3]
     return ((major & 0xFF) << 8) | ((minor & 0xF) << 4) | (sub & 0xF)
 
