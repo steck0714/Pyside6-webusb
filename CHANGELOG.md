@@ -2,6 +2,137 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5.post6]
+
+Informally `v0.0.5b2` (source zip filename/GitHub release label); `0.0.5.post6` is the version
+string this release actually ships under everywhere (`_version.py`, `pyproject.toml`, sdist,
+wheel), continuing the `.post` line for the same PEP 440 ordering reason as every previous
+`.post` release on this project.
+
+### Fixed
+
+- **`FrameOriginTracker` no longer keeps trying to touch a destroyed `QWebEnginePage`.**
+  Observed on real hardware and logged in `checklog2.md` ("45. QWebEnginePage Lifetime
+  Observation"): after a page was destroyed, the tracker's periodic re-scan timer kept firing
+  every 2 seconds and kept hitting `libshiboken: Internal C++ object (...QWebEnginePage)
+  already deleted` — caught and ignored (so it never crashed), but with no way for the tracker
+  to actually learn the page was gone, it repeated indefinitely. The timer being parented to
+  the page doesn't fully protect against this: a delayed re-scan queued via `QTimer.singleShot`
+  from `navigationRequested` handling has no parent at all, so nothing guaranteed it wouldn't
+  fire after the page was gone. `FrameOriginTracker` now connects to the page's own `destroyed`
+  signal — which Qt guarantees fires for every `QObject`, however it's being torn down — and
+  stops the periodic timer and short-circuits any further re-scan the instant it fires (verified
+  the timer is still safely stoppable at that exact moment, empirically, before relying on it).
+  Also added an explicit `disconnect()` method for proactively tearing a tracker down while its
+  page is still alive (`checklog2.md`'s own test harness tried calling exactly this method
+  before it existed — "44. Cleanup Testing"). New tests:
+  `test_tracker_stops_reacting_after_page_is_destroyed` (uses `shiboken6.delete()` to
+  deterministically trigger real C++ destruction rather than relying on Python GC timing) and
+  `test_tracker_disconnect_stops_timer_and_further_rescans_while_page_still_alive`.
+- **`controlTransferIn/Out` with `recipient: "endpoint"` no longer wrongly blocks a legitimate
+  transfer to a currently-active, benign endpoint.** `0.0.5.post5` hardened this path to check
+  whether *any* alternate setting sharing the target endpoint address declares a protected
+  interface class (HID, etc.) — a real device can legally have alt 0 (benign, currently
+  selected after `claimInterface()`) and alt 1 (HID, not selected) both declaring the same
+  endpoint address, which is exactly the "alternate setting class confusion" shape this
+  project's own `VULNERABILITY_REPORT.md` documents. The `post5` check ran *before* determining
+  which alternate actually owns the endpoint in the device's current state, so it rejected the
+  legitimate alt-0 transfer just because the unrelated, unselected alt-1 happened to share the
+  address — reproduced directly against `post5`'s code before fixing. The check now first
+  determines the endpoint's current owner the same way `_endpoint_available_or_error()` already
+  does (prefer the alternate setting actually tracked as selected for that interface), and only
+  then checks whether *that* owner is protected; if no currently-selected alternate owns the
+  address at all, it falls back to flagging any protected candidate, preserving the original
+  defense-in-depth intent for the case where a page is fishing for a protected alternate's
+  endpoint by raw address without ever legitimately selecting it. Rewrote
+  `test_control_transfer_endpoint_recipient_blocks_protected_alternate` (which had encoded the
+  bug as expected behavior — it only ever tested the shared-address case and asserted it must
+  always be rejected) into
+  `test_control_transfer_endpoint_recipient_alt_aware_protected_class_handling`, covering both
+  directions explicitly. `security_audit/test_altsetting_class_confusion.py`'s existing
+  hidden-HID-endpoint test is unaffected (it already used a non-shared endpoint address, i.e.
+  the case this fix must continue to block) and still passes.
+- **`tests/test_virtual.py` can be run directly again (`python tests/test_virtual.py`).** Three
+  test functions added in `post5` (`test_virtual_version_to_bcd_formats` and two others) were
+  appended *after* the file's `if __name__ == "__main__":` block instead of before it, so
+  running the file as a script hit a `NameError` the moment it reached the first of them —
+  reproduced directly. `pytest`-based runs were unaffected (it discovers tests independently of
+  file order), which is presumably why this went unnoticed. Moved the block back to the end of
+  the file, its normal position, after every test definition.
+- **`VirtualUsbDevice(usb_version=..., device_version=...)` no longer silently produces a wrong
+  version for malformed input.** The string-parsing path silently dropped any dot-separated part
+  that wasn't a plain digit string (`version.split(".") if p.isdigit()`), so a typo like
+  `"2.1.x"` quietly became BCD `0x0000` (version "0.0.0") instead of raising — the kind of
+  mistake a developer using this for repeatable test fixtures would want to know about
+  immediately, not discover later as a confusingly-versioned virtual device. Also, per this
+  project's own established convention elsewhere (`hardening.is_valid_usb_device_filter()`
+  explicitly rejects `bool` for numeric filter fields, since `bool` is a subclass of `int` in
+  Python), passing a bare `True`/`False` is now explicitly rejected rather than silently
+  interpreted as `1`/`0`. `None` remains a deliberate, still-tested exception — it means
+  "unspecified" and continues to resolve to `0x0000`. New test:
+  `test_virtual_version_to_bcd_rejects_malformed_input`.
+- **`VirtualUsbConfiguration(description=...)` / `VirtualUsbInterface(name=...)` now actually
+  work.** Both parameters were accepted and stored, but never wired to anything — `iConfiguration`
+  and `iInterface` were hardcoded to `0` regardless, so `hardening.build_device_descriptor()`'s
+  string-descriptor resolution (the same code path `listDevices()`/`getDevices()` use) could
+  never find a name for either one; the strings a caller passed in were silently discarded. This
+  bug predates `post5` — it's been present in `virtual.py` since the module was introduced in
+  `0.0.5a3` and had gone unnoticed since neither existing test nor the module's own examples
+  happened to check the round-trip. `VirtualUsbDevice.__init__` now interns both strings into its
+  own string table (the same one manufacturer/product/serial already use) once it knows which
+  device its configurations and interfaces belong to. Caught while building this release's
+  `from_descriptor()` feature (below), whose round-trip test would otherwise have silently lost
+  every name. New test: `test_virtual_configuration_and_interface_names_are_actually_resolvable`.
+
+### Added
+
+- **`VirtualUsbDevice.from_descriptor()`: record a real device once, replay it without hardware
+  forever.** Builds a virtual device directly from a device descriptor dict in the exact shape
+  `hardening.build_device_descriptor()` produces — i.e. exactly what `listDevices()`/
+  `getDevices()` already hand to JS (vendor/product IDs, manufacturer/product/serial strings,
+  every configuration/interface/alternate-setting/endpoint). The natural workflow: plug the real
+  device in once, call `listDevices()` (or the debug namespace's
+  `listGrantedDevices()`/`bridgeInfo()`), save the JSON, and reuse it indefinitely afterward with
+  no hardware attached — for CI, for a bug repro that needs a specific real device's exact
+  descriptor shape, or just to avoid re-plugging a device every test run. Missing fields fall
+  back to harmless defaults, so a hand-written or partially-captured descriptor works too;
+  `on_bulk_read=`/`on_bulk_write=`/`on_control_transfer=` remain available on top for simulating
+  the device's actual protocol rather than the default zero-filled echo (descriptors don't carry
+  transfer contents, only shape). Verified with a full round trip: build a `VirtualUsbDevice` by
+  hand, turn it into a descriptor with `build_device_descriptor()`, reconstruct a new device with
+  `from_descriptor()`, turn *that* into a descriptor again, and assert the two descriptors are
+  byte-for-byte identical — including the configuration/interface name fix above, without which
+  this round trip would have silently dropped every name. New tests:
+  `test_virtual_device_from_descriptor_round_trips_through_build_device_descriptor` (also opens,
+  claims, and transfers on the replayed device through a real `WebUSBBridge` to confirm it isn't
+  just descriptor-deep) and `test_virtual_device_from_descriptor_tolerates_missing_optional_fields`.
+  See README "Record a real device once, replay it forever".
+
+### Tests
+
+- `tests/` + `security_audit/`: **211 passed, 2 skipped**, up from `0.0.5.post5`'s 205 passed/2
+  skipped (+2 `FrameOriginTracker` lifecycle tests, +1 rewritten control-transfer test replacing
+  the one that encoded the bug, +3 `virtual.py` tests: malformed-version rejection, name
+  resolution, and the `from_descriptor` round trip, +1 `from_descriptor` missing-fields test —
+  net +6 after the 1-for-1 rewrite). `node tests/test_polyfill.js` and
+  `tsc --strict --noEmit` against both `types/*.ts` files: unaffected, still pass. Also
+  confirmed every test file with a `python tests/test_X.py` direct-execution mode (`test_bridge`,
+  `test_hardening`, `test_frame_origin`, `test_virtual`, after the fix above) still runs cleanly
+  that way, not just under `pytest`.
+
+### Documentation
+
+- README `Status` line, `.d.ts` version-tracking header comment, and the three short
+  `README.{en,ja,zh}.md` overview pages updated from `v0.0.5a2`/`0.0.5.post3` (stale since before
+  even `post4`) to `v0.0.5b2`/`0.0.5.post6`; their `Experimental Alpha` label also updated to
+  `Experimental Beta` to match the `bN` tag now in use.
+- README: new "Record a real device once, replay it forever" subsection under virtual USB
+  devices, documenting `from_descriptor()`.
+
+### Project metadata
+
+- Version: `0.0.5.post6` (informally `v0.0.5b2`).
+
 ## [0.0.5.post5]
 
 Referred to informally as `v0.0.5b1` during development; `0.0.5.post5` is the version string
