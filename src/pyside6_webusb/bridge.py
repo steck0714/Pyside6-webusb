@@ -33,6 +33,7 @@ import time
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
 
 from ._version import __version__
+from .i18n import chooser_strings_for, resolve_locale
 
 # 🆕 v0.0.5a1: Python 3.15 (Doc/whatsnew/3.15.rst, Lib/base64.py,
 # Modules/binascii.c を実ソース確認済み)でbase64.b64decode()にcanonical
@@ -281,7 +282,7 @@ class WebUSBBridge(QObject):
 
     def __init__(self, browser_window=None, parent=None,
                  settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
-                 usb_backend=None):
+                 usb_backend=None, locale=None, chooser_strings=None):
         """
         browser_window: 任意。`.settings` 属性(QSettingsオブジェクト)を持つホストアプリの
             メインウィンドウ等を渡すと、許可の永続化にそれを使う。渡さない場合は
@@ -299,12 +300,26 @@ class WebUSBBridge(QObject):
             usb.core/usb.util と同じ最小限のインターフェースを満たす自作オブジェクトを
             渡しても良い(pyside6_webusb.virtual、またはsecurity_audit/_fixtures.pyの
             FakeUsbCore/FakeUsbUtilを参照)。
+        locale: 🆕 v0.0.5b3。デバイスチューザーダイアログの表示言語。
+            "en"/"ja"/"zh"(pyside6_webusb.i18n.SUPPORTED_LOCALES)、OSロケールへ
+            明示的に追従させる特別値 "auto"、または省略(None、既定は"ja"——理由は
+            i18n.DEFAULT_LOCALEのdocstring参照)のいずれか。認識できない値は
+            i18n.normalize_locale()により静かに既定値へフォールバックする
+            (ロケール文字列の間違いでチューザーダイアログ自体が出せなくなっては
+            本末転倒なため)。
+        chooser_strings: 🆕 v0.0.5b3。localeが選ぶ既定文言をさらに上書きしたい場合に
+            渡す。dict(一部のキーだけの部分上書きも可。例: {"trust_reminder": "..."} )、
+            または"en"/"ja"/"zh"/"auto"のいずれかの文字列(その言語の既定文言一式へ
+            切り替える、localeとは独立したショートカット)を受け付ける。
+            _resolve_chooser_strings()参照。
         """
         super().__init__(parent)
         self.browser_window = browser_window
         self._settings_organization = settings_organization
         self._settings_application = settings_application
         self._usb_backend_override = usb_backend
+        self._locale = locale
+        self._chooser_strings_override = chooser_strings
         self._open_devices = {}   # handle_id(int) -> {"device":.., "origin":.., "claimed_interfaces": set()}
         # 🧵 大容量bulk転送のチャンク分割(BULK_TRANSFER_CHUNK_SIZE)を行う際、
         #    サブチャンクの合間にQCoreApplication.processEvents()を挟んで
@@ -830,6 +845,33 @@ class WebUSBBridge(QObject):
         finally:
             self._chooser_active = False
 
+    def _resolve_chooser_strings(self):
+        """🆕 v0.0.5b3: __init__の locale=/chooser_strings= からデバイスチューザー
+        ダイアログ用の文言辞書を組み立てる。requestDeviceChooser()が実際にダイアログを
+        開く直前に毎回呼ぶ(コンストラクタ時点で1回だけ解決してキャッシュしない——
+        後述のとおりchooser_stringsは実行時に差し替えられても良い設計にしてあるため)。
+
+        解決順序:
+          1. self._locale (省略時は"ja"。i18n.resolve_locale()参照) から、まず
+             その言語の既定文言一式を取る。
+          2. self._chooser_strings_override が dict なら、そこだけ部分上書きする
+             (例: locale="ja"の既定文言のうち trust_reminder だけ差し替える、
+             といった使い方ができる)。
+          3. self._chooser_strings_override が文字列("en"/"ja"/"zh"/"auto")なら、
+             1.の結果を無視してその言語の既定文言一式に丸ごと切り替える
+             (localeとは別に、chooser_strings側だけでも言語切り替えができる
+             ショートカット。例えば「アプリ全体はauto検出のlocaleだが、
+             チューザーだけは常に英語で見せたい」といった需要に対応する)。
+          4. どちらも指定が無ければ1.の結果をそのまま返す。
+        """
+        strings = chooser_strings_for(self._locale)
+        override = self._chooser_strings_override
+        if isinstance(override, dict):
+            strings.update(override)
+        elif isinstance(override, str):
+            strings = chooser_strings_for(resolve_locale(override))
+        return strings
+
     def _resolve_chooser_parent_window(self):
         """デバイスチューザーダイアログの親ウィンドウを解決する。
 
@@ -953,6 +995,7 @@ class WebUSBBridge(QObject):
             try:
                 dlg = WebUsbDeviceChooserDialog(
                     devices_info, parent,
+                    strings=self._resolve_chooser_strings(),  # 🆕 v0.0.5b3: locale=/chooser_strings=
                     origin=origin,
                     refresh_callback=_refresh,
                 )

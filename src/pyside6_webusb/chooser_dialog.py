@@ -29,25 +29,28 @@ from PySide6.QtWidgets import (
     QWidget, QSizePolicy,
 )
 
+from .i18n import CHOOSER_STRINGS
+
 #: Default (English) UI strings. Pass a dict with the same keys to `WebUsbDeviceChooserDialog`
 #: (or to `install()` in polyfill.py, which forwards it) to localize.
 #: `heading` is a str.format() template with an `{origin}` placeholder.
-DEFAULT_STRINGS = {
-    "title": "Select a USB Device",
-    "heading": "{origin} wants to connect to a USB device",
-    "heading_no_origin": "This page wants to connect to a USB device",
-    "trust_reminder": "Only connect devices from sites you trust.",
-    "empty": "No compatible devices found.",
-    "cancel": "Cancel",
-    "connect": "Connect",
-}
+#: 🆕 v0.0.5b3: now sourced from i18n.CHOOSER_STRINGS["en"] (single source of truth shared
+#: with the new built-in ja/zh tables — see i18n.py) instead of being defined standalone here;
+#: the name/shape/import path (`from pyside6_webusb.chooser_dialog import DEFAULT_STRINGS`)
+#: is unchanged for backward compatibility.
+DEFAULT_STRINGS = CHOOSER_STRINGS["en"]
 
 
-def _device_name_and_detail(dev: dict):
+def _device_name_and_detail(dev: dict, strings=None):
     """(主表示名, 副次的な技術詳細)のタプルを返す。Chromeが製品名を主表示にし、
     VID/PID等はあくまで補助情報として扱っているのに合わせた表示階層。
     同一VID/PIDの機器が複数存在する場合でも識別できるよう、シリアル番号(serialNumber)が
-    あれば副次情報に含める。"""
+    あれば副次情報に含める。
+    🆕 v0.0.5b3: strings(呼び出し元の`self._strings`、i18n.chooser_strings_for()の
+    出力)を渡すと、"Unknown device"/"SN" もロケールに応じて訳語になる。省略時
+    (strings=None)は従来どおり英語のDEFAULT_STRINGSにフォールバックするので、この
+    関数を直接呼んでいた既存コードは無変更で動く。"""
+    s = strings if strings is not None else DEFAULT_STRINGS
     name = dev.get("productName") or dev.get("manufacturerName")
     vid, pid = dev.get("vendorId"), dev.get("productId")
     vid_pid = f"VID:{vid:04x} PID:{pid:04x}" if isinstance(vid, int) and isinstance(pid, int) else ""
@@ -56,10 +59,10 @@ def _device_name_and_detail(dev: dict):
     if vid_pid:
         details.append(vid_pid)
     if serial:
-        details.append(f"SN:{serial}")
+        details.append(f"{s.get('serial_label', 'SN')}:{serial}")
     detail_str = " · ".join(details)
     if not name:
-        return (detail_str or "Unknown device", "")
+        return (detail_str or s.get("unknown_device", "Unknown device"), "")
     return (name, detail_str)
 
 
@@ -68,9 +71,9 @@ class _DeviceRowWidget(QWidget):
     縦に並べる。プレーンテキストの1行表示よりも、実機を複数繋いだ状態での
     見分けやすさが上がる。"""
 
-    def __init__(self, dev: dict, parent=None):
+    def __init__(self, dev: dict, strings=None, parent=None):
         super().__init__(parent)
-        name, detail = _device_name_and_detail(dev)
+        name, detail = _device_name_and_detail(dev, strings)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
@@ -110,6 +113,12 @@ class WebUsbDeviceChooserDialog(QDialog):
         in the same shape as `devices`. If given, the dialog polls it periodically and live-
         updates the list (matching Chrome's chooser, which picks up newly-plugged-in devices
         without needing to be reopened) while preserving the current selection where possible.
+    strings: optional dict overriding some/all of DEFAULT_STRINGS's keys. Typically built with
+        `pyside6_webusb.i18n.chooser_strings_for(locale)` for one of the built-in "en"/"ja"/"zh"
+        locales (🆕 v0.0.5b3 -- see i18n.py) rather than written out by hand; any keys you don't
+        override fall back to DEFAULT_STRINGS (English). `WebUSBBridge`/`install()` resolve and
+        pass this automatically from their own `locale=`/`chooser_strings=` parameters -- most
+        callers won't construct this dialog directly at all.
     """
 
     REFRESH_INTERVAL_MS = 1500  # 他のホットプラグ監視(UsbHotplugWatcher)と揃えた間隔
@@ -204,7 +213,7 @@ class WebUsbDeviceChooserDialog(QDialog):
         if self._devices:
             for dev in self._devices:
                 item = QListWidgetItem()
-                row_widget = _DeviceRowWidget(dev)
+                row_widget = _DeviceRowWidget(dev, self._strings)
                 item.setSizeHint(row_widget.sizeHint())
                 self.device_list.addItem(item)
                 self.device_list.setItemWidget(item, row_widget)

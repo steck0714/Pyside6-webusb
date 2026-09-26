@@ -8,4 +8,4 @@ __init__.py は bridge.py を import するため、bridge.py 側が
 循環importになる。両者がこの独立した小さなモジュールから読む形にすることで
 それを避けている。"""
 
-__version__ = "0.0.5.post6"
+__version__ = "0.0.5.post7"

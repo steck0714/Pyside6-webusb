@@ -26,6 +26,7 @@ README中に散らばった説明とisAvailable()(JS/DevTools向け)しかなく
 import platform
 
 from ._version import __version__
+from .i18n import DEFAULT_LOCALE, diagnostics_text, resolve_locale
 
 
 def _pyside6_versions():
@@ -54,7 +55,7 @@ def _pyside6_versions():
     return pyside6_version, shiboken6_version, qt_runtime_version
 
 
-def _pyusb_backend_info():
+def _pyusb_backend_info(locale):
     """(pyusb_version, backend_name_or_None, problem_or_None, backend_note_or_None) を返す。
 
     pyusbが「importできる」ことと「実際にUSBデバイスへアクセスできる」ことは
@@ -82,7 +83,7 @@ def _pyusb_backend_info():
         import usb
         pyusb_version = getattr(usb, "__version__", None)
     except Exception as e:
-        return None, None, f"pyusb自体がimportできません('pip install pyusb'を確認してください): {e}", None
+        return None, None, diagnostics_text(locale, "pyusb_import_error", error=e), None
 
     backend_name = None
     try:
@@ -101,21 +102,10 @@ def _pyusb_backend_info():
 
     problem = None
     if backend_name is None:
-        problem = (
-            "OS側のlibusb共有ライブラリが見つかりません(pyusb自体は正しくimportできています)。"
-            "Linux: 'libusb-1.0-0' パッケージ / macOS: 'brew install libusb' / "
-            "Windows: libusbのDLLを配置、のいずれかが必要です。"
-        )
+        problem = diagnostics_text(locale, "pyusb_backend_missing")
     backend_note = None
     if backend_name == "libusb0":
-        backend_note = (
-            "現在のバックエンドはlibusb0です(pyusbがlibusb1を見つけられなかった場合の"
-            "フォールバック)。動作はしますが、Python 3.14以降でpyusb 1.3.1のlibusb0.py"
-            "バックエンドがctypes.Structureの_pack_/_fields_の組み合わせについて"
-            "DeprecationWarningを出すことを確認済みです(upstream pyusb側の課題。"
-            "security_report/VULNERABILITY_REPORT.mdの「Environment note」参照)。"
-            "可能であればOS側にlibusb1の共有ライブラリを導入してください。"
-        )
+        backend_note = diagnostics_text(locale, "pyusb_backend_note_libusb0")
     return pyusb_version, backend_name, problem, backend_note
 
 
@@ -131,7 +121,7 @@ def _rust_accel_status():
         return False, None
 
 
-def _qtwebengine_status():
+def _qtwebengine_status(locale):
     """(importable: bool | None, note_or_None) を返す。Noneは
     「PySide6自体が無いので判定不能(=既にpyside6_versionのNoneで報告済み)」。
 
@@ -163,16 +153,10 @@ def _qtwebengine_status():
         missing.append("QtWebEngineWidgets")
     if not missing:
         return True, None
-    return False, (
-        f"PySide6は見つかりましたが、{'/'.join(missing)} をimportできません。"
-        "PySide6のバージョンによっては、QtWebEngineがPySide6-Addonsとは別の"
-        "PySide6-WebEngineパッケージに分離されている場合があります"
-        "('pip install PySide6-WebEngine' を追加で試してください)。"
-        "あるいはPySide6-Addonsのインストール自体が不完全な可能性があります。"
-    )
+    return False, diagnostics_text(locale, "qtwebengine_missing", missing="/".join(missing))
 
 
-def _frame_origin_isolation_status():
+def _frame_origin_isolation_status(locale):
     """(available: bool | None, note: str) を返す。
 
     availableは「QWebEngineFrameクラスがこの環境のPySide6に存在するか」の
@@ -193,41 +177,37 @@ def _frame_origin_isolation_status():
     try:
         import PySide6.QtWebEngineCore as _qtwec
     except Exception:
-        return None, "PySide6/QtWebEngineCoreが利用できないため判定できません。"
+        return None, diagnostics_text(locale, "frame_isolation_unknown_note")
     if hasattr(_qtwec, "QWebEngineFrame"):
-        return True, (
-            "フレーム単位のオリジン分離(cross-origin iframeのなりすまし対策)を"
-            "有効化できます(実際に有効になるかはpolyfill.install()側の配線にも依存します)。"
-        )
-    return False, (
-        "この環境のPySide6にはQWebEngineFrameがありません(実機確認: 6.7.0以前には無く、"
-        "6.8.0で追加されました)。frame_origin.pyによるフレーム単位のオリジン分離は"
-        "有効化できず、page.url()を見る後方互換パスにフォールバックします——"
-        "cross-origin iframeによるなりすまし対策としては6.8以降より弱くなります。"
-        "この保護が必要な場合はPySide6>=6.8への更新を検討してください。"
-    )
+        return True, diagnostics_text(locale, "frame_isolation_available_note")
+    return False, diagnostics_text(locale, "frame_isolation_unavailable_note")
 
 
-def environment_report() -> dict:
+def environment_report(locale=None) -> dict:
     """現在の実行環境の診断結果を辞書として返す。JSON化可能なプリミティブ型
     (str/bool/None/list)のみで構成する。
 
     "problems" は今すぐ対処が要る項目のみ(PySide6が無い/libusbバックエンドが
     無い、等)。Rustアクセラレーション未ビルドはproblemsに含めない
-    ——それ自体は正常な状態(フォールバックが正しく機能している)であるため。"""
+    ——それ自体は正常な状態(フォールバックが正しく機能している)であるため。
+
+    locale: 🆕 v0.0.5b3。"problems"/"*_note" に入る文言の言語。"en"/"ja"/"zh"
+        (pyside6_webusb.i18n.SUPPORTED_LOCALES)、OSロケールへ明示的に追従させる
+        特別値"auto"、または省略(None、既定は"ja"——0.0.5.post6までの既存の
+        出力と一言一句同じにするための固定値。i18n.DEFAULT_LOCALEのdocstring
+        参照)。戻り値の"locale"キーに、実際に解決された値("en"/"ja"/"zh"の
+        いずれか)を記録する——format_environment_report()がreportだけを渡された
+        時にどの言語で描画すべきかを、この値から取得する。"""
+    loc = resolve_locale(locale)
     pyside6_version, shiboken6_version, qt_runtime_version = _pyside6_versions()
-    pyusb_version, pyusb_backend, pyusb_problem, pyusb_backend_note = _pyusb_backend_info()
+    pyusb_version, pyusb_backend, pyusb_problem, pyusb_backend_note = _pyusb_backend_info(loc)
     rust_accelerated, rust_accel_version = _rust_accel_status()
-    qtwebengine_importable, qtwebengine_note = _qtwebengine_status()
-    frame_isolation_available, frame_isolation_note = _frame_origin_isolation_status()
+    qtwebengine_importable, qtwebengine_note = _qtwebengine_status(loc)
+    frame_isolation_available, frame_isolation_note = _frame_origin_isolation_status(loc)
 
     problems = []
     if pyside6_version is None:
-        problems.append(
-            "PySide6がインストールされていません。"
-            "'pip install pyside6-webusb' の依存関係(PySide6-Essentials/PySide6-Addons)"
-            "が正しく解決されているか確認してください。"
-        )
+        problems.append(diagnostics_text(loc, "pyside6_missing"))
     if qtwebengine_importable is False:
         problems.append(qtwebengine_note)
     if pyusb_problem is not None:
@@ -235,6 +215,7 @@ def environment_report() -> dict:
 
     return {
         "pyside6_webusb_version": __version__,
+        "locale": loc,
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
         "platform": platform.platform(),
@@ -255,54 +236,64 @@ def environment_report() -> dict:
     }
 
 
-def format_environment_report(report: dict = None) -> str:
+def format_environment_report(report: dict = None, locale=None) -> str:
     """environment_report()の結果を、人間が読むためのテキストレポートに整形する。
-    reportを省略した場合はその場でenvironment_report()を呼ぶ。"""
-    if report is None:
-        report = environment_report()
+    reportを省略した場合はその場でenvironment_report(locale=locale)を呼ぶ。
 
-    pyside6_line = f"PySide6: {report['pyside6_version'] or '見つかりません'}"
+    locale: 🆕 v0.0.5b3。reportを渡した場合、この見出し等のラベル文言は
+        report["locale"](=そのreportが実際に生成された時の言語)を優先する——
+        "problems"/"*_note"の中身は生成時点で既にその言語で焼き込み済みなので、
+        ここだけ別言語のlocaleを指定すると見出しと本文の言語がちぐはぐになって
+        しまうため、意図的にreport側を優先する。この引数が主に効くのは
+        reportを省略した(=ここでenvironment_report()を呼ぶ)場合と、
+        "locale"キーを持たない古い形のreport辞書を渡された場合のみ。"""
+    if report is None:
+        report = environment_report(locale=locale)
+    loc = report.get("locale") or resolve_locale(locale)
+
+    not_found = diagnostics_text(loc, "report_not_found")
+    pyside6_line = f"PySide6: {report['pyside6_version'] or not_found}"
     if report["shiboken6_version"]:
         pyside6_line += f" (shiboken6 {report['shiboken6_version']})"
 
-    pyusb_line = f"pyusb: {report['pyusb_version'] or '見つかりません'}"
-    pyusb_line += f" (backend: {report['pyusb_backend'] or '見つかりません'})"
+    pyusb_line = f"pyusb: {report['pyusb_version'] or not_found}"
+    pyusb_line += f" (backend: {report['pyusb_backend'] or not_found})"
 
     if report["rust_accelerated"]:
-        rust_line = "Rust acceleration: 有効"
+        rust_line = f"Rust acceleration: {diagnostics_text(loc, 'report_rust_enabled')}"
         if report["rust_accel_version"]:
             rust_line += f" ({report['rust_accel_version']})"
     else:
-        rust_line = "Rust acceleration: 無効(標準のPython実装にフォールバック中。動作には支障ありません)"
+        rust_line = f"Rust acceleration: {diagnostics_text(loc, 'report_rust_disabled')}"
 
     # 🆕 v0.0.5a1
     if report.get("frame_origin_isolation_available") is True:
-        frame_line = "Frame-level origin isolation: 利用可能(PySide6にQWebEngineFrameあり)"
+        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_available')}"
     elif report.get("frame_origin_isolation_available") is False:
-        frame_line = "Frame-level origin isolation: 利用不可(PySide6<6.8。ページURLベースの後方互換パスにフォールバック中)"
+        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_unavailable')}"
     else:
-        frame_line = "Frame-level origin isolation: 不明(PySide6/QtWebEngineCoreが利用できません)"
+        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_unknown')}"
 
     lines = [
         f"pyside6-webusb {report['pyside6_webusb_version']}",
         f"Python: {report['python_version']} ({report['python_implementation']}) on {report['platform']}",
         pyside6_line,
-        f"Qt runtime: {report['qt_runtime_version'] or '不明'}",
+        f"Qt runtime: {report['qt_runtime_version'] or diagnostics_text(loc, 'report_qt_runtime_unknown')}",
         pyusb_line,
         rust_line,
         frame_line,
         "",
     ]
     if report["problems"]:
-        lines.append("検出された問題:")
+        lines.append(diagnostics_text(loc, "report_problems_header"))
         for p in report["problems"]:
             lines.append(f"  - {p}")
     else:
-        lines.append("問題は検出されませんでした。")
+        lines.append(diagnostics_text(loc, "report_no_problems"))
     if report.get("frame_origin_isolation_available") is False and report.get("frame_origin_isolation_note"):
         lines.append("")
-        lines.append(f"参考: {report['frame_origin_isolation_note']}")
+        lines.append(diagnostics_text(loc, "report_reference_prefix", note=report["frame_origin_isolation_note"]))
     if report.get("pyusb_backend_note"):
         lines.append("")
-        lines.append(f"参考: {report['pyusb_backend_note']}")
+        lines.append(diagnostics_text(loc, "report_reference_prefix", note=report["pyusb_backend_note"]))
     return "\n".join(lines)

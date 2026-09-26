@@ -20,6 +20,14 @@ Quick start
 See README.md for the security model, spec-compliance notes, and a full example app
 (examples/minimal_browser.py).
 
+Multi-language chooser dialog (🆕 v0.0.5b3)
+--------------------------------------------
+    install(view.page(), locale="en")   # or "ja" / "zh" / "auto" (follow the OS locale)
+
+See pyside6_webusb.i18n for the full list of built-in locales and environment_report()/
+format_environment_report()'s own `locale=` parameter for localizing the CLI/diagnostic
+report the same way.
+
 Troubleshooting your environment
 ---------------------------------
     python -m pyside6_webusb          # prints a PySide6/pyusb/libusb diagnostic report
@@ -32,6 +40,7 @@ entry) -- the diagnostic has to survive the exact condition it's meant to diagno
 
 from .diagnostics import environment_report, format_environment_report
 from ._version import __version__
+from .i18n import SUPPORTED_LOCALES, detect_locale
 from .virtual import (
     VirtualUsbConfiguration,
     VirtualUsbDevice,
@@ -100,4 +109,6 @@ __all__ = [
     "VirtualUsbInterface",
     "VirtualUsbEndpoint",
     "make_virtual_usb_backend",
+    "SUPPORTED_LOCALES",
+    "detect_locale",
 ]

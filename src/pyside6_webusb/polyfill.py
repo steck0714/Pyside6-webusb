@@ -54,7 +54,7 @@ def _load_qwebchannel_js():
 
 def install(page, browser_window=None,
             settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
-            qwebchannel_js=None):
+            qwebchannel_js=None, locale=None, chooser_strings=None, extra_guard_js=None):
     """
     唯一の公開エントリポイント。QWebEnginePage に navigator.usb ポリフィルを装着する。
 
@@ -67,6 +67,25 @@ def install(page, browser_window=None,
         QSettingsの組織名・アプリ名(省略時は"pyside6-webusb"/"WebUSBBridge")。
     qwebchannel_js: 通常は不要(Qtの内蔵リソースから自動取得する)。取得に失敗する
         環境向けに、qwebchannel.jsの中身を直接渡すための上書き用パラメータ。
+    locale / chooser_strings: 🆕 v0.0.5b3。デバイスチューザーダイアログの表示言語。
+        そのまま WebUSBBridge(locale=, chooser_strings=) へ転送する
+        (詳細はbridge.pyのWebUSBBridge.__init__docstring参照)。
+    extra_guard_js: 🆕 v0.0.5b3。任意のJavaScriptソース文字列。指定すると、
+        WEBUSB_POLYFILL_JSより前に実行される専用の QWebEngineScript として追加で
+        注入される(DocumentCreation/MainWorld、他の注入スクリプトと同じ
+        setRunsOnSubFramesの扱い)。ここで `window.__pysideWebUSBExtraGuard` を
+        `function({origin, filters, exclusionFilters}) { return true/false; }`
+        の形で定義しておくと、navigator.usb.requestDevice() は実際のチューザー
+        ダイアログを開く(=ブリッジへ到達する)前に必ずこの関数を呼び、
+        戻り値が厳密に false の場合はSecurityErrorで即座に拒否する
+        (WEBUSB_POLYFILL_JS内、`window.__pysideWebUSBExtraGuard` を参照している
+        箇所のコメント参照)。ドメイン固有の追加ガード条件——例えば「特定の
+        イントラネットオリジンでだけ有効化する」「特定のvendorId以外は常に
+        拒否する」等——をホストアプリ側のJSだけで完結させて差し込むための
+        フックであり、この関数が無い/trueを返す場合はこのパッケージ自身の
+        通常の検証(セキュアコンテキスト・filters妥当性・user gesture等)を
+        何も変えない、純粋な追加の絞り込みにしかならない設計(このフック単体で
+        既存のチェックを緩めることはできない)。
 
     戻り値: 生成した WebUSBBridge インスタンス(追加の配線やデバッグに使える)。
         QWebChannel自体が使えない環境では例外を送出せず None を返す
@@ -95,7 +114,8 @@ def install(page, browser_window=None,
 
         bridge = WebUSBBridge(browser_window=browser_window, parent=page,
                                settings_organization=settings_organization,
-                               settings_application=settings_application)
+                               settings_application=settings_application,
+                               locale=locale, chooser_strings=chooser_strings)
         channel = QWebChannel(page)
         channel.registerObject("pyUsbBridge", bridge)
         page.setWebChannel(channel)
@@ -130,10 +150,19 @@ def install(page, browser_window=None,
         print(f"[pyside6-webusb] install: qwebchannel.js の読み込みに失敗しました: {e}")
         return bridge  # ブリッジ自体は生成済みだが、スクリプト注入はできていない
 
-    for name, code in (
+    # 🆕 v0.0.5b3: extra_guard_jsが指定された場合のみ、専用スクリプトとして
+    # PySide6WebUSBPolyfillより前(qwebchannel.jsより後)に追加する。指定が無い
+    # (None/空文字)場合は従来どおり2本のまま——test_install.pyの既存アサーション
+    # (`len(page._scripts.inserted) == 2`)が示すとおり、この分岐自体がこれまでの
+    # install()の挙動を一切変えないことを保証する。
+    _script_specs = [
         ("PySide6WebUSBQWebChannelLib", qwc_js),
-        ("PySide6WebUSBPolyfill", WEBUSB_POLYFILL_JS),
-    ):
+    ]
+    if extra_guard_js:
+        _script_specs.append(("PySide6WebUSBExtraGuard", extra_guard_js))
+    _script_specs.append(("PySide6WebUSBPolyfill", WEBUSB_POLYFILL_JS))
+
+    for name, code in _script_specs:
         try:
             script = QWebEngineScript()
             script.setName(name)
@@ -723,6 +752,30 @@ WEBUSB_POLYFILL_JS = r"""
                 if (!isValidUsbDeviceFilter(allFilters[fi])) {
                     return Promise.reject(new TypeError(
                         "Failed to execute 'requestDevice' on 'USB': the provided filter value is invalid."));
+                }
+            }
+            // 🆕 v0.0.5b3: install()のextra_guard_js=フック。ホストアプリが
+            //    window.__pysideWebUSBExtraGuard をfunctionとして定義していれば、
+            //    チューザーダイアログを開く(=ブリッジへ到達する)前にここで必ず
+            //    呼び出し、ドメイン固有の追加ガード条件を課せるようにする。
+            //    厳密に false を返した場合のみ拒否する(true/undefined/例外は
+            //    「このフックでは追加の制限をしない」の意味——このフック単体で
+            //    既存の検証を緩めることはできない、純粋な追加の絞り込みとして
+            //    設計してある)。ガード自身が例外を投げた場合は安全側(拒否)に倒す。
+            if (typeof window.__pysideWebUSBExtraGuard === 'function') {
+                var _guardResult;
+                try {
+                    _guardResult = window.__pysideWebUSBExtraGuard({
+                        origin: (typeof window.location !== 'undefined' && window.location) ? window.location.origin : '',
+                        filters: _options.filters,
+                        exclusionFilters: exclusionFilters,
+                    });
+                } catch (eGuard) {
+                    _guardResult = false;
+                }
+                if (_guardResult === false) {
+                    return Promise.reject(new DOMException(
+                        "Rejected by this page's configured WebUSB guard (extra_guard_js).", 'SecurityError'));
                 }
             }
             // 🛡️ 本物のWebUSB同様、信頼できるユーザー操作(クリック等)のハンドラ内から

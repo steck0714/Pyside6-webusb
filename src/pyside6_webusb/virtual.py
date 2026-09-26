@@ -370,12 +370,31 @@ def _version_to_bcd(version):
     (hardening.is_valid_usb_device_filter()が数値フィールドでbool型を
     明示的に弾いているのと同じ理由・同じ流儀で、ここでもboolを明示的に
     弾く — Pythonではbool is a subclass of intのため、素のisinstance(x, int)
-    だけではTrue/Falseまで「整数」として素通りしてしまう)。"""
+    だけではTrue/Falseまで「整数」として素通りしてしまう)。
+    🐛 バグ修正(v0.0.5b3): v0.0.5b2の上記修正は文字列("2.1.x"等)・bool・
+    未対応の型は正しく拒否するようになったが、**負の整数**(int版・
+    tuple/list版どちらの経路も)は素通りしたまま残っていた。Pythonの`&`は
+    無限精度2の補数として振る舞うため、例えば `_version_to_bcd(-1)` は
+    `(-1 & 0xFF) << 8` = `0xFF00`(="255.0")という、一見もっともらしいが
+    実際には全く意図しないバージョンを黙って作ってしまう
+    (`_version_to_bcd((2, -1, 0))` のようにtuple内の1要素だけが負の場合も同様に
+    `minor & 0xF` が静かに0xFへ化ける)。文字列/bool/未対応型は例外を送出する
+    のに負の整数だけ素通りするのは、この関数自身が掲げる「黙って誤った値を
+    作るより早期に知らせる」という方針と矛盾しており、タイプミス
+    (例: 意図した `(2, 1, 0)` を `(2, -1, 0)` と打ち間違えた)に気づけないまま
+    誤ったバージョンの仮想デバイスが出来上がる、修正前の文字列バグと全く同じ
+    形の問題である。int版・tuple/list版の両方に「負の値が1つでもあれば
+    ValueError」というチェックを追加した。新規テスト:
+    test_virtual_version_to_bcd_rejects_negative_integers。"""
     if isinstance(version, bool):
         raise ValueError(f"usb_version/device_version must not be a bool: {version!r}")
     if version is None:
         return 0x0000  # 明示的な「指定なし」の意図的な扱い(0.0.0)
     if isinstance(version, int):
+        if version < 0:
+            raise ValueError(
+                f"usb_version/device_version must not be negative, got {version!r}"
+            )
         if version > 0xFF:
             return version & 0xFFFF
         return (version & 0xFF) << 8
@@ -389,6 +408,10 @@ def _version_to_bcd(version):
         parts = [int(p) for p in raw_parts]
     elif isinstance(version, (tuple, list)):
         parts = [int(p) for p in version]
+        if any(p < 0 for p in parts):
+            raise ValueError(
+                f"usb_version/device_version components must not be negative, got {version!r}"
+            )
     else:
         raise ValueError(
             f"usb_version/device_version must be an int, a dot-separated version string, "
