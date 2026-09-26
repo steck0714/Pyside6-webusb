@@ -192,6 +192,63 @@ async function main() {
     }
     console.log('requestDevice with invalid filter -> TypeError: OK');
 
+    // 🆕 v0.0.5b3: install()のextra_guard_js=フック。window.__pysideWebUSBExtraGuardが
+    // 定義されている場合、requestDevice()はチューザー(=ブリッジのrequestDeviceChooser)へ
+    // 到達する前に必ずこれを呼び、戻り値が厳密にfalseの場合はSecurityErrorで即座に拒否する
+    // ことを確認する。
+    window.location = { origin: 'https://guarded.example' };
+    {
+        // (a) 厳密にfalseを返すガード -> SecurityErrorで拒否され、ブリッジには一切到達しない。
+        fakeBridgeCalls.length = 0;
+        window.__pysideWebUSBExtraGuard = function () { return false; };
+        try {
+            await navigator.usb.requestDevice({ filters: [{}] });
+            assert.fail('extra_guard_js hook returning false should reject requestDevice()');
+        } catch (e) {
+            assert.strictEqual(e.name, 'SecurityError', 'false を返すガードによる拒否は SecurityError のはず');
+        }
+        assert.strictEqual(fakeBridgeCalls.filter(c => c[0] === 'requestDeviceChooser').length, 0,
+            'ガードに拒否された場合、requestDeviceChooser はブリッジへ一切届かないはず');
+
+        // (b) ガードが呼ばれた際に受け取る引数の形({origin, filters, exclusionFilters})を確認する。
+        let seenArg = null;
+        window.__pysideWebUSBExtraGuard = function (arg) { seenArg = arg; return true; };
+        await navigator.usb.requestDevice({
+            filters: [{ vendorId: 0x2341 }],
+            exclusionFilters: [{ vendorId: 0x9999 }],
+        });
+        assert.strictEqual(seenArg.origin, 'https://guarded.example');
+        assert.deepStrictEqual(seenArg.filters, [{ vendorId: 0x2341 }]);
+        assert.deepStrictEqual(seenArg.exclusionFilters, [{ vendorId: 0x9999 }]);
+
+        // (c) true/undefinedを返す(=何も追加制限しない)場合は、従来どおりブリッジまで届く。
+        fakeBridgeCalls.length = 0;
+        window.__pysideWebUSBExtraGuard = function () { return true; };
+        await navigator.usb.requestDevice({ filters: [{}] });
+        assert.strictEqual(fakeBridgeCalls.filter(c => c[0] === 'requestDeviceChooser').length, 1);
+        fakeBridgeCalls.length = 0;
+        window.__pysideWebUSBExtraGuard = function () { /* undefinedを返す */ };
+        await navigator.usb.requestDevice({ filters: [{}] });
+        assert.strictEqual(fakeBridgeCalls.filter(c => c[0] === 'requestDeviceChooser').length, 1,
+            'undefinedを返すガードは制限として扱われない(=trueと同様に許可)はず');
+
+        // (d) ガード自身が例外を投げた場合は安全側(拒否)に倒す。
+        fakeBridgeCalls.length = 0;
+        window.__pysideWebUSBExtraGuard = function () { throw new Error('boom'); };
+        try {
+            await navigator.usb.requestDevice({ filters: [{}] });
+            assert.fail('a throwing guard should reject requestDevice(), fail-safe');
+        } catch (e) {
+            assert.strictEqual(e.name, 'SecurityError');
+        }
+        assert.strictEqual(fakeBridgeCalls.filter(c => c[0] === 'requestDeviceChooser').length, 0);
+    }
+    // 後続のテストに影響しないよう、必ず元の(未定義の)状態へ戻す。
+    delete window.__pysideWebUSBExtraGuard;
+    delete window.location;
+    fakeBridgeCalls.length = 0;
+    console.log('requestDevice honors window.__pysideWebUSBExtraGuard (extra_guard_js hook): OK');
+
     // 🛡️ filters/exclusionFiltersがブリッジへそのまま(構造を保って)渡っているか。
     // 実際の「このデバイスがフィルタに一致するか」の判定はハードウェア記述子を
     // 扱うPython側(webusb_hardening.py: device_matches_usb_filter等、既存のtest_webusb_hardening.py

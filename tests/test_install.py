@@ -155,6 +155,51 @@ def test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimpor
     print("test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable: OK")
 
 
+def test_install_injects_extra_guard_js_before_the_polyfill_when_given():
+    """🆕 v0.0.5b3: extra_guard_js=を渡すと、qwebchannel.jsとPySide6WebUSBPolyfillの
+    間に3本目のスクリプトとして注入されること、その内容・注入ポイント・World・
+    runsOnSubFramesの扱いが他の2本と同じであることを確認する。渡さない場合
+    (=このファイルの他のテストすべて)は従来どおり2本のままであることは
+    既存のtest_install_injects_exactly_two_scripts_with_correct_injection_point_and_world/
+    test_install_does_not_run_scripts_on_subframesが引き続き保証する。"""
+    from PySide6.QtWebEngineCore import QWebEngineScript
+    _make_app()
+    page = FakePage()
+    guard_src = "window.__pysideWebUSBExtraGuard = function(req) { return req.origin === 'https://allowed.example'; };"
+    install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+            extra_guard_js=guard_src)
+    names = [s.name() for s in page._scripts.inserted]
+    assert names == ["PySide6WebUSBQWebChannelLib", "PySide6WebUSBExtraGuard", "PySide6WebUSBPolyfill"], names
+    guard_script = page._scripts.inserted[1]
+    assert guard_script.sourceCode() == guard_src
+    assert guard_script.injectionPoint() == QWebEngineScript.InjectionPoint.DocumentCreation
+    assert guard_script.worldId() == QWebEngineScript.ScriptWorldId.MainWorld
+    # runsOnSubFramesは他の2本と同じ値(bridge._frame_trackerの配線可否)に揃っているはず。
+    assert guard_script.runsOnSubFrames() == page._scripts.inserted[0].runsOnSubFrames()
+    assert guard_script.runsOnSubFrames() == page._scripts.inserted[2].runsOnSubFrames()
+    print("test_install_injects_extra_guard_js_before_the_polyfill_when_given: OK")
+
+
+def test_install_forwards_locale_and_chooser_strings_to_the_bridge():
+    """🆕 v0.0.5b3: install()のlocale=/chooser_strings=がWebUSBBridgeまで届き、
+    実際にチューザー文言の解決へ反映されることを確認する(配線の確認であり、
+    文言の中身自体はtest_i18n.py/test_chooser_dialog.pyが担う)。"""
+    _make_app()
+    page = FakePage()
+    bridge = install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+                      locale="zh")
+    assert bridge is not None
+    assert bridge._resolve_chooser_strings()["cancel"] == "取消"
+
+    page2 = FakePage(url="https://b.example/")
+    bridge2 = install(page2, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+                       chooser_strings={"cancel": "NOPE"})
+    assert bridge2._resolve_chooser_strings()["cancel"] == "NOPE"
+    # locale省略時の既定(日本語)から、cancel以外は変わっていないことも確認する。
+    assert bridge2._resolve_chooser_strings()["connect"] == "接続"
+    print("test_install_forwards_locale_and_chooser_strings_to_the_bridge: OK")
+
+
 if __name__ == "__main__":
     class _FakeMonkeypatch:
         """pytestなしでも走らせられるよう、monkeypatch.setitem相当を素朴に実装したもの
@@ -181,4 +226,6 @@ if __name__ == "__main__":
     test_install_is_scoped_to_the_pages_own_origin_not_a_shared_default()
     test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable(mp)
     mp.undo()
+    test_install_injects_extra_guard_js_before_the_polyfill_when_given()
+    test_install_forwards_locale_and_chooser_strings_to_the_bridge()
     print("ALL INSTALL TESTS PASSED")

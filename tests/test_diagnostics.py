@@ -28,6 +28,49 @@ def test_environment_report_reflects_the_running_interpreter_and_is_clean():
     assert report["python_version"] == platform.python_version()
     assert report["python_implementation"] == platform.python_implementation()
 
+
+def test_environment_report_locale_defaults_to_japanese_for_backward_compatibility():
+    """🆕 v0.0.5b3: locale=を省略した既存の呼び出しの出力が、0.0.5.post6までの
+    日本語決め打ちの出力から一切変わっていないことを確認する回帰テスト。"""
+    report = environment_report()
+    assert report["locale"] == "ja"
+    text = format_environment_report(report)
+    assert "問題は検出されませんでした。" in text or "検出された問題:" in text
+
+
+def test_environment_report_locale_en_and_zh_translate_the_rendered_text():
+    """🆕 v0.0.5b3: locale="en"/"zh" を明示すると、format_environment_report()の
+    出力(見出し・注記)がその言語になることを確認する。技術的なフィールド名
+    ("PySide6:"、"pyusb:"等)は既存の設計どおり全ロケール共通で英語のまま。"""
+    report_en = environment_report(locale="en")
+    assert report_en["locale"] == "en"
+    text_en = format_environment_report(report_en)
+    assert ("Problems detected:" in text_en) or ("No problems detected." in text_en)
+    assert "PySide6:" in text_en  # フィールド名は常に英語
+
+    report_zh = environment_report(locale="zh")
+    assert report_zh["locale"] == "zh"
+    text_zh = format_environment_report(report_zh)
+    assert ("检测到的问题:" in text_zh) or ("未检测到问题。" in text_zh)
+
+
+def test_format_environment_report_uses_the_reports_own_locale_by_default():
+    """🆕 v0.0.5b3: reportを渡した場合、format_environment_report()側でlocale=を
+    改めて指定しなくても、そのreport自身が生成された時のロケール(report["locale"])
+    で描画されることを確認する(見出しと本文の言語がちぐはぐにならないための設計。
+    diagnostics.format_environment_report()のdocstring参照)。"""
+    report_zh = environment_report(locale="zh")
+    # 明示的にlocale=を渡さなくても、report["locale"]=="zh"が優先されるはず。
+    text = format_environment_report(report_zh)
+    assert ("检测到的问题:" in text) or ("未检测到问题。" in text)
+
+
+def test_environment_report_unknown_locale_falls_back_silently():
+    """未知のロケール文字列を渡しても例外にならず、既定ロケールへフォール
+    バックすることを確認する(i18n.normalize_localeの契約どおり)。"""
+    report = environment_report(locale="not-a-real-locale")
+    assert report["locale"] == "ja"
+
     import PySide6
     import shiboken6
     assert report["pyside6_version"] == PySide6.__version__
@@ -210,7 +253,10 @@ def test_format_environment_report_defaults_to_calling_environment_report():
 def test_main_returns_zero_when_clean_and_nonzero_when_problems(monkeypatch, capsys):
     import pyside6_webusb.__main__ as main_mod
 
-    monkeypatch.setattr(main_mod, "environment_report", lambda: {
+    # 🆕 v0.0.5b3: main()は常にenvironment_report(locale=lang)というキーワード引数
+    # 付きの呼び方をする(--lang省略時はlang=Noneで、これはenvironment_report()の
+    # 引数無し呼び出しと完全に同義)。差し替え用のlambdaも同じ形で受け取れる必要がある。
+    monkeypatch.setattr(main_mod, "environment_report", lambda locale=None: {
         "pyside6_webusb_version": "0.0.5a0", "python_version": "3.14.7",
         "python_implementation": "CPython", "platform": "Linux-test",
         "pyside6_version": "6.11.2", "shiboken6_version": "6.11.2", "qt_runtime_version": "6.11.2",
@@ -226,7 +272,7 @@ def test_main_returns_zero_when_clean_and_nonzero_when_problems(monkeypatch, cap
     assert main_mod.main(argv=[]) == 0
     assert "問題は検出されませんでした" in capsys.readouterr().out
 
-    monkeypatch.setattr(main_mod, "environment_report", lambda: {
+    monkeypatch.setattr(main_mod, "environment_report", lambda locale=None: {
         "pyside6_webusb_version": "0.0.5a0", "python_version": "3.14.7",
         "python_implementation": "CPython", "platform": "Linux-test",
         "pyside6_version": None, "shiboken6_version": None, "qt_runtime_version": None,
@@ -256,7 +302,7 @@ def test_main_json_flag_prints_the_raw_report_as_json_with_the_same_exit_code(mo
         "frame_origin_isolation_available": True, "frame_origin_isolation_note": "...",
         "problems": ["PySide6がインストールされていません"],
     }
-    monkeypatch.setattr(main_mod, "environment_report", lambda: fake_report)
+    monkeypatch.setattr(main_mod, "environment_report", lambda locale=None: fake_report)
 
     assert main_mod.main(argv=["--json"]) == 1
     out = capsys.readouterr().out

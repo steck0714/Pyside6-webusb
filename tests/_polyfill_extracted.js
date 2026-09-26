@@ -571,6 +571,30 @@
                         "Failed to execute 'requestDevice' on 'USB': the provided filter value is invalid."));
                 }
             }
+            // 🆕 v0.0.5b3: install()のextra_guard_js=フック。ホストアプリが
+            //    window.__pysideWebUSBExtraGuard をfunctionとして定義していれば、
+            //    チューザーダイアログを開く(=ブリッジへ到達する)前にここで必ず
+            //    呼び出し、ドメイン固有の追加ガード条件を課せるようにする。
+            //    厳密に false を返した場合のみ拒否する(true/undefined/例外は
+            //    「このフックでは追加の制限をしない」の意味——このフック単体で
+            //    既存の検証を緩めることはできない、純粋な追加の絞り込みとして
+            //    設計してある)。ガード自身が例外を投げた場合は安全側(拒否)に倒す。
+            if (typeof window.__pysideWebUSBExtraGuard === 'function') {
+                var _guardResult;
+                try {
+                    _guardResult = window.__pysideWebUSBExtraGuard({
+                        origin: (typeof window.location !== 'undefined' && window.location) ? window.location.origin : '',
+                        filters: _options.filters,
+                        exclusionFilters: exclusionFilters,
+                    });
+                } catch (eGuard) {
+                    _guardResult = false;
+                }
+                if (_guardResult === false) {
+                    return Promise.reject(new DOMException(
+                        "Rejected by this page's configured WebUSB guard (extra_guard_js).", 'SecurityError'));
+                }
+            }
             // 🛡️ 本物のWebUSB同様、信頼できるユーザー操作(クリック等)のハンドラ内から
             //    呼ばれた場合のみ受け付ける。navigator.userActivationが無い古い/簡易な
             //    エンジンでは判定できないため、その場合はチェックをスキップする

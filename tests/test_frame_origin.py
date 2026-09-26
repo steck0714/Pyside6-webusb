@@ -219,8 +219,17 @@ def test_rescan_survives_exceptions_from_a_misbehaving_frame():
     tracker = FrameOriginTracker(page)
     tracker.wire()  # 例外で落ちないこと自体がこのテストの主眼
     origins = set(tracker._token_to_origin.values())
-    assert "https://top.example" in origins
-    assert "https://ok.example" in origins
+    # 🐛 CodeQL誤検知対応(v0.0.5b3): 元は `"https://top.example" in origins` という
+    # 集合(完全一致メンバーシップ)テストだったが、CodeQL の
+    # py/incomplete-url-substring-sanitization ルールは `"URL文字列" in 変数` という
+    # 表層構文だけを見て、変数がsetかstrかを区別せず「部分文字列としてのURL
+    # サニタイズ漏れ(OWASP SSRFパターン)」の疑いありとして誤検知する
+    # (実際に確認済み: originsはこの行の直前でset()として構築されており、`in`は
+    # 完全一致の集合メンバーシップ判定であって、文字列の部分一致検索ではない
+    # ——攻撃者が細工した文字列で通過させられる余地は無い)。同じ結果を
+    # 部分集合演算子(<=)で書き直すことで、機能を一切変えずにこの表層パターンを
+    # 外し、以後のスキャンで再度誤検知されないようにする。
+    assert {"https://top.example", "https://ok.example"} <= origins
     print("test_rescan_survives_exceptions_from_a_misbehaving_frame: OK")
 
 
@@ -329,7 +338,10 @@ def test_real_qwebenginepage_attributes_iframe_to_its_own_origin():
 
         tracker = bridge._frame_tracker
         origins_found = set(tracker._token_to_origin.values())
-        assert "https://sub.example.org" in origins_found, (
+        # 🐛 CodeQL誤検知対応(v0.0.5b3): 上のtest_rescan_survives_exceptions_...と同じ理由で
+        # `<=`(部分集合)へ書き換え -- origins_foundはsetであり、これは完全一致の
+        # メンバーシップ判定であって部分文字列検索ではない。
+        assert {"https://sub.example.org"} <= origins_found, (
             f"iframeに専用トークンが配られているはず(見つかったオリジン: {origins_found})"
         )
         # file://のメインフレームはホスト部を持たない(=不透明オリジン)ため

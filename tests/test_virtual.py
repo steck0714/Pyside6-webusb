@@ -9,11 +9,30 @@ listDevices〜openDevice〜claimInterface〜bulk/制御転送〜closeDeviceの
 
 import base64
 import json
+import os
 import sys
+
+# 🐛 バグ修正(v0.0.5b3): このファイルだけ、tests/配下の他の全ファイル
+# (test_bridge.py/test_hardening.py/test_diagnostics.py/test_errors.py/
+# test_frame_origin.py/test_install.py/test_rust_accel.py)が持っている
+# sys.path.insert(...)によるsrc/レイアウトの自己ブートストラップが無かった。
+# `pytest`経由(このファイルの主な使われ方)ではconftest.pyが同じ処理を
+# 肩代わりするため実害が無く見過ごされていたが、README/CHANGELOGが明示的に
+# 謳う「python tests/test_virtual.py」という直接実行方式は、`pip install -e .`
+# 等で事前にpyside6_webusbがimport可能になっていない素のクローン直後では
+# `ModuleNotFoundError: No module named 'pyside6_webusb'`で即座に落ちていた
+# (実際に再現して確認済み——0.0.5.post6のCHANGELOGは"test_virtual"を含めて
+# 直接実行モードが動くことを確認済みと記載しているが、それは呼び出し元の
+# 環境で本パッケージが既にimportできる状態だった場合に限られていた)。
+# 他の全ファイルと同じ位置・同じ形のブートストラップを追加して揃える。
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 # QApplication([])のディスプレイ接続失敗はプロセスクラッシュになり得るため、
 # 他のテストファイルと同じ作法でQT_QPA_PLATFORM=offscreenを前提とする
 # (README/CIの実行手順を参照)。
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 from PySide6.QtWidgets import QApplication
 
 from pyside6_webusb.bridge import WebUSBBridge
@@ -208,6 +227,26 @@ def test_virtual_version_to_bcd_rejects_malformed_input():
             _version_to_bcd(bad)
 
 
+def test_virtual_version_to_bcd_rejects_negative_integers():
+    """🐛 バグ修正(v0.0.5b3): v0.0.5b2の上記修正は文字列/bool/未対応型は正しく
+    弾くようになったが、負の整数は素通りしたまま残っていた。Pythonの`&`が
+    無限精度2の補数として振る舞うため、`_version_to_bcd(-1)`は例外にならず
+    `0xFF00`(="255.0")という、一見もっともらしいが全く意図しないバージョンを
+    黙って作ってしまっていた——tuple/list版でも1要素だけが負の場合(例:
+    `(2, -1, 0)`)に同じ形で`minor`が`0xF`へ静かに化ける。まず旧実装のこの
+    バグを再現してから(このテスト自身が失敗することを確認済み)、
+    int版・tuple/list版どちらの経路でも負の値をValueErrorで拒否するよう
+    修正した。"""
+    from pyside6_webusb.virtual import _version_to_bcd
+    import pytest as _pytest
+    for bad in (-1, -255, (2, -1, 0), [1, -2, 3], (-1, 0, 0)):
+        with _pytest.raises(ValueError):
+            _version_to_bcd(bad)
+    # 境界値の0自体は負ではないので、引き続き正常に受理されることも確認する。
+    assert _version_to_bcd(0) == 0x0000
+    assert _version_to_bcd((0, 0, 0)) == 0x0000
+
+
 def test_virtual_device_ctrl_transfer_with_buffer():
     """ctrl_transferでIN転送にbytearrayなどのバッファが渡された場合でも長さを正しく取得できることを確認する。"""
     dev = _make_widget_device()
@@ -328,6 +367,7 @@ if __name__ == "__main__":
     test_virtual_device_unplugged_device_not_openable()
     test_virtual_version_to_bcd_formats()
     test_virtual_version_to_bcd_rejects_malformed_input()
+    test_virtual_version_to_bcd_rejects_negative_integers()
     test_virtual_device_ctrl_transfer_with_buffer()
     test_virtual_backend_find_custom_match_and_kwargs()
     test_virtual_configuration_and_interface_names_are_actually_resolvable()
