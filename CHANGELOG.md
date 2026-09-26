@@ -2,7 +2,203 @@
 
 All notable changes to this project are documented here.
 
-## [0.0.5.post6]
+## [0.0.5.post7]
+
+Informally `v0.0.5b3` (source zip filename/GitHub release label); `0.0.5.post7` is the version
+string this release actually ships under everywhere (`_version.py`, `pyproject.toml`, sdist,
+wheel), continuing the `.post` line for the same PEP 440 ordering reason as every previous
+`.post` release on this project.
+
+### Added
+
+- **Built-in multi-language support: `en` / `ja` / `zh` (Simplified Chinese), via a new
+  `pyside6_webusb.i18n` module.** Previously the device chooser dialog's default strings were
+  English-only, and `diagnostics.py`'s environment report was Japanese-only, with no supported
+  way to switch either — `chooser_dialog.WebUsbDeviceChooserDialog` already accepted a `strings=`
+  override dict, but nothing in the only real call path (`bridge.py`'s
+  `_request_device_chooser_impl` → `WebUsbDeviceChooserDialog(...)`) ever passed one, so it was
+  unreachable in practice. `install()` and `WebUSBBridge.__init__()` gain `locale=` (`"en"`/
+  `"ja"`/`"zh"`/`"auto"` to follow the OS locale/omit for the previous Japanese-only behavior) and
+  `chooser_strings=` (a partial-override dict, or one of the locale strings as a shortcut).
+  `diagnostics.environment_report()`/`format_environment_report()` gain the same `locale=`
+  parameter, and `python -m pyside6_webusb` gains `--lang`/`-l`. **Backward compatibility:**
+  `DEFAULT_LOCALE = "ja"` is a fixed default, not OS-autodetection — every call site that used to
+  take no locale argument keeps producing byte-for-byte the same Japanese text it always did
+  (verified: all pre-existing tests, including the ones asserting literal Japanese substrings in
+  `format_environment_report()`'s output, pass unmodified). `chooser_dialog.DEFAULT_STRINGS` is
+  now sourced from `i18n.CHOOSER_STRINGS["en"]` (single source of truth) but keeps its name/shape
+  for anyone already importing it directly. New: `tests/test_i18n.py` (locale
+  resolution/fallback, key-set parity across all three locales), `tests/test_chooser_dialog.py`
+  (this file had **no dedicated tests at all** before this release — now covers per-locale
+  rendering, partial `strings=` overrides, and the Connect-button-disabled-until-selected safety
+  behavior), plus additions to `tests/test_install.py`/`tests/test_diagnostics.py` and a new
+  JS-level locale-agnostic check is not needed since locale only affects Python-rendered UI, not
+  `WEBUSB_POLYFILL_JS` itself.
+- **`extra_guard_js=` parameter on `install()`.** Lets a host application inject its own
+  JavaScript that defines `window.__pysideWebUSBExtraGuard(({origin, filters,
+  exclusionFilters}) => boolean)`; `navigator.usb.requestDevice()` now calls it (if defined)
+  immediately after filter-shape validation and *before* ever reaching the bridge or opening the
+  chooser dialog, rejecting with `SecurityError` when it returns exactly `false` (a thrown guard
+  is treated as `false` — fail closed). Returning `true`/`undefined` changes nothing; this hook
+  can only add restrictions on top of this package's own checks, never loosen them. Injected as
+  its own `QWebEngineScript` (`"PySide6WebUSBExtraGuard"`), positioned between the
+  QWebChannel-library script and the main polyfill script, only when `extra_guard_js` is given —
+  `install()` still injects exactly its previous two scripts otherwise (existing
+  `test_install_injects_exactly_two_scripts_with_correct_injection_point_and_world` passes
+  unmodified). This closes a gap between what was previously discussed for this project (a
+  domain-specific polyfill guard hook) and what the shipped code actually had — nothing like it
+  existed anywhere in `0.0.5.post6`. New: `test_install_injects_extra_guard_js_before_the_polyfill_when_given`
+  (Python side) and a `tests/test_polyfill.js` block covering the false/throw/true/undefined
+  return-value matrix, the exact `{origin, filters, exclusionFilters}` shape passed to the guard,
+  and that a rejecting guard means `requestDeviceChooser` never reaches the bridge at all.
+- **`scripts/verify_test_suite.py`** — a standalone health-check script answering "do the test
+  files themselves actually still work", not just "does `pytest` report green". It separately
+  checks: the running environment (`diagnostics.environment_report()`), the full `pytest`
+  suite, **every individual `tests/test_*.py` file run directly** (`python tests/test_X.py` —
+  the exact class of check that would have caught the `tests/test_virtual.py` bug described
+  under Fixed below, since `pytest` alone did not), the Node.js polyfill test, and the TypeScript
+  type check — auto-skipping the Node/tsc checks when those tools aren't installed rather than
+  failing on their absence, and auto-detecting module-level `pytest.importorskip`/`pytest.skip`
+  usage (currently only `test_rust_accel.py`) to correctly treat pytest-only-by-design test files
+  as an expected skip rather than a direct-execution failure. Supports `--save-report path.json`
+  for CI. Verified against this exact repository (clean run: all 5 categories PASS) and against
+  an intentionally-broken copy of `test_errors.py` (correctly reports `FAIL` and exits `1`, then
+  reverts to clean/exit `0` once restored — i.e. the script's own pass/fail detection was
+  round-tripped, not just assumed to work).
+- **`.gitignore`**, shipped in the source zip for the first time. `MANIFEST.in` has referenced
+  "(see .gitignore)" in a comment since early in this project's history, but the file itself was
+  never actually included in a distributed zip — a dangling reference. Covers the standard
+  Python/Rust (`native/*/target/`, matching the `0.0.4b0` changelog's own note that the project's
+  real `.gitignore` excludes this) and Node ignores, this release's own generated
+  `tests/_polyfill_extracted.js` and `verify_test_suite_report.json`, and editor/OS cruft.
+
+### Fixed
+
+- **🐛 `pyside6_webusb.virtual._version_to_bcd()` silently produced a nonsensical version from a
+  negative integer instead of raising.** `post6`/`v0.0.5b2` already rejected malformed strings,
+  `bool`, and other unsupported types with `ValueError` (see that release's own changelog entry),
+  but a bare negative `int` — or a negative component inside a `tuple`/`list` (e.g.
+  `(2, -1, 0)`) — slipped through untouched. Python's `&` behaves as infinite-precision two's
+  complement, so `_version_to_bcd(-1)` computed `(-1 & 0xFF) << 8` = `0xFF00` ("255.0"): a
+  plausible-looking but completely unintended version, silently. This is the exact same failure
+  mode the `post6` fix was written to close (a typo silently building a wrong-but-valid-looking
+  virtual device instead of raising) — it just wasn't checked for the negative case. Reproduced
+  directly (confirmed `_version_to_bcd(-1) == 0xFF00` and `_version_to_bcd((2, -1, 0))` silently
+  corrupting only the `minor` nibble, before fixing). Both the `int` path and the `tuple`/`list`
+  path now raise `ValueError` for any negative value; `0` itself is still valid. New:
+  `test_virtual_version_to_bcd_rejects_negative_integers` (also confirms `0` and `(0, 0, 0)`
+  still work).
+- **🐛 `tests/test_virtual.py` could not actually be run directly** (`python tests/test_virtual.py`)
+  **from a clean checkout**, contrary to what this file's `post6` changelog entry claims
+  ("confirmed... `test_virtual`... still runs cleanly that way"). Unlike every one of its seven
+  sibling files in `tests/` (`test_bridge.py`, `test_diagnostics.py`, `test_errors.py`,
+  `test_frame_origin.py`, `test_hardening.py`, `test_install.py`, `test_rust_accel.py`), this
+  file was missing the `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
+  "src"))` bootstrap line that lets a direct script run find the `src/`-layout package without it
+  already being installed. Under `pytest` this was invisible, since `tests/conftest.py` does the
+  equivalent `sys.path` setup for every test regardless — which is presumably how the `post6`
+  verification missed it (the package was very likely already importable in whatever environment
+  that check ran in). Reproduced directly against a clean environment with the package not
+  installed (`ModuleNotFoundError: No module named 'pyside6_webusb'`) before fixing. The same
+  edit also replaces this file's comment-only assumption that `QT_QPA_PLATFORM=offscreen` is
+  already set with the same active fallback every sibling file actually executes, for the same
+  reason. Found while building `scripts/verify_test_suite.py` above — exactly the class of gap
+  that script now exists to catch automatically going forward.
+
+### Security review (updated after the user shared their GitHub repo's actual alerts)
+
+A pass was requested against CWE-275, CWE-20, CWE-362 (cited alongside advisory ID
+`GHSA-chgr-c6px-7xpp`), CWE-125 (cited alongside `GHSA-36hh-v3qg-5jq4`), CVE-2018-6125,
+CVE-2020-16033, CWE-451, CWE-393, CWE-359, and CWE-770. This was first checked against this
+package's own source with no further context (see the superseded findings kept below for that
+pass); the user then shared screenshots of their actual GitHub repository's Dependabot PR #2 and
+CodeQL "Code scanning alerts" list, which identify what several of these actually are:
+
+- **`GHSA-chgr-c6px-7xpp` (CWE-362) and `GHSA-36hh-v3qg-5jq4` (CWE-125) are PyO3's own
+  RustSec advisories**, fixed upstream in PyO3 0.29.0 ("Missing `Sync` bound on
+  `PyCFunction::new_closure` closures" and "Possible out of bounds read in
+  `BoundTupleIterator::nth_back`/`BoundListIterator::nth_back`" per PyO3's own changelog,
+  matching these two CWE categories exactly) — not findings against this project's own code, but
+  against the `pyo3` dependency of `native/pyside6_webusb_accel/`, exactly as Dependabot PR #2
+  ("Bump pyo3 from 0.27.2 to 0.29.0") proposes. **Fixed**: `Cargo.toml`'s pin changed from
+  `pyo3 = "=0.27.2"` to `pyo3 = "=0.29.0"`, and `Cargo.lock` was regenerated (`cargo
+  generate-lockfile`, resolved against the real crates.io registry — not hand-edited). **Not
+  verified**: this sandbox's system `rustc` is `1.75.0` (Ubuntu 24.04's packaged version), and
+  `pyo3-ffi 0.29.0` itself requires `rustc>=1.83` to *compile* (confirmed directly: `cargo check`
+  fails on the version gate, independent of and before any actual code compilation). Dependency
+  *resolution* succeeded and is trustworthy (real registry, real checksums); actual compilation
+  was not attempted or verified. **Action needed on your side**: build/CI environments for
+  `native/pyside6_webusb_accel/` need `rustc>=1.83` for this bump — please run `maturin develop`
+  (or your usual build) once with a current Rust toolchain and confirm it still builds before
+  relying on this; per this project's own established policy, a Rust-side change should not be
+  trusted as working until it has actually been built.
+- **CWE-275 ("Workflow does not contain permissions", 2 CodeQL alerts) is about
+  `.github/workflows/restore-pypi.yml:8` and `.github/workflows/github-actions-publish-pypi.yml:26`
+  having no `permissions:` block.** These files are not part of this zip/sdist (GitHub Actions
+  workflow files live only in the git repository, never in a PyPI distribution) and were not
+  available to check or edit directly — reconstructing a full CI workflow that handles PyPI
+  publishing credentials from phone-screenshot fragments risked introducing a real mistake into a
+  credentials-handling file, so that was deliberately not attempted. The fix itself is simple and
+  is the same for both files, per GitHub's own guidance shown in the alert: add a `permissions:`
+  block at the workflow root (applies to every job that doesn't set its own) or per-job, scoped to
+  the minimum each workflow actually needs (`contents: read` covers a checkout-and-build step;
+  `restore-pypi.yml` and `github-actions-publish-pypi.yml` both look like they only checkout,
+  build, and upload to PyPI via a token, so `permissions: contents: read` at the workflow root is
+  likely sufficient for both — add `id-token: write` only if either was switched to PyPI's
+  Trusted Publishing/OIDC flow rather than a `TWINE_PASSWORD` secret). Share the actual two files
+  (or grant a way to fetch them) to get this applied directly rather than described.
+- **CWE-20 ("Incomplete URL substring sanitization", 3 CodeQL alerts, `py/incomplete-url-substring-sanitization`)
+  is about `tests/test_frame_origin.py` lines 222, 223, and 332** — this file *is* in this
+  distribution, so this one was checked and fixed directly. All three flagged lines were
+  `"https://some.origin" in <a set of origin strings>` — exact-match **set membership**
+  (`origins = set(tracker._token_to_origin.values())` immediately precedes each one), not a
+  substring search against a URL string. This is the false-positive shape CodeQL's rule can't
+  distinguish from the real OWASP-SSRF pattern it targets (`"trusted.com" in some_url_string`,
+  bypassable via `"evil.com/trusted.com"`) — there is no such string here, and no attacker-supplied
+  value is being substring-matched. Confirmed directly by reading the surrounding code (not
+  assumed from the alert text). **Fixed**: rewritten as subset comparisons
+  (`{"https://top.example", "https://ok.example"} <= origins`) that are semantically identical but
+  no longer match the flagged textual pattern, so the scanner won't re-flag this exact code again;
+  `tests/test_frame_origin.py`'s full suite (11 tests, pytest and direct-execution modes both)
+  still passes unchanged.
+
+<details>
+<summary>Superseded findings from the first pass (kept for the record, before the screenshots above provided ground truth)</summary>
+
+- CVE-2018-6125 and CVE-2020-16033 are not new findings for this project — both are already cited
+  in this exact `CHANGELOG.md` (`0.0.4b3`) as the precedent for the alternate-setting
+  class-confusion fix and the `sanitize_device_string()`/forced-`PlainText` chooser-dialog fix,
+  respectively, and both mitigations are still in place and still covered by
+  `security_audit/test_altsetting_class_confusion.py` and
+  `security_audit/test_malicious_device_ui_and_descriptors.py`.
+- CWE-451 (UI misrepresentation): the same forced-`PlainText` `QLabel` rendering in
+  `chooser_dialog.py` automatically covers this release's new localized strings too (`unknown
+  device`/`SN` labels flow through the same `_DeviceRowWidget` code path) — confirmed by reading
+  the code path rather than assumed.
+- CWE-20 (improper input validation): the `virtual.py` fix under **Fixed** above is itself in
+  this category. Beyond that, no new gap was found in the existing filter/base64/options-size
+  validation already documented across this file's history.
+- CWE-362 (race conditions): no new gap found beyond the existing `_busy_handles`/`_chooser_active`
+  reentrancy guards and the `post6` `destroyed`-signal fix already in this file.
+- CWE-125 (out-of-bounds read): the Rust crate at `native/pyside6_webusb_accel/` contains **zero**
+  `unsafe` blocks (checked directly: `grep -c unsafe src/lib.rs` → `0`), so classic OOB memory
+  reads are structurally not possible there under safe Rust; this package's own Python code has
+  no raw `ctypes`/`struct`/buffer indexing either. Could not be built/run in this environment (no
+  Rust toolchain available), so this is a source-reading review only, not a compiled/tested one.
+- CWE-393, CWE-359, CWE-770, CWE-275: each maps to mitigations already specifically documented
+  elsewhere in this file (`closeDevice()`'s JSON-string return fix; per-frame origin isolation and
+  the `window.__pysideWebUSB` debug-namespace disclosure boundary; the transfer-size/handle-count/
+  token-count caps; the origin-scoped grant model and the deliberate non-`@Slot` exposure of
+  host-only methods) — no new gap found in this pass.
+- **`GHSA-chgr-c6px-7xpp` and `GHSA-36hh-v3qg-5jq4` could not be looked up or verified** — this
+  environment has no access to an external advisory database, and neither ID corresponds to
+  anything in this project's own history. Rather than guess what they refer to, both are reported
+  here as unverified. If they concern this project specifically, please share the advisory
+  contents (or enable a way to fetch them) and they can be checked properly.
+
+</details>
+
+
 
 Informally `v0.0.5b2` (source zip filename/GitHub release label); `0.0.5.post6` is the version
 string this release actually ships under everywhere (`_version.py`, `pyproject.toml`, sdist,
