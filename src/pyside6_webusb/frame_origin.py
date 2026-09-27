@@ -53,6 +53,10 @@ setRunsOnSubFrames(True) にすると、クロスオリジンiframeがトップ�
 """
 import secrets
 
+# 🆕 v0.0.6: 下の_log()(「例外を無視」ログのi18n化)用。i18n.pyはosのみに
+# 依存する葉モジュールなので、PySide6の有無に関わらず常に安全にimportできる。
+from .i18n import log_text
+
 try:
     from PySide6.QtCore import QTimer
 except Exception:  # pragma: no cover - PySide6が無い環境からのimport時に備える
@@ -95,13 +99,27 @@ class FrameOriginTracker:
     _RESCAN_DELAYS_MS = (0, 200, 1000)  # navigationRequested後、この間隔で再走査
     _PERIODIC_RESCAN_MS = 2000  # 保険としての定期再走査間隔
 
-    def __init__(self, page):
+    def __init__(self, page, locale=None):
         self._page = page
         self._token_to_origin = {}       # token(str) -> origin(str) (挿入順保持)
         self._periodic_timer = None
         self._wired = False
         self._navigation_signal_connected = False
         self._destroyed = False  # 🆕 v0.0.5b2: __init__.wire()/_on_page_destroyed()参照
+        # 🌐 v0.0.6: install()から転送される、bridge.WebUSBBridgeと同じlocale。
+        #    このクラス自身のデバッグprint(下の_log()参照)にのみ使う——
+        #    フレーム木の走査やトークン発行など、クラス本来の判定ロジックには
+        #    一切影響しない。
+        self._locale = locale
+
+    def _log(self, context, error):
+        """bridge.WebUSBBridge._log()と同じ役割・同じ設計(そちらのdocstring
+        参照)。このクラスはQObjectを継承しない素のPythonクラスなので、
+        WebUSBBridgeとは別に自前で持つ。"""
+        try:
+            print(log_text(self._locale, "exception_ignored", context=context, error=error))
+        except Exception:
+            pass
 
     @property
     def is_functional(self):
@@ -136,7 +154,7 @@ class FrameOriginTracker:
             self._page.navigationRequested.connect(self._on_navigation_requested)
             self._navigation_signal_connected = True
         except Exception as e:
-            print(f"[pyside6-webusb] FrameOriginTracker.wire: navigationRequested接続に失敗(無視): {e}")
+            self._log("FrameOriginTracker.wire(navigationRequested)", e)
         if QTimer is not None:
             try:
                 self._periodic_timer = QTimer(self._page)
@@ -144,7 +162,7 @@ class FrameOriginTracker:
                 self._periodic_timer.timeout.connect(self.rescan)
                 self._periodic_timer.start()
             except Exception as e:
-                print(f"[pyside6-webusb] FrameOriginTracker.wire: 定期再走査タイマーの起動に失敗(無視): {e}")
+                self._log("FrameOriginTracker.wire(periodic-timer)", e)
         # 🐛 バグ修正(v0.0.5b2、実機のDevTools+ログ確認で発見。checklog2.md
         #    「45. QWebEnginePage Lifetime Observation」参照): 定期タイマーは
         #    QTimer(self._page) と親を指定しているため、page破棄時にQt自身が
@@ -162,7 +180,7 @@ class FrameOriginTracker:
         try:
             self._page.destroyed.connect(self._on_page_destroyed)
         except Exception as e:
-            print(f"[pyside6-webusb] FrameOriginTracker.wire: destroyed接続に失敗(無視): {e}")
+            self._log("FrameOriginTracker.wire(destroyed)", e)
         self.rescan()
 
     def _on_page_destroyed(self, _obj=None):
@@ -227,14 +245,14 @@ class FrameOriginTracker:
         try:
             main = self._page.mainFrame()
         except Exception as e:
-            print(f"[pyside6-webusb] FrameOriginTracker.rescan: mainFrame()取得失敗(無視): {e}")
+            self._log("FrameOriginTracker.rescan(mainFrame)", e)
             return
         if main is None:
             return
         try:
             self._walk(main)
         except Exception as e:
-            print(f"[pyside6-webusb] FrameOriginTracker.rescan: フレーム走査中の例外(無視): {e}")
+            self._log("FrameOriginTracker.rescan(walk)", e)
 
     def _walk(self, frame):
         self._assign_token(frame)
@@ -267,7 +285,7 @@ class FrameOriginTracker:
             import json as _json
             frame.runJavaScript(f"window.__pyUsbFrameToken = {_json.dumps(token)};", lambda _result=None: None)
         except Exception as e:
-            print(f"[pyside6-webusb] FrameOriginTracker._assign_token: runJavaScript失敗(無視): {e}")
+            self._log("FrameOriginTracker._assign_token(runJavaScript)", e)
 
     # ---- 解決 ----
 

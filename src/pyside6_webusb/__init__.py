@@ -36,11 +36,29 @@ or, from Python: `from pyside6_webusb import environment_report`. Unlike `instal
 `WebUSBBridge`/`WebUsbDeviceChooserDialog`, this always works even if `PySide6-Essentials`/
 `PySide6-Addons` themselves aren't importable in this environment (see `0.0.5a0` CHANGELOG
 entry) -- the diagnostic has to survive the exact condition it's meant to diagnose.
+
+Native messaging (🆕 v0.0.6)
+-----------------------------
+Sister project fox-webusb makes `navigator.usb` work through the browser-native "Native
+Messaging" mechanism (a WebExtension talking to a standalone host process over stdio)
+instead of embedding in QtWebEngine. `pyside6_webusb.native_messaging` ships the shared
+wire-format codec (`read_message`/`write_message`) plus a `manifest.json` static checker
+(`validate_native_messaging_manifest`/`format_manifest_check`) -- also available as
+`pyside6-webusb-doctor --check-native-messaging <path/to/manifest.json>`. See
+pyside6_webusb.native_messaging's module docstring for why this lives here rather than in
+fox-webusb itself.
 """
 
 from .diagnostics import environment_report, format_environment_report
 from ._version import __version__
 from .i18n import SUPPORTED_LOCALES, detect_locale
+from .native_messaging import (
+    NativeMessagingError,
+    format_manifest_check,
+    read_message,
+    validate_native_messaging_manifest,
+    write_message,
+)
 from .virtual import (
     VirtualUsbConfiguration,
     VirtualUsbDevice,
@@ -111,4 +129,9 @@ __all__ = [
     "make_virtual_usb_backend",
     "SUPPORTED_LOCALES",
     "detect_locale",
+    "read_message",
+    "write_message",
+    "validate_native_messaging_manifest",
+    "format_manifest_check",
+    "NativeMessagingError",
 ]

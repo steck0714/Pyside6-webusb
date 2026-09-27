@@ -33,7 +33,7 @@ import time
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
 
 from ._version import __version__
-from .i18n import chooser_strings_for, resolve_locale
+from .i18n import chooser_strings_for, log_text, resolve_locale
 
 # 🆕 v0.0.5a1: Python 3.15 (Doc/whatsnew/3.15.rst, Lib/base64.py,
 # Modules/binascii.c を実ソース確認済み)でbase64.b64decode()にcanonical
@@ -42,7 +42,27 @@ from .i18n import chooser_strings_for, resolve_locale
 # (RFC 4648 §3.5「Decoders MAY reject non-zero padding bits」)。
 # 3.15未満にはこの引数自体が無い(TypeErrorになる)ため、バージョンで
 # 分岐する。
-_B64_DECODE_SUPPORTS_CANONICAL = sys.version_info >= (3, 15)
+#
+# 🔮 v0.0.6: 関数化してテスト可能にした(以前はモジュール読み込み時に一度
+# だけ評価される定数だったため、「3.16になっても正しく動き続けるか」を
+# 実際の3.16インタプリタなしに検証する手段が無かった)。判定式自体は
+# `>=` を使った"3.15以上"という床(floor)判定であり、上限(ceiling)を
+# 設けていないため、3.16はもちろん3.17やそれ以降でも変わらずTrueに
+# なり続ける設計であることを、tests/test_bridge.pyの
+# test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15
+# が(3, 16, 0)や(3, 99, 0)のような未来のversion_infoを直接与えて証明する
+# (このパッケージの通常のCIが実際の3.16インタプリタ上で走っていなくても
+# 検証できる)。引数省略時は実際に動いているインタプリタのsys.version_info
+# を使う——モジュール読み込み時に一度だけ評価される挙動そのものは
+# 0.0.5.post7までと完全に同じ(_B64_DECODE_SUPPORTS_CANONICALは従来どおり
+# モジュール属性として存在し、下の_b64decode()もそれを直接参照する)。
+def _b64_decode_supports_canonical(version_info=None) -> bool:
+    if version_info is None:
+        version_info = sys.version_info
+    return tuple(version_info)[:2] >= (3, 15)
+
+
+_B64_DECODE_SUPPORTS_CANONICAL = _b64_decode_supports_canonical()
 
 # 🦀 大容量転送(WebADB等)向けのオプショナルなRustアクセラレーション。
 # `native/pyside6_webusb_accel/`(maturinでビルドするPyO3拡張)がビルド済みで
@@ -368,7 +388,7 @@ class WebUSBBridge(QObject):
             if parent is not None and hasattr(parent, "urlChanged"):
                 parent.urlChanged.connect(self._on_page_navigated)
         except Exception as e:
-            print(f"[pyside6-webusb] __init__: 例外を無視: {e}")
+            self._log("__init__", e)
 
         # --- ホットプラグ(接続/切断)監視 ---
         self._hotplug_watcher = None
@@ -383,7 +403,23 @@ class WebUSBBridge(QObject):
             self._hotplug_timer.timeout.connect(self._poll_hotplug)
             self._hotplug_timer.start()
         except Exception as e:
-            print(f"[pyside6-webusb] PyUsbBridge hotplug watcher init: 例外を無視: {e}")
+            self._log("PyUsbBridge hotplug watcher init", e)
+
+    def _log(self, context, error):
+        """🆕 v0.0.6: 「例外を無視する」デバッグprintの共通経路。以前はこのクラス内
+        だけで約30箇所、`print(f"[pyside6-webusb] X: 例外を無視: {e}")` という
+        日本語決め打ちの文字列をその場で個別に組み立てていた——self._locale
+        (install()/WebUSBBridge(locale=...)が既に受け付けているのに、これらの
+        printだけはそれを一切参照していなかった)を反映するよう、i18n.log_text()
+        経由に統一する(i18n.LOG_STRINGSのモジュールdocstring、errors.pyの
+        同種の集約と同じ考え方)。呼び出し元は例外時にそのまま
+        `self._log("context", e)` と呼ぶだけでよい。
+        ログ出力自体の失敗(通常起こり得ないが、例えば標準出力が閉じている等)で
+        呼び出し元の処理を巻き込んで落とさないよう、ここ自体もexceptで包む。"""
+        try:
+            print(log_text(self._locale, "exception_ignored", context=context, error=error))
+        except Exception:
+            pass
 
     def _poll_hotplug(self):
         """1.5秒ごとに接続USBデバイス一覧を差分検出し、現在のオリジンに許可済みの
@@ -411,19 +447,19 @@ class WebUSBBridge(QObject):
                     dev = usb_core.find(idVendor=vid, idProduct=pid)
                     if dev is None:
                         continue
-                    info = build_device_descriptor(dev, usb_util, include_configurations=False)
+                    info = build_device_descriptor(dev, usb_util, include_configurations=False, locale=self._locale)
                     self.deviceConnected.emit(_json_dumps(info))
                 except Exception as e:
-                    print(f"[pyside6-webusb] _poll_hotplug(connect): 例外を無視: {e}")
+                    self._log("_poll_hotplug(connect)", e)
             for vid, pid in disconnected:
                 if not self._is_granted(origin, vid, pid):
                     continue
                 try:
                     self.deviceDisconnected.emit(_json_dumps({"vendorId": vid, "productId": pid}))
                 except Exception as e:
-                    print(f"[pyside6-webusb] _poll_hotplug(disconnect): 例外を無視: {e}")
+                    self._log("_poll_hotplug(disconnect)", e)
         except Exception as e:
-            print(f"[pyside6-webusb] _poll_hotplug: 例外を無視: {e}")
+            self._log("_poll_hotplug", e)
 
     def _pyusb(self):
         """pyusbを遅延インポートし、未インストール環境でも他機能に影響を与えないようにする。
@@ -472,7 +508,7 @@ class WebUSBBridge(QObject):
         try:
             return self._origin_from_url(page.url())
         except Exception as e:
-            print(f"[pyside6-webusb] _current_origin: 例外を無視: {e}")
+            self._log("_current_origin", e)
             return None
 
     def _get_open_device(self, handle_id, frame_token=""):
@@ -499,7 +535,7 @@ class WebUSBBridge(QObject):
         try:
             return self._origin_from_url(page.url())
         except Exception as e:
-            print(f"[pyside6-webusb] _top_level_origin: 例外を無視: {e}")
+            self._log("_top_level_origin", e)
             return None
 
     def _on_page_navigated(self, *_args):
@@ -522,9 +558,9 @@ class WebUSBBridge(QObject):
                         _usb_core, usb_util = self._pyusb()
                         usb_util.dispose_resources(info["device"])
                     except Exception as e:
-                        print(f"[pyside6-webusb] _on_page_navigated: 例外を無視: {e}")
+                        self._log("_on_page_navigated", e)
         except Exception as e:
-            print(f"[pyside6-webusb] _on_page_navigated: 例外を無視: {e}")
+            self._log("_on_page_navigated", e)
 
     def _known_device_settings(self):
         """設定を保存するQSettingsを取得する。browser_window経由で取得できない場合でも、
@@ -536,11 +572,11 @@ class WebUSBBridge(QObject):
                 if s is not None:
                     return s
         except Exception as e:
-            print(f"[pyside6-webusb] _known_device_settings: 例外を無視: {e}")
+            self._log("_known_device_settings", e)
         try:
             return QSettings(self._settings_organization, self._settings_application)
         except Exception as e:
-            print(f"[pyside6-webusb] _known_device_settings(fallback): 例外を無視: {e}")
+            self._log("_known_device_settings(fallback)", e)
             return None
 
     def _load_granted_origins(self):
@@ -553,7 +589,7 @@ class WebUSBBridge(QObject):
             data = json.loads(raw)
             return data if isinstance(data, dict) else {}
         except Exception as e:
-            print(f"[pyside6-webusb] _load_granted_origins: 例外を無視: {e}")
+            self._log("_load_granted_origins", e)
             return {}
 
     def _save_granted_origins(self, data):
@@ -563,7 +599,7 @@ class WebUSBBridge(QObject):
         try:
             s.setValue("webusb_granted_origins", _json_dumps(data))
         except Exception as e:
-            print(f"[pyside6-webusb] _save_granted_origins: 例外を無視: {e}")
+            self._log("_save_granted_origins", e)
 
     def _is_granted(self, origin, vendor_id, product_id):
         if not origin:
@@ -590,7 +626,7 @@ class WebUSBBridge(QObject):
             data = json.loads(raw)
             return data if isinstance(data, list) else []
         except Exception as e:
-            print(f"[pyside6-webusb] _load_known_devices: 例外を無視: {e}")
+            self._log("_load_known_devices", e)
             return []
 
     def _save_known_devices(self, devices_list):
@@ -600,7 +636,7 @@ class WebUSBBridge(QObject):
         try:
             s.setValue("webusb_known_devices", _json_dumps(devices_list))
         except Exception as e:
-            print(f"[pyside6-webusb] _save_known_devices: 例外を無視: {e}")
+            self._log("_save_known_devices", e)
 
     def _record_device_usage(self, vendor_id, product_id, product_name, manufacturer_name):
         """接続したデバイスを既知一覧に記録し、最終接続時刻・接続回数を更新する（優先順位付けに使用）"""
@@ -625,7 +661,7 @@ class WebUSBBridge(QObject):
                 })
             self._save_known_devices(devices)
         except Exception as e:
-            print(f"[pyside6-webusb] _record_device_usage: 例外を無視: {e}")  # 記録の失敗は致命的ではないため静かに無視（接続自体は継続させる）
+            self._log("_record_device_usage", e)  # 記録の失敗は致命的ではないため静かに無視（接続自体は継続させる）
 
     @Slot(result=str)
     def isAvailable(self):
@@ -702,22 +738,22 @@ class WebUSBBridge(QObject):
                 if device_is_fully_blocked(dev):
                     continue
                 try:
-                    devices.append(build_device_descriptor(dev, usb_util))
+                    devices.append(build_device_descriptor(dev, usb_util, locale=self._locale))
                     continue
                 except Exception as e:
-                    print(f"[pyside6-webusb] listDevices(rich descriptor): 例外を無視: {e}")
+                    self._log("listDevices(rich descriptor)", e)
                 # リッチな記述子の構築に失敗した場合のみ簡易記述子へフォールバックする
                 manufacturer = product = None
                 try:
                     if dev.iManufacturer:
                         manufacturer = usb_util.get_string(dev, dev.iManufacturer)
                 except Exception as e:
-                    print(f"[pyside6-webusb] listDevices: 例外を無視: {e}")
+                    self._log("listDevices", e)
                 try:
                     if dev.iProduct:
                         product = usb_util.get_string(dev, dev.iProduct)
                 except Exception as e:
-                    print(f"[pyside6-webusb] listDevices: 例外を無視: {e}")
+                    self._log("listDevices", e)
                 devices.append({
                     "vendorId": dev.idVendor,
                     "productId": dev.idProduct,
@@ -743,21 +779,21 @@ class WebUSBBridge(QObject):
                 continue
             # 🛡️ WebUSB仕様どおり、options.filters/exclusionFiltersに一致しない
             #    デバイスはチューザーの候補から除外する。
-            if not device_matches_any_usb_filter(dev, usb_util, filters):
+            if not device_matches_any_usb_filter(dev, usb_util, filters, locale=self._locale):
                 continue
-            if exclusion_filters and device_matches_any_usb_filter(dev, usb_util, exclusion_filters):
+            if exclusion_filters and device_matches_any_usb_filter(dev, usb_util, exclusion_filters, locale=self._locale):
                 continue
             try:
-                devices_info.append(build_device_descriptor(dev, usb_util, include_configurations=False))
+                devices_info.append(build_device_descriptor(dev, usb_util, include_configurations=False, locale=self._locale))
                 continue
             except Exception as e:
-                print(f"[pyside6-webusb] _enumerate_filtered_devices(rich descriptor): 例外を無視: {e}")
+                self._log("_enumerate_filtered_devices(rich descriptor)", e)
             manufacturer = product = None
             try:
                 if dev.iManufacturer: manufacturer = usb_util.get_string(dev, dev.iManufacturer)
                 if dev.iProduct: product = usb_util.get_string(dev, dev.iProduct)
             except Exception as e:
-                print(f"[pyside6-webusb] _enumerate_filtered_devices: 例外を無視: {e}")
+                self._log("_enumerate_filtered_devices", e)
             devices_info.append({
                 "vendorId": dev.idVendor, "productId": dev.idProduct,
                 "manufacturerName": manufacturer, "productName": product,
@@ -775,7 +811,7 @@ class WebUSBBridge(QObject):
                 return (0, -(k.get("connectCount", 0)), -(k.get("lastConnected", 0)))
             devices_info.sort(key=_sort_key)
         except Exception as e:
-            print(f"[pyside6-webusb] _enumerate_filtered_devices: 例外を無視: {e}")  # 並べ替えに失敗しても一覧表示自体は継続する
+            self._log("_enumerate_filtered_devices", e)  # 並べ替えに失敗しても一覧表示自体は継続する
         return devices_info
 
     _GESTURE_TOKEN_TTL_SECONDS = 5.0  # 実ブラウザのtransient activationの典型的な猶予に合わせた保守的な値
@@ -902,7 +938,7 @@ class WebUSBBridge(QObject):
         try:
             from PySide6.QtWidgets import QApplication, QWidget
         except Exception as e:
-            print(f"[pyside6-webusb] _resolve_chooser_parent_window(import): 例外を無視: {e}")
+            self._log("_resolve_chooser_parent_window(import)", e)
             return None
 
         bw = self.browser_window
@@ -914,14 +950,14 @@ class WebUSBBridge(QObject):
             if active is not None:
                 return active
         except Exception as e:
-            print(f"[pyside6-webusb] _resolve_chooser_parent_window(activeWindow): 例外を無視: {e}")
+            self._log("_resolve_chooser_parent_window(activeWindow)", e)
 
         try:
             for w in QApplication.topLevelWidgets():
                 if isinstance(w, QWidget) and w.isVisible() and w.isWindow():
                     return w
         except Exception as e:
-            print(f"[pyside6-webusb] _resolve_chooser_parent_window(topLevelWidgets): 例外を無視: {e}")
+            self._log("_resolve_chooser_parent_window(topLevelWidgets)", e)
 
         return None
 
@@ -1019,13 +1055,13 @@ class WebUSBBridge(QObject):
                         selected.get("vendorId"), selected.get("productId"),
                         selected.get("productName"), selected.get("manufacturerName"))
                 except Exception as e:
-                    print(f"[pyside6-webusb] requestDeviceChooser: 例外を無視: {e}")
+                    self._log("requestDeviceChooser", e)
                 # ユーザーがダイアログで明示的に選んだ場合のみ、このオリジンに対する
                 # 恒久的な許可を記録する(listDevices/openDeviceはこれを介してのみ許可を判定する)。
                 try:
                     self._grant(origin, selected.get("vendorId"), selected.get("productId"))
                 except Exception as e:
-                    print(f"[pyside6-webusb] requestDeviceChooser: 例外を無視: {e}")
+                    self._log("requestDeviceChooser", e)
                 # 🛡️ チューザー一覧はパフォーマンスのため軽量記述子(configurations無し)で
                 #    構築しているが、requestDevice()がJSへ返す「選ばれた1台」は
                 #    getDevices()と同じリッチな記述子でなければならない。仕様6節の
@@ -1037,9 +1073,9 @@ class WebUSBBridge(QObject):
                 try:
                     real_dev = _find_usb_device(usb_core, usb_util, selected.get("vendorId"), selected.get("productId"), selected.get("serialNumber"))
                     if real_dev is not None:
-                        rich_selected = build_device_descriptor(real_dev, usb_util, include_configurations=True)
+                        rich_selected = build_device_descriptor(real_dev, usb_util, include_configurations=True, locale=self._locale)
                 except Exception as e:
-                    print(f"[pyside6-webusb] requestDeviceChooser(rich rebuild): 例外を無視: {e}")
+                    self._log("requestDeviceChooser(rich rebuild)", e)
                 return _json_dumps({"cancelled": False, "device": rich_selected})
             return _json_dumps({"cancelled": True})
         except Exception as e:
@@ -1091,7 +1127,7 @@ class WebUSBBridge(QObject):
                         _usb_core, usb_util = self._pyusb()
                         usb_util.dispose_resources(evicted["device"])
                     except Exception as e:
-                        print(f"[pyside6-webusb] openDevice (LRU退去): 例外を無視: {e}")
+                        self._log("openDevice(LRU eviction)", e)
             usb_core, usb_util = self._pyusb()
             dev = _find_usb_device(usb_core, usb_util, vendor_id, product_id, serial_number or None)
             if dev is None:
@@ -1155,7 +1191,7 @@ class WebUSBBridge(QObject):
                     _usb_core, usb_util = self._pyusb()
                     usb_util.dispose_resources(dev)
                 except Exception as e:
-                    print(f"[pyside6-webusb] closeDevice: 例外を無視: {e}")
+                    self._log("closeDevice", e)
             return _json_dumps({"success": True})
         except Exception as e:
             return _json_dumps({"success": False, "error": safe_error_str(e)})
@@ -1237,7 +1273,7 @@ class WebUSBBridge(QObject):
                 if dev.is_kernel_driver_active(interface_number):
                     dev.detach_kernel_driver(interface_number)
             except Exception as e:
-                print(f"[pyside6-webusb] claimInterface: 例外を無視: {e}")  # OSによっては未対応/不要な場合がある
+                self._log("claimInterface", e)  # OSによっては未対応/不要な場合がある
             usb_util.claim_interface(dev, interface_number)
             if info is not None:
                 info.setdefault("claimed_interfaces", set()).add(interface_number)
@@ -2269,7 +2305,7 @@ class WebUSBBridge(QObject):
         try:
             return self._load_granted_origins()
         except Exception as e:
-            print(f"[pyside6-webusb] list_granted_origins: 例外を無視: {e}")
+            self._log("list_granted_origins", e)
             return {}
 
     def grant_device_for_origin(self, origin, vendor_id, product_id):
@@ -2312,7 +2348,7 @@ class WebUSBBridge(QObject):
             self._grant(origin, vendor_id, product_id)
             return not already_granted
         except Exception as e:
-            print(f"[pyside6-webusb] grant_device_for_origin: 例外を無視: {e}")
+            self._log("grant_device_for_origin", e)
             return False
 
     def revoke_origin_grant(self, origin, vendor_id, product_id):
@@ -2328,7 +2364,7 @@ class WebUSBBridge(QObject):
         except Exception as e:
             # 🛡️ 呼び出し元(設定パネル等)が「取り消しに成功したか」を正しく判断できるよう、
             #    保存失敗時にTrueを誤って返さない。
-            print(f"[pyside6-webusb] revoke_origin_grant: 例外を無視: {e}")
+            self._log("revoke_origin_grant", e)
             return False
 
     def revoke_all_for_origin(self, origin):
@@ -2340,6 +2376,6 @@ class WebUSBBridge(QObject):
                 return True
             return False
         except Exception as e:
-            print(f"[pyside6-webusb] revoke_all_for_origin: 例外を無視: {e}")
+            self._log("revoke_all_for_origin", e)
             return False
 

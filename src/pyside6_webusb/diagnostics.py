@@ -252,33 +252,47 @@ def format_environment_report(report: dict = None, locale=None) -> str:
     loc = report.get("locale") or resolve_locale(locale)
 
     not_found = diagnostics_text(loc, "report_not_found")
-    pyside6_line = f"PySide6: {report['pyside6_version'] or not_found}"
+    pyside6_label = diagnostics_text(loc, "label_pyside6")
+    pyside6_line = f"{pyside6_label}: {report['pyside6_version'] or not_found}"
     if report["shiboken6_version"]:
         pyside6_line += f" (shiboken6 {report['shiboken6_version']})"
 
-    pyusb_line = f"pyusb: {report['pyusb_version'] or not_found}"
+    pyusb_label = diagnostics_text(loc, "label_pyusb")
+    pyusb_line = f"{pyusb_label}: {report['pyusb_version'] or not_found}"
     pyusb_line += f" (backend: {report['pyusb_backend'] or not_found})"
 
+    rust_label = diagnostics_text(loc, "label_rust_acceleration")
     if report["rust_accelerated"]:
-        rust_line = f"Rust acceleration: {diagnostics_text(loc, 'report_rust_enabled')}"
+        rust_line = f"{rust_label}: {diagnostics_text(loc, 'report_rust_enabled')}"
         if report["rust_accel_version"]:
             rust_line += f" ({report['rust_accel_version']})"
     else:
-        rust_line = f"Rust acceleration: {diagnostics_text(loc, 'report_rust_disabled')}"
+        rust_line = f"{rust_label}: {diagnostics_text(loc, 'report_rust_disabled')}"
 
     # 🆕 v0.0.5a1
+    frame_label = diagnostics_text(loc, "label_frame_isolation")
     if report.get("frame_origin_isolation_available") is True:
-        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_available')}"
+        frame_line = f"{frame_label}: {diagnostics_text(loc, 'report_frame_available')}"
     elif report.get("frame_origin_isolation_available") is False:
-        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_unavailable')}"
+        frame_line = f"{frame_label}: {diagnostics_text(loc, 'report_frame_unavailable')}"
     else:
-        frame_line = f"Frame-level origin isolation: {diagnostics_text(loc, 'report_frame_unknown')}"
+        frame_line = f"{frame_label}: {diagnostics_text(loc, 'report_frame_unknown')}"
 
+    # 🆕 v0.0.6: 以前は"PySide6:"/"Python:"/"Qt runtime:"/"pyusb:"/"Rust
+    # acceleration:"/"Frame-level origin isolation:" の各ラベル部分が英語決め
+    # 打ちで、locale="ja"/"zh"を指定してもここだけ訳されずに残っていた
+    # (値やproblems/*_noteの中身は正しく訳されていたため気づきにくい不整合
+    # だった)。i18n.DIAGNOSTICS_STRINGSの新しいlabel_*キー経由でラベル自体も
+    # localeに追従させる。"PySide6"/"Python"/"pyusb"は元々どの言語でも綴りを
+    # 変えない固有名詞なので値としては変化しないが、"Qt runtime"/"Rust
+    # acceleration"/"Frame-level origin isolation"はja/zhで実際に翻訳される。
     lines = [
         f"pyside6-webusb {report['pyside6_webusb_version']}",
-        f"Python: {report['python_version']} ({report['python_implementation']}) on {report['platform']}",
+        f"{diagnostics_text(loc, 'label_python')}: {report['python_version']} "
+        f"({report['python_implementation']}) on {report['platform']}",
         pyside6_line,
-        f"Qt runtime: {report['qt_runtime_version'] or diagnostics_text(loc, 'report_qt_runtime_unknown')}",
+        f"{diagnostics_text(loc, 'label_qt_runtime')}: "
+        f"{report['qt_runtime_version'] or diagnostics_text(loc, 'report_qt_runtime_unknown')}",
         pyusb_line,
         rust_line,
         frame_line,

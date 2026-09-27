@@ -66,6 +66,11 @@ UsbHotplugWatcher をアプリ起動時に起動する、という使い方を�
 import time
 import threading
 
+# 🆕 v0.0.6: 下のbuild_configurations_tree()/_device_interface_class_tuples()の
+# 「例外を無視」ログをi18n化するため。i18n.pyはosのみに依存する葉モジュール
+# (i18n.pyのモジュールdocstring参照)なので、循環importは発生しない。
+from .i18n import log_text
+
 
 # ============================================================
 # 1) 保護対象インターフェースクラス
@@ -179,7 +184,12 @@ def bcd_to_version(bcd_value) -> tuple:
 # WebUSB対応ハードウェアSDK(例: thegecko/webusb同梱のデモや、市販USB機器の
 # 公式Web SDK)がそのままでは動かない。ここで実機の記述子を可能な限り
 # 汎用ブラウザ相当の形へ組み立てる。
-def build_device_descriptor(dev, usb_util, include_configurations=True) -> dict:
+def build_device_descriptor(dev, usb_util, include_configurations=True, locale=None) -> dict:
+    """🌐 locale: v0.0.6で追加。include_configurations=Trueの場合に
+    build_configurations_tree()へそのまま転送する——壊れた記述子を持つ機器の
+    endpoint/alternate/configuration単位のエラーログ(i18n.log_text参照)を、
+    呼び出し元(bridge.pyのWebUSBBridgeメソッド)が持つself._localeで出す
+    ため。省略時はi18n.DEFAULT_LOCALE(既存の日本語決め打ち出力)のまま。"""
     manufacturer = product = serial = None
     try:
         if getattr(dev, "iManufacturer", 0):
@@ -227,15 +237,18 @@ def build_device_descriptor(dev, usb_util, include_configurations=True) -> dict:
     }
 
     if include_configurations:
-        info["configurations"] = build_configurations_tree(dev, usb_util)
+        info["configurations"] = build_configurations_tree(dev, usb_util, locale=locale)
     return info
 
 
-def build_configurations_tree(dev, usb_util) -> list:
+def build_configurations_tree(dev, usb_util, locale=None) -> list:
     """dev配下の全Configuration/Interface(=各AlternateSetting)/Endpointを
     WebUSB仕様相当のツリー構造に変換する。1個の記述子取得に失敗しても
     全体を巻き込んで失敗させない(壊れた/変則的な記述子を持つ安物USB機器が
-    実世界には少なくないため)。"""
+    実世界には少なくないため)。
+
+    🌐 locale: v0.0.6で追加。壊れた記述子に遭遇した際のログ(i18n.log_text)を
+    どの言語で出すか。省略時はi18n.DEFAULT_LOCALE。"""
     configurations = []
     try:
         cfg_iter = list(dev)
@@ -296,11 +309,11 @@ def build_configurations_tree(dev, usb_util) -> list:
                             #    いるのに一部のendpointが見えない」という調査困難な状況の
                             #    温床)。他の箇所(bridge.py)と同じ"例外を無視"表記に揃え、
                             #    制御フロー(continueして列挙を続ける)自体は変更しない。
-                            print(f"[pyside6-webusb] build_configurations_tree(endpoint): 例外を無視: {e}")
+                            print(log_text(locale, "exception_ignored", context="build_configurations_tree(endpoint)", error=e))
                             continue
                     interfaces_by_number.setdefault(inum, []).append(alt)
                 except Exception as e:
-                    print(f"[pyside6-webusb] build_configurations_tree(alternate): 例外を無視: {e}")
+                    print(log_text(locale, "exception_ignored", context="build_configurations_tree(alternate)", error=e))
                     continue
 
             interfaces_list = [
@@ -323,7 +336,7 @@ def build_configurations_tree(dev, usb_util) -> list:
                 "interfaces": interfaces_list,
             })
         except Exception as e:
-            print(f"[pyside6-webusb] build_configurations_tree(configuration): 例外を無視: {e}")
+            print(log_text(locale, "exception_ignored", context="build_configurations_tree(configuration)", error=e))
             continue
     return configurations
 
@@ -503,7 +516,7 @@ def is_valid_usb_device_filter(filt) -> bool:
     return True
 
 
-def _device_interface_class_tuples(dev) -> list:
+def _device_interface_class_tuples(dev, locale=None) -> list:
     """このデバイスが持つ全インターフェース(・全alternate)の
     (bInterfaceClass, bInterfaceSubClass, bInterfaceProtocol)を集めたもの。
     フィルタのclassCode照合で「インターフェース単位のクラス」も見るために使う
@@ -525,7 +538,7 @@ def _device_interface_class_tuples(dev) -> list:
                         #    可視化する。この関数はフィルタ照合のたびに呼ばれうるため、
                         #    壊れた記述子を持つデバイスが挿さったままだと繰り返し出力
                         #    されうる点に注意(それでも「一度も分からない」よりは良い)。
-                        print(f"[pyside6-webusb] _device_interface_class_tuples(interface): 例外を無視: {e}")
+                        print(log_text(locale, "exception_ignored", context="_device_interface_class_tuples(interface)", error=e))
                         continue
             except Exception:
                 continue
@@ -546,9 +559,12 @@ def _interface_matches_filter(iface_triplet, filt) -> bool:
     return True
 
 
-def device_matches_usb_filter(dev, usb_util, filt) -> bool:
+def device_matches_usb_filter(dev, usb_util, filt, locale=None) -> bool:
     """'A USB device device matches a device filter filter'(仕様の手順をそのまま)。
-    filtに存在しないキーは無条件一致(=絞り込みなし)として扱う。"""
+    filtに存在しないキーは無条件一致(=絞り込みなし)として扱う。
+
+    🌐 locale: v0.0.6で追加。_device_interface_class_tuples()の壊れた記述子
+    ログへ転送するのみで、マッチング判定自体には一切影響しない。"""
     try:
         if not isinstance(filt, dict):
             return False
@@ -566,7 +582,7 @@ def device_matches_usb_filter(dev, usb_util, filt) -> bool:
             if serial != filt["serialNumber"]:
                 return False
         if "classCode" in filt:
-            iface_tuples = _device_interface_class_tuples(dev)
+            iface_tuples = _device_interface_class_tuples(dev, locale=locale)
             if any(_interface_matches_filter(t, filt) for t in iface_tuples):
                 return True  # 仕様どおり: いずれか1つのインターフェースが一致すれば即match
             if getattr(dev, "bDeviceClass", None) != filt["classCode"]:
@@ -580,7 +596,7 @@ def device_matches_usb_filter(dev, usb_util, filt) -> bool:
         return False
 
 
-def device_matches_any_usb_filter(dev, usb_util, filters) -> bool:
+def device_matches_any_usb_filter(dev, usb_util, filters, locale=None) -> bool:
     """filtersが空リストの場合は仕様どおり「一致するものなし」
     (=1台も候補に残らない)。サイトが「フィルタなしで全デバイスを見せたい」
     場合、仕様上は filters: [{}] (空オブジェクト。どのフィールドも
@@ -589,7 +605,7 @@ def device_matches_any_usb_filter(dev, usb_util, filters) -> bool:
     if not filters:
         return False
     try:
-        return any(device_matches_usb_filter(dev, usb_util, f) for f in filters)
+        return any(device_matches_usb_filter(dev, usb_util, f, locale=locale) for f in filters)
     except Exception:
         return False
 

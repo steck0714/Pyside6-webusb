@@ -91,8 +91,11 @@ def install(page, browser_window=None,
         QWebChannel自体が使えない環境では例外を送出せず None を返す
         (WebUSB機能だけが無効になり、アプリ全体は落とさない設計)。
     """
+    import json
+
     from .bridge import WebUSBBridge
     from .frame_origin import FrameOriginTracker
+    from .i18n import log_text, resolve_locale
 
     try:
         # 🛡️ バグ修正(v0.0.5a1): このimport 2行は、以前は本try節の外(関数の
@@ -132,22 +135,22 @@ def install(page, browser_window=None,
         #    オリジンを解決できるようになる(トークンを渡さない/不正なトークンは
         #    常に「オリジン不明」= 拒否になる。トップレベルページへのフォール
         #    バックは一切行わない)。
-        tracker = FrameOriginTracker(page)
+        tracker = FrameOriginTracker(page, locale=locale)
         tracker.wire()
         if tracker.is_functional:
             bridge._frame_tracker = tracker
         else:
-            print("[pyside6-webusb] install: navigationRequestedに接続できないため、"
-                  "navigator.usbはメインフレームのみに制限されます(古いPySide6/Qtの可能性があります)")
+            print(log_text(locale, "subframes_restricted"))
             bridge._frame_tracker = None
     except Exception as e:
-        print(f"[pyside6-webusb] install: FrameOriginTrackerの配線に失敗(navigator.usbはメインフレームのみに制限されます): {e}")
+        print(log_text(locale, "exception_ignored",
+                        context="install(FrameOriginTracker)", error=e))
         bridge._frame_tracker = None
 
     try:
         qwc_js = qwebchannel_js if qwebchannel_js is not None else _load_qwebchannel_js()
     except Exception as e:
-        print(f"[pyside6-webusb] install: qwebchannel.js の読み込みに失敗しました: {e}")
+        print(log_text(locale, "exception_ignored", context="install(qwebchannel.js)", error=e))
         return bridge  # ブリッジ自体は生成済みだが、スクリプト注入はできていない
 
     # 🆕 v0.0.5b3: extra_guard_jsが指定された場合のみ、専用スクリプトとして
@@ -160,7 +163,27 @@ def install(page, browser_window=None,
     ]
     if extra_guard_js:
         _script_specs.append(("PySide6WebUSBExtraGuard", extra_guard_js))
-    _script_specs.append(("PySide6WebUSBPolyfill", WEBUSB_POLYFILL_JS))
+    # 🌐 v0.0.6: window.__pysideWebUSB(F12コンソールから叩ける自己診断用の
+    # 「独自コマンド」——listGrantedDevices()/bridgeInfo()/explainTransferLimits())
+    # 自身のテキストにも、install(locale=...)と同じ言語を反映する。
+    #
+    # なぜWEBUSB_POLYFILL_JS定数そのものをf-string化/.format()しないか:
+    # tests/extract_polyfill_js.pyがこの定数をinstall()を一切経由せず生の
+    # まま抜き出してNode.jsへ直接渡す(tests/test_polyfill.js)ため、定数自体は
+    # 「未置換のまま実行しても構文的に有効なJavaScript」であり続ける必要が
+    # ある。そこでJSソース中には安全な既定値 var _pysideWebUSBLocale = 'en';
+    # という1行(＝それ単体で有効なJS)だけを埋め込んでおき、install()はこの
+    # 1行だけを対象に、実際に解決したロケールへ.replace()で個別に置き換える
+    # (chooser_strings/extra_guard_jsのような「別スクリプトとして注入」方式に
+    # すると、test_install.pyの`len(page._scripts.inserted) == 2`という既存の
+    # 想定スクリプト数を崩してしまうため、ここでは採用しない)。
+    loc = resolve_locale(locale)
+    localized_polyfill_js = WEBUSB_POLYFILL_JS.replace(
+        "var _pysideWebUSBLocale = 'en';",
+        f"var _pysideWebUSBLocale = {json.dumps(loc)};",
+        1,
+    )
+    _script_specs.append(("PySide6WebUSBPolyfill", localized_polyfill_js))
 
     for name, code in _script_specs:
         try:
@@ -176,7 +199,7 @@ def install(page, browser_window=None,
             script.setRunsOnSubFrames(bridge._frame_tracker is not None)
             page.scripts().insert(script)
         except Exception as e:
-            print(f"[pyside6-webusb] install: 例外を無視: {e}")
+            print(log_text(locale, "exception_ignored", context="install(script)", error=e))
 
     return bridge
 
@@ -832,7 +855,75 @@ WEBUSB_POLYFILL_JS = r"""
     // Webページからも(DevTools越しの人間だけでなく、そのページ自身のスクリプト
     // からも)見える。listKnownDevices等の@Slotを外した理由(bridge.py参照)と
     // 全く同じ原則がここにも適用される。
-    window.__pysideWebUSB = {
+    window.__pysideWebUSB = (function() {
+    // 🌐 v0.0.6: install(locale=...)と同じ言語を、この__pysideWebUSB自身の
+    // メッセージ(explainTransferLimits()のconsole.log文言、新設のhelp())にも
+    // 反映する。既定値は'en'——この定数(WEBUSB_POLYFILL_JS)はtests/
+    // extract_polyfill_js.pyによりinstall()を経由せず直接Node.jsのテストへ
+    // 渡されることがある(tests/test_polyfill.js)ため、install()が下の1行を
+    // 実際のロケールへ書き換える前の状態でも単体で有効なJavaScriptであり
+    // 続ける必要がある(polyfill.py側でこの1行だけを対象に.replace()する
+    // 実装になっている——詳細はinstall()内のコメント参照)。
+    var _pysideWebUSBLocale = 'en';
+    var _pysideWebUSBStrings = {
+        en: {
+            transferLimits: function(limits) {
+                return '[pyside6-webusb] Transfer size policy: transfers up to ' +
+                    limits.hostSafetyHardLimit + ' bytes are allowed here. Real Chrome ' +
+                    'would reject anything over ' + limits.chromeCompatibleWarnThreshold +
+                    ' bytes with DataError -- this implementation instead logs a ' +
+                    'console.warn() on that specific transfer and lets it proceed, since ' +
+                    'it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
+                    'implementation with its own, more permissive extensions. ' +
+                    'See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
+            },
+            help: '[pyside6-webusb] Available __pysideWebUSB commands: ' +
+                'listGrantedDevices() - devices already granted to this origin; ' +
+                "bridgeInfo() - this bridge's own version/backend/acceleration status; " +
+                "explainTransferLimits() - this implementation's transfer size policy vs " +
+                'real Chrome; locale() - the language this debug output currently uses ' +
+                '(from install(locale=...)).',
+        },
+        ja: {
+            transferLimits: function(limits) {
+                return '[pyside6-webusb] 転送サイズの方針: ここでは ' +
+                    limits.hostSafetyHardLimit + ' バイトまでの転送を許可しています。' +
+                    '実際のChromeなら ' + limits.chromeCompatibleWarnThreshold +
+                    ' バイトを超えるとDataErrorで拒否しますが、この実装ではその転送に' +
+                    '対してconsole.warn()を出すだけで処理は継続します——これはChromeの' +
+                    '完全な代替品を目指したものではなく、より寛容な独自拡張を持つ' +
+                    'WebUSB互換の実装だからです。詳しい理由はpyside6-webusbの' +
+                    'README/CHANGELOG(v0.0.4b2)を参照してください。';
+            },
+            help: '[pyside6-webusb] __pysideWebUSBで使えるコマンド: ' +
+                'listGrantedDevices() - このオリジンに既に許可済みのデバイス一覧 / ' +
+                'bridgeInfo() - このブリッジ自身のバージョン・バックエンド・' +
+                'アクセラレーション状況 / explainTransferLimits() - この実装の' +
+                '転送サイズ方針と実Chromeとの違い / locale() - このデバッグ出力が' +
+                '現在使っている言語(install(locale=...)から)。',
+        },
+        zh: {
+            transferLimits: function(limits) {
+                return '[pyside6-webusb] 传输大小策略: 此处允许最多 ' +
+                    limits.hostSafetyHardLimit + ' 字节的传输。真正的 Chrome 会对超过 ' +
+                    limits.chromeCompatibleWarnThreshold + ' 字节的传输以 DataError 拒绝,' +
+                    '而本实现只会针对该次传输输出 console.warn() 并允许其继续——因为本' +
+                    '实现并非要成为 Chrome 的完全替代品,而是一个带有更宽松扩展的 ' +
+                    'WebUSB 兼容实现。完整原因请参阅 pyside6-webusb 的 ' +
+                    'README/CHANGELOG(v0.0.4b2)。';
+            },
+            help: '[pyside6-webusb] __pysideWebUSB 可用命令: ' +
+                'listGrantedDevices() - 列出已授权给此来源的设备 / ' +
+                'bridgeInfo() - 本桥接自身的版本/后端/加速状态 / ' +
+                'explainTransferLimits() - 本实现的传输大小策略与真实 Chrome 的差异 / ' +
+                'locale() - 此调试输出当前使用的语言(来自 install(locale=...))。',
+        },
+    };
+    function _pysideWebUSBLocalized() {
+        return _pysideWebUSBStrings[_pysideWebUSBLocale] || _pysideWebUSBStrings.en;
+    }
+
+    return {
         // 呼び出し元オリジンが既に許可済みのデバイス一覧を、DevTools上で
         // console.table()を使って見やすく表示するショートカット。中身は
         // navigator.usb.getDevices()と完全に同じデータ(=追加の情報開示は無い)。
@@ -874,22 +965,37 @@ WEBUSB_POLYFILL_JS = r"""
         // 転送が起きた際は、この説明を読まなくてもtransferIn/Out自体が
         // console.warn()でその都度知らせる(res.warning、上記callBridge経由の
         // transferIn実装を参照)。
+        //
+        // 🌐 v0.0.6: 説明文のconsole.log自体は、install(locale=...)に応じて
+        // en/ja/zhの3言語で出す(戻り値のlimitsオブジェクト自体の中身・形は
+        // 言語に関わらず不変——tests/test_polyfill.jsはこのlimitsオブジェクトの
+        // 値だけを検証しており、console.log文言そのものは検証していない)。
         explainTransferLimits: function() {
             return callBridge('isAvailable').then(function(res) {
                 var limits = res.transferLimits || {};
-                var msg = '[pyside6-webusb] Transfer size policy: transfers up to ' +
-                    limits.hostSafetyHardLimit + ' bytes are allowed here. Real Chrome ' +
-                    'would reject anything over ' + limits.chromeCompatibleWarnThreshold +
-                    ' bytes with DataError -- this implementation instead logs a ' +
-                    'console.warn() on that specific transfer and lets it proceed, since ' +
-                    'it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
-                    'implementation with its own, more permissive extensions. ' +
-                    'See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
+                var msg = _pysideWebUSBLocalized().transferLimits(limits);
                 if (typeof console !== 'undefined' && console.log) console.log(msg);
                 return limits;
             });
         },
+
+        // 🆕 v0.0.6: この__pysideWebUSB自身が現在使っている言語("en"/"ja"/"zh"。
+        // install(locale=...)から、"auto"指定時はdetect_locale()の結果)。
+        // navigator.usb自体には相当機能が無い、独自拡張。
+        locale: function() {
+            return _pysideWebUSBLocale;
+        },
+
+        // 🆕 v0.0.6: 上記コマンド一覧をDevTools上に表示するショートカット
+        // ("独自コマンド"自身にもen/ja/zhの言語対応を、という要望に応える
+        // ための追加コマンド)。
+        help: function() {
+            var msg = _pysideWebUSBLocalized().help;
+            if (typeof console !== 'undefined' && console.log) console.log(msg);
+            return msg;
+        },
     };
+    })();
 
     // 🌐 WebUSB標準クラス群をwindowへ公開(実ブラウザ同様、Windowコンテキストから参照可能にする)
     if (typeof window.USB === 'undefined') window.USB = USB;

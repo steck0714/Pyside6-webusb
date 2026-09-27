@@ -148,10 +148,27 @@ CHOOSER_STRINGS = {
 
 
 def chooser_strings_for(locale):
-    """指定ロケール(normalize_locale/resolve_locale適用後の"en"/"ja"/"zh")の
-    チューザーダイアログ文言の辞書コピーを返す。未知の値は
-    normalize_locale()経由でDEFAULT_LOCALEへフォールバックする。"""
-    return dict(CHOOSER_STRINGS[normalize_locale(locale)])
+    """指定ロケール("en"/"ja"/"zh"、生の"auto"や未解決の値でも可)の
+    チューザーダイアログ文言の辞書コピーを返す。
+
+    🐛 バグ修正(v0.0.6): 以前はここで normalize_locale() を直接呼んでいたため、
+    locale="auto" を渡すと(normalize_locale()自身は"auto"という特別値を
+    知らないので)無条件にDEFAULT_LOCALEへフォールバックしていた——
+    実際に再現して確認: `PYSIDE6_WEBUSB_LOCALE=en` を設定した状態で
+    `chooser_strings_for("auto")["title"]` が(detect_locale()と同じ"en"の
+    "Select a USB Device"ではなく)"USBデバイスを選択"を返していた。
+    `resolve_locale()` は "auto" を明示的にdetect_locale()へ委譲する
+    (このモジュール冒頭のdocstring参照)ため、ここを resolve_locale() に
+    差し替えるだけで直る。`environment_report()`(diagnostics.py)は元々
+    resolve_locale()を使っており正しく動いていたため、`install(page,
+    locale="auto")`——`pyside6_webusb/__init__.py`のdocstringが謳う
+    「OSロケールへ追従する」という約束——は診断レポートでは守られていたが、
+    実際にユーザーの目に触れるデバイスチューザーダイアログ自身では守られて
+    いなかった(このパッケージの2つの多言語UI表面のうち、認識しにくい方の
+    片方だけが機能していなかった)。
+    新規回帰テスト: tests/test_i18n.py の
+    test_chooser_strings_for_auto_follows_detected_locale。"""
+    return dict(CHOOSER_STRINGS[resolve_locale(locale)])
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +226,20 @@ DIAGNOSTICS_STRINGS = {
         "report_problems_header": "Problems detected:",
         "report_no_problems": "No problems detected.",
         "report_reference_prefix": "Note: {note}",
+        # 🆕 v0.0.6: format_environment_report()の各行ラベル。0.0.5.post7までは
+        # これらが英語決め打ちで、locale="ja"/"zh"を指定しても"PySide6:"等の
+        # ラベル部分だけ常に英語のまま残っていた(値・problems/*_noteの中身は
+        # 正しく訳されるのに、その左のラベルだけ訳されない不揃いな状態)。
+        # "PySide6"/"Python"/"pyusb"のような固有名詞はどの言語でも綴りを
+        # 変えない(値として3言語とも同じ文字列)が、"Qt runtime"/"Rust
+        # acceleration"/"Frame-level origin isolation"のような説明的な語句は
+        # 実際に訳す。
+        "label_pyside6": "PySide6",
+        "label_python": "Python",
+        "label_qt_runtime": "Qt runtime",
+        "label_pyusb": "pyusb",
+        "label_rust_acceleration": "Rust acceleration",
+        "label_frame_isolation": "Frame-level origin isolation",
     },
     "ja": {
         "pyusb_import_error": "pyusb自体がimportできません('pip install pyusb'を確認してください): {error}",
@@ -259,6 +290,12 @@ DIAGNOSTICS_STRINGS = {
         "report_problems_header": "検出された問題:",
         "report_no_problems": "問題は検出されませんでした。",
         "report_reference_prefix": "参考: {note}",
+        "label_pyside6": "PySide6",
+        "label_python": "Python",
+        "label_qt_runtime": "Qtランタイム",
+        "label_pyusb": "pyusb",
+        "label_rust_acceleration": "Rust高速化",
+        "label_frame_isolation": "フレーム単位のオリジン分離",
     },
     "zh": {
         "pyusb_import_error": "无法导入 pyusb 本身(请确认已执行 'pip install pyusb'): {error}",
@@ -304,15 +341,195 @@ DIAGNOSTICS_STRINGS = {
         "report_problems_header": "检测到的问题:",
         "report_no_problems": "未检测到问题。",
         "report_reference_prefix": "参考: {note}",
+        "label_pyside6": "PySide6",
+        "label_python": "Python",
+        "label_qt_runtime": "Qt 运行时",
+        "label_pyusb": "pyusb",
+        "label_rust_acceleration": "Rust 加速",
+        "label_frame_isolation": "帧级别来源隔离",
     },
 }
 
 
 def diagnostics_text(locale, key, **kwargs):
-    """DIAGNOSTICS_STRINGS[normalize_locale(locale)][key] を取り出し、kwargsが
-    あれば str.format() で埋め込む。存在しないキーはKeyErrorを送出する
+    """DIAGNOSTICS_STRINGS[resolve_locale(locale)][key] を取り出し、
+    str.format(**kwargs) で埋め込んで返す。存在しないキーはKeyErrorを送出する
     (diagnostics.py側の呼び出しミス・キー名のtypoを早期に気付けるようにする
     ため、握りつぶさない——ここは"開発時に見つけたい"種類のバグなので、
-    通常運用でこのパッケージ自身のロケール文字列がKeyErrorになることは無い)。"""
-    text = DIAGNOSTICS_STRINGS[normalize_locale(locale)][key]
-    return text.format(**kwargs) if kwargs else text
+    通常運用でこのパッケージ自身のロケール文字列がKeyErrorになることは無い)。
+
+    🐛 v0.0.6: kwargsが空の場合でも常に.format()を呼ぶ(以前は
+    `text.format(**kwargs) if kwargs else text` としてkwargsが無いときは
+    format()自体を呼ばずtextをそのまま返していた)。この省略は、kwargsを
+    要求しない文字列の中に(str.format()のエスケープ記法である)`{{`/`}}`が
+    含まれるケースで、format()が呼ばれないためエスケープが解決されず
+    `{{...}}`がそのまま出力されてしまうバグを生む——実際に
+    native_messaging.NATIVE_MESSAGING_STRINGSの"manifest_not_an_object"
+    (リテラルの中括弧`{...}`を説明文中で示す必要があったキー)で発生を確認
+    して修正した。DIAGNOSTICS_STRINGS/LOG_STRINGS/NATIVE_MESSAGING_STRINGSの
+    3テーブルはこのdiagnostics_text/log_text/native_messaging_textという
+    同型の3関数で読み出すため、3関数とも同時に直している。
+
+    🛡️ v0.0.6: normalize_locale()からresolve_locale()へ変更(chooser_strings_for()
+    と同じ理由・同じ修正——このモジュールdocstring及びchooser_strings_for()の
+    コメント参照)。environment_report()/format_environment_report()は元々
+    呼び出し前に自分でresolve_locale()を通した"解決済み"の値だけをここへ渡して
+    いた(=これ自体は実際のバグではなかった)ため既存の挙動は一切変わらないが、
+    このヘルパーを今後直接呼ぶ別の呼び出し元が"auto"を生のまま渡してきても
+    正しく動くようにする防御的な変更。"""
+    text = DIAGNOSTICS_STRINGS[resolve_locale(locale)][key]
+    return text.format(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 🆕 v0.0.6: bridge.py/frame_origin.py/hardening.py/polyfill.py に散らばっていた
+# 「例外を無視する」系のデバッグprint(合計49箇所、いずれも
+# `print(f"[pyside6-webusb] X: 例外を無視: {e}")` 系の、日本語決め打ちの
+# ハードコード文字列)を1箇所へ集約するためのテーブル。
+#
+# なぜ集約するか: errors.py がDOMException名の接頭辞("SecurityError: "等)を
+# 「bridge.py内の10箇所以上で個別に手書きしていた」状態から1箇所の関数群へ
+# 集約したのと全く同じ理由・同じ考え方(そちらのモジュールdocstring参照)。
+# 49箇所それぞれに個別の3言語訳を用意する代わりに、共通の1テンプレート
+# ("exception_ignored")を全箇所が共有することで、(1) 用語の訳揺れが起きない、
+# (2) 新しい呼び出し箇所を足す際に翻訳漏れが起きない、(3) 万一将来この文言を
+# 調整する場合も1箇所で済む。context引数には呼び出し元を示す既存の識別子
+# (例: "_poll_hotplug(connect)")をそのまま渡す——これらの識別子はメソッド名/
+# 内部処理名由来の技術的な英語表記であり(chooser_dialogの"SN"やhardening.pyの
+# "rich descriptor"と同じ扱い)、翻訳の対象にしない。
+#
+# "subframes_restricted" のみ例外的に専用キー: install()がFrameOriginTrackerを
+# navigationRequestedへ配線できなかった場合の通知で、単なる「例外を無視」では
+# なく「navigator.usbの利用可能範囲がメインフレームだけに制限される」という
+# ホストアプリ開発者にとって重要な既知の制約を説明する文言のため。
+LOG_STRINGS = {
+    "en": {
+        "exception_ignored": "[pyside6-webusb] {context}: exception ignored: {error}",
+        "subframes_restricted": (
+            "[pyside6-webusb] install: could not attach to navigationRequested, so "
+            "navigator.usb will be restricted to the main frame only (this may indicate "
+            "an older PySide6/Qt)."
+        ),
+    },
+    "ja": {
+        "exception_ignored": "[pyside6-webusb] {context}: 例外を無視: {error}",
+        "subframes_restricted": (
+            "[pyside6-webusb] install: navigationRequestedに接続できないため、"
+            "navigator.usbはメインフレームのみに制限されます"
+            "(古いPySide6/Qtの可能性があります)"
+        ),
+    },
+    "zh": {
+        "exception_ignored": "[pyside6-webusb] {context}: 已忽略异常: {error}",
+        "subframes_restricted": (
+            "[pyside6-webusb] install: 无法连接到 navigationRequested,因此 "
+            "navigator.usb 将仅限于主框架可用(可能是较旧版本的 PySide6/Qt 导致)。"
+        ),
+    },
+}
+
+
+def log_text(locale, key, **kwargs):
+    """LOG_STRINGSからの取り出し。diagnostics_text()と全く同じ形の小さな
+    ヘルパー(resolve_locale()を使うのも同じ理由)。呼び出し元は
+    `print(log_text(self._locale, "exception_ignored", context="...", error=e))`
+    のように使う(印字自体は呼び出し元が担う——このヘルパーは文字列を組み立てる
+    だけで副作用を持たない)。"""
+    text = LOG_STRINGS[resolve_locale(locale)][key]
+    return text.format(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 🆕 v0.0.6: native_messaging.py (manifest.json静的チェッカー、
+# pyside6-webusb-doctor --check-native-messaging <manifest.json>) 向けの文言。
+# 姉妹プロジェクトfox-webusbが使うChrome/Firefox native messagingプロトコル
+# ("native codeでnavigator.usbが機能しているように見せる"別方式)向けの新
+# コマンドなので、既存の"独自コマンド"群(chooser_dialog/diagnostics/
+# __pysideWebUSB)と同じく最初からen/ja/zhの3言語対応で用意する。
+# 詳細はnative_messaging.pyのモジュールdocstring参照。
+NATIVE_MESSAGING_STRINGS = {
+    "en": {
+        "check_header": "Native messaging manifest check: {path}",
+        "manifest_unreadable": "Could not read '{path}': {error}",
+        "manifest_invalid_json": "Not valid JSON: {error}",
+        "manifest_not_an_object": (
+            "The manifest must be a JSON object (e.g. '{{...}}'), not a list or a scalar value."
+        ),
+        "manifest_missing_key": "Missing required key: '{missing_key}'",
+        "manifest_unsupported_type": (
+            "'type' is {type!r}, but native messaging hosts must use 'stdio' "
+            "(the only transport Chrome/Firefox currently support for this)."
+        ),
+        "manifest_path_missing": (
+            "'path' ('{path}', resolved to '{resolved}') does not point to a file that "
+            "exists. The browser resolves a relative 'path' against the manifest's own directory."
+        ),
+        "manifest_path_not_executable": (
+            "'{path}' exists but does not look executable (missing the execute bit)."
+        ),
+        "manifest_missing_allowed_list": (
+            "Missing 'allowed_origins' (Chrome extension IDs, as "
+            "'chrome-extension://<id>/') or 'allowed_extensions' (Firefox add-on IDs) -- "
+            "without at least one of these, no extension is permitted to connect to this host."
+        ),
+    },
+    "ja": {
+        "check_header": "Native messaging manifestのチェック: {path}",
+        "manifest_unreadable": "'{path}' を読み込めません: {error}",
+        "manifest_invalid_json": "妥当なJSONではありません: {error}",
+        "manifest_not_an_object": (
+            "manifestはJSONオブジェクト(例: '{{...}}')である必要があります"
+            "(リストや単一の値ではなく)。"
+        ),
+        "manifest_missing_key": "必須キー '{missing_key}' がありません",
+        "manifest_unsupported_type": (
+            "'type' が {type!r} になっていますが、native messagingホストは "
+            "'stdio' を使う必要があります"
+            "(Chrome/Firefoxが現在この用途でサポートする唯一の転送方式)。"
+        ),
+        "manifest_path_missing": (
+            "'path'('{path}'、解決後: '{resolved}')が指すファイルが存在しません。"
+            "ブラウザは相対パスの'path'をmanifest自身のディレクトリを基準に解決します。"
+        ),
+        "manifest_path_not_executable": (
+            "'{path}' は存在しますが実行可能に見えません(実行ビットが立っていません)。"
+        ),
+        "manifest_missing_allowed_list": (
+            "'allowed_origins'(Chrome拡張機能のID、'chrome-extension://<id>/'の形式)"
+            "または'allowed_extensions'(FirefoxアドオンのID)のどちらもありません——"
+            "これらが無いと、どの拡張機能もこのホストへ接続できません。"
+        ),
+    },
+    "zh": {
+        "check_header": "Native messaging manifest 检查: {path}",
+        "manifest_unreadable": "无法读取 '{path}': {error}",
+        "manifest_invalid_json": "不是有效的 JSON: {error}",
+        "manifest_not_an_object": (
+            "manifest 必须是一个 JSON 对象(例如 '{{...}}'),而不是列表或标量值。"
+        ),
+        "manifest_missing_key": "缺少必需的键: '{missing_key}'",
+        "manifest_unsupported_type": (
+            "'type' 为 {type!r},但 native messaging 主机必须使用 'stdio'"
+            "(这是 Chrome/Firefox 目前为此支持的唯一传输方式)。"
+        ),
+        "manifest_path_missing": (
+            "'path'('{path}',解析后为 '{resolved}')指向的文件不存在。"
+            "浏览器会以 manifest 自身所在目录为基准解析相对路径的 'path'。"
+        ),
+        "manifest_path_not_executable": (
+            "'{path}' 存在,但看起来不可执行(缺少可执行权限位)。"
+        ),
+        "manifest_missing_allowed_list": (
+            "缺少 'allowed_origins'(Chrome 扩展 ID,格式为 'chrome-extension://<id>/')"
+            "或 'allowed_extensions'(Firefox 附加组件 ID)——如果两者都没有,"
+            "任何扩展都无法连接到此主机。"
+        ),
+    },
+}
+
+
+def native_messaging_text(locale, key, **kwargs):
+    """NATIVE_MESSAGING_STRINGSからの取り出し。diagnostics_text()/log_text()と
+    全く同じ形(resolve_locale()を使うのも同じ理由)。"""
+    text = NATIVE_MESSAGING_STRINGS[resolve_locale(locale)][key]
+    return text.format(**kwargs)
