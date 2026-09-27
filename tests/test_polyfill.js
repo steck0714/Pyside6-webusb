@@ -638,6 +638,23 @@ async function main() {
     assert.strictEqual(limits.chromeCompatibleWarnThreshold, 33554432);
     console.log('window.__pysideWebUSB debug namespace (listGrantedDevices/bridgeInfo/explainTransferLimits): OK');
 
+    // 🆕 v0.0.6: window.__pysideWebUSB.locale()/help() -- 「独自コマンド」自身にも
+    // en/ja/zhを反映させる要望に応えた新規コマンド。この抽出テストはinstall()を
+    // 経由しない(tests/extract_polyfill_js.py参照)ため、_pysideWebUSBLocaleは
+    // ソース中の安全な既定値'en'のまま——install()経由の実際の言語切り替え
+    // ("var _pysideWebUSBLocale = 'en';"を対象にした.replace())自体は
+    // Python側のtests/test_install.pyで検証する。
+    assert.strictEqual(typeof window.__pysideWebUSB.locale, 'function');
+    assert.strictEqual(window.__pysideWebUSB.locale(), 'en',
+        "抽出テストはinstall()を経由しないため、既定値'en'のままであるべき");
+    assert.strictEqual(typeof window.__pysideWebUSB.help, 'function');
+    const helpText = window.__pysideWebUSB.help();
+    assert.strictEqual(typeof helpText, 'string');
+    for (const name of ['listGrantedDevices', 'bridgeInfo', 'explainTransferLimits', 'locale']) {
+        assert.ok(helpText.includes(name), `help()の説明文に${name}への言及があるはず`);
+    }
+    console.log('window.__pysideWebUSB.locale()/help() (v0.0.6, en既定値): OK');
+
     assert(window.USB, 'window.USB must be defined');
     assert(window.USBDevice, 'window.USBDevice must be defined');
     assert(window.USBConnectionEvent, 'window.USBConnectionEvent must be defined');

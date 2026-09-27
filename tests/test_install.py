@@ -200,6 +200,72 @@ def test_install_forwards_locale_and_chooser_strings_to_the_bridge():
     print("test_install_forwards_locale_and_chooser_strings_to_the_bridge: OK")
 
 
+def _polyfill_script_source(page):
+    for s in page._scripts.inserted:
+        if s.name() == "PySide6WebUSBPolyfill":
+            return s.sourceCode()
+    raise AssertionError("PySide6WebUSBPolyfillという名前のスクリプトが見つからない")
+
+
+def test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script():
+    """🆕 v0.0.6: install(locale=...)は、WebUSBBridge/チューザーダイアログだけで
+    なく、注入するPySide6WebUSBPolyfillスクリプト自体の中身
+    (window.__pysideWebUSB.explainTransferLimits()/help()が使うテキストの
+    言語)にも反映されるべき——という新機能の配線を確認する回帰テスト。
+
+    polyfill.WEBUSB_POLYFILL_JS内の安全な既定値 "var _pysideWebUSBLocale =
+    'en';" という1行だけをinstall()が対象に書き換える設計(詳細はpolyfill.py
+    のinstall()内コメント、および_pysideWebUSBLocaleのJS側コメント参照)なので、
+    ここではその1行が実際に書き換わっていること・元のWEBUSB_POLYFILL_JS定数
+    自身は変更されない(=他のinstall()呼び出しに影響しない)ことを確認する。"""
+    from pyside6_webusb.polyfill import WEBUSB_POLYFILL_JS
+    assert "var _pysideWebUSBLocale = 'en';" in WEBUSB_POLYFILL_JS
+
+    _make_app()
+
+    page_ja = FakePage(url="https://a.example/")
+    install(page_ja, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+            locale="ja")
+    src_ja = _polyfill_script_source(page_ja)
+    # 🔍 json.dumps()はJSON仕様どおり常にダブルクォートで文字列を出力するため、
+    # 置換後は元のシングルクォート("= 'en';")ではなくダブルクォート
+    # ("= \"ja\";")になる——どちらも有効なJavaScriptであり、動作上の違いは無い。
+    assert 'var _pysideWebUSBLocale = "ja";' in src_ja
+    assert "var _pysideWebUSBLocale = 'en';" not in src_ja
+
+    page_zh = FakePage(url="https://b.example/")
+    install(page_zh, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+            locale="zh")
+    assert 'var _pysideWebUSBLocale = "zh";' in _polyfill_script_source(page_zh)
+
+    # locale省略時は既定(i18n.DEFAULT_LOCALE=="ja")と同じになる(他の公開APIと
+    # 挙動を揃える。i18n.py/resolve_locale()参照)。
+    page_default = FakePage(url="https://c.example/")
+    install(page_default, settings_organization="pyside6-webusb-tests", settings_application="test_install")
+    assert 'var _pysideWebUSBLocale = "ja";' in _polyfill_script_source(page_default)
+
+    # locale="auto"はdetect_locale()の結果に従う(chooser_strings_for("auto")と
+    # 同じ解決経路——test_i18n.pyのtest_chooser_strings_for_auto_follows_detected_locale
+    # 参照)。
+    page_auto = FakePage(url="https://d.example/")
+    old_env = os.environ.get("PYSIDE6_WEBUSB_LOCALE")
+    os.environ["PYSIDE6_WEBUSB_LOCALE"] = "en"
+    try:
+        install(page_auto, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+                locale="auto")
+    finally:
+        if old_env is None:
+            os.environ.pop("PYSIDE6_WEBUSB_LOCALE", None)
+        else:
+            os.environ["PYSIDE6_WEBUSB_LOCALE"] = old_env
+    assert 'var _pysideWebUSBLocale = "en";' in _polyfill_script_source(page_auto)
+
+    # 元のモジュール定数自体は変更されていない(各install()呼び出しが独立した
+    # コピーを注入している)ことも確認する。
+    assert "var _pysideWebUSBLocale = 'en';" in WEBUSB_POLYFILL_JS
+    print("test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script: OK")
+
+
 if __name__ == "__main__":
     class _FakeMonkeypatch:
         """pytestなしでも走らせられるよう、monkeypatch.setitem相当を素朴に実装したもの
@@ -228,4 +294,5 @@ if __name__ == "__main__":
     mp.undo()
     test_install_injects_extra_guard_js_before_the_polyfill_when_given()
     test_install_forwards_locale_and_chooser_strings_to_the_bridge()
+    test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script()
     print("ALL INSTALL TESTS PASSED")

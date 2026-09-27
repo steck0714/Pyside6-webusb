@@ -40,18 +40,36 @@ def test_environment_report_locale_defaults_to_japanese_for_backward_compatibili
 
 def test_environment_report_locale_en_and_zh_translate_the_rendered_text():
     """🆕 v0.0.5b3: locale="en"/"zh" を明示すると、format_environment_report()の
-    出力(見出し・注記)がその言語になることを確認する。技術的なフィールド名
-    ("PySide6:"、"pyusb:"等)は既存の設計どおり全ロケール共通で英語のまま。"""
+    出力(見出し・注記)がその言語になることを確認する。"PySide6"/"Python"/"pyusb"
+    のような固有名詞のフィールド名はどの言語でも綴りを変えない(=常に同じ
+    文字列)。
+
+    🐛 v0.0.6: 上記コメントはかつて「フィールド名は(固有名詞に限らず)全ロケール
+    共通で英語のまま」という、実際にはこの実装の欠落を追認しただけの説明に
+    なっていた——"Qt runtime:"/"Rust acceleration:"/"Frame-level origin
+    isolation:" は説明的な語句であり固有名詞ではないにも関わらず、
+    locale="ja"/"zh"を指定してもラベル部分だけ英語のまま残っていた(値や
+    problems/*_noteの中身は正しく訳されるのに、その左のラベルだけ訳されない
+    不揃いな状態。i18n.DIAGNOSTICS_STRINGSの新しいlabel_*キー参照)。
+    以下でその3つが実際にja/zhへ訳されていることを確認する。"""
     report_en = environment_report(locale="en")
     assert report_en["locale"] == "en"
     text_en = format_environment_report(report_en)
     assert ("Problems detected:" in text_en) or ("No problems detected." in text_en)
-    assert "PySide6:" in text_en  # フィールド名は常に英語
+    assert "PySide6:" in text_en  # 固有名詞のフィールド名は常に英語
 
     report_zh = environment_report(locale="zh")
     assert report_zh["locale"] == "zh"
     text_zh = format_environment_report(report_zh)
     assert ("检测到的问题:" in text_zh) or ("未检测到问题。" in text_zh)
+    assert "PySide6:" in text_zh  # 固有名詞は中国語でも綴りを変えない
+    assert "Rust 加速:" in text_zh  # 🐛 v0.0.6: 以前は"Rust acceleration:"のまま残っていた
+    assert "帧级别来源隔离:" in text_zh  # 🐛 v0.0.6: 同上("Frame-level origin isolation:")
+
+    report_ja = environment_report(locale="ja")
+    text_ja = format_environment_report(report_ja)
+    assert "Rust高速化:" in text_ja  # 🐛 v0.0.6: 以前は"Rust acceleration:"のまま残っていた
+    assert "フレーム単位のオリジン分離:" in text_ja  # 🐛 v0.0.6: 同上
 
 
 def test_format_environment_report_uses_the_reports_own_locale_by_default():

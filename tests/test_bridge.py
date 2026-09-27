@@ -1234,6 +1234,56 @@ def test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input():
     print("test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input: OK")
 
 
+def test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15():
+    """🔮 v0.0.6: 「python3.15専用に切り替わる箇所は、3.16になっても動くか」の
+    確認依頼への回答。
+
+    _b64_decode_supports_canonical()(0.0.5.post7まではモジュール読み込み時に
+    一度だけ評価される_B64_DECODE_SUPPORTS_CANONICALという定数だった)の
+    判定式は `>= (3, 15)` という"3.15以上"の床(floor)判定であり、"3.15"に
+    対する上限(ceiling)や完全一致(==)ではないため、3.16はもちろんそれ以降の
+    バージョンでも変わらずTrueであり続ける設計になっている——これは実際の
+    3.16インタプリタが無くても、関数に直接versionタプルを与えることで
+    検証できる(それこそが今回この定数を関数へリファクタリングした理由)。
+
+    実際に動いているインタプリタ(sys.version_info、このCIでは3.12系)を
+    使う既定の呼び出し方(引数省略)が、3.15未満の全パッケージ既定サポート
+    範囲(pyproject.tomlのrequires-python=">=3.9"参照)で正しくFalseに
+    なることも合わせて確認する。"""
+    from pyside6_webusb.bridge import _b64_decode_supports_canonical, _B64_DECODE_SUPPORTS_CANONICAL
+
+    # 3.15未満(このパッケージがサポートする最も古いバージョンを含む): False
+    for v in [(3, 9, 0), (3, 9, 20), (3, 13, 5), (3, 14, 0)]:
+        assert _b64_decode_supports_canonical(v) is False, v
+
+    # 3.15ちょうど(canonical引数が実際に追加されたバージョン)から: True
+    assert _b64_decode_supports_canonical((3, 15, 0)) is True
+
+    # 🔮 本題: 3.16、3.17、さらにその先の未来のマイナーバージョンでもTrueの
+    # ままであるべき(floor判定なので上限が無い)。
+    for v in [(3, 16, 0), (3, 17, 3), (3, 99, 0)]:
+        assert _b64_decode_supports_canonical(v) is True, v
+
+    # 仮に将来メジャーバージョンが4系になった場合(現実的ではないが、
+    # "(3, 15)"という定数と単純な文字列比較等をしていた場合に壊れやすい
+    # ケースの一つ)でもTrueのままであるべき。
+    assert _b64_decode_supports_canonical((4, 0, 0)) is True
+
+    # sys.version_info本体は(major, minor, micro, releaselevel, serial)という
+    # 5要素のnamedtupleであり、3要素タプルではない——実際の呼び出し形と
+    # 互換であることも確認する(version_infoが本物のsys.version_infoで
+    # あっても、テストのようにただのタプルであっても、どちらでも動くべき)。
+    assert _b64_decode_supports_canonical((3, 16, 0, "final", 0)) is True
+    assert _b64_decode_supports_canonical(sys.version_info) == (sys.version_info[:2] >= (3, 15))
+
+    # 引数省略時は実際に動いているインタプリタの判定と一致し、モジュール
+    # 読み込み時に一度だけ評価されたモジュール属性(_B64_DECODE_SUPPORTS_CANONICAL、
+    # _b64decode()自身が参照する)とも一致する(=リファクタリングの前後で
+    # 実際の挙動が一切変わっていないことの確認)。
+    assert _b64_decode_supports_canonical() == _B64_DECODE_SUPPORTS_CANONICAL
+    print("test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15: OK")
+
+
 def test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError():
     """🛡️ バグ修正の回帰テスト(v0.0.5a1)。
 
@@ -2255,6 +2305,7 @@ if __name__ == "__main__":
     test_full_flow_persists_grant_and_usage_without_mocking_internals(mp)
     test_bulkTransferIn_adds_the_in_direction_bit()
     test_b64decode_rejects_non_canonical_padding_but_accepts_canonical_input()
+    test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15()
     test_bulkTransferOut_reports_malformed_base64_as_DataError_not_generic_NetworkError()
     test_control_transfer_class_request_to_protected_interface_is_blocked()
     test_control_transfer_interface_recipient_requires_claim()

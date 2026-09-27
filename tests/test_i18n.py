@@ -10,10 +10,12 @@ from pyside6_webusb.i18n import (
     CHOOSER_STRINGS,
     DEFAULT_LOCALE,
     DIAGNOSTICS_STRINGS,
+    LOG_STRINGS,
     SUPPORTED_LOCALES,
     chooser_strings_for,
     detect_locale,
     diagnostics_text,
+    log_text,
     normalize_locale,
     resolve_locale,
 )
@@ -107,6 +109,56 @@ def test_diagnostics_text_formats_and_defaults_to_japanese():
     print("test_diagnostics_text_formats_and_defaults_to_japanese: OK")
 
 
+def test_chooser_strings_for_auto_follows_detected_locale(monkeypatch):
+    """🐛 バグ修正の回帰テスト(v0.0.6)。
+
+    以前は chooser_strings_for() が内部で normalize_locale() を直接呼んでおり、
+    "auto" という特別値を認識できず常にDEFAULT_LOCALE("ja")へフォールバック
+    していた——resolve_locale("auto") は正しく detect_locale() に委譲するにも
+    関わらず、である。実際に修正前のコードで再現して確認済み: 環境変数
+    PYSIDE6_WEBUSB_LOCALE=en を設定していても、chooser_strings_for("auto")は
+    日本語の"USBデバイスを選択"を返していた——一方でdiagnostics.environment_report()
+    は同じ環境変数を正しく反映していた(resolve_locale()を使っていたため)。
+    つまり `install(page, locale="auto")` は、pyside6_webusb/__init__.pyの
+    docstringが謳う「OSロケールへ追従する」という約束を、診断レポートでは
+    守れていたのに実際のデバイスチューザーダイアログでは守れていなかった。
+    """
+    monkeypatch.setenv("PYSIDE6_WEBUSB_LOCALE", "en")
+    assert chooser_strings_for("auto")["title"] == CHOOSER_STRINGS["en"]["title"]
+    monkeypatch.setenv("PYSIDE6_WEBUSB_LOCALE", "zh")
+    assert chooser_strings_for("auto")["title"] == CHOOSER_STRINGS["zh"]["title"]
+    monkeypatch.setenv("PYSIDE6_WEBUSB_LOCALE", "ja")
+    assert chooser_strings_for("auto")["title"] == CHOOSER_STRINGS["ja"]["title"]
+    # "auto"以外の挙動(明示的な言語指定、既定値)は今までどおり変わらない。
+    assert chooser_strings_for("en")["title"] == CHOOSER_STRINGS["en"]["title"]
+    assert chooser_strings_for(None)["title"] == CHOOSER_STRINGS[DEFAULT_LOCALE]["title"]
+    print("test_chooser_strings_for_auto_follows_detected_locale: OK")
+
+
+def test_every_supported_locale_has_the_same_log_keys():
+    """🆕 v0.0.6で追加したLOG_STRINGS(bridge.py/frame_origin.py/hardening.py/
+    polyfill.pyに散らばっていた「例外を無視」系デバッグprintの集約先)も、
+    CHOOSER_STRINGS/DIAGNOSTICS_STRINGSと同じ構造チェックを適用する。"""
+    key_sets = {locale: set(strings.keys()) for locale, strings in LOG_STRINGS.items()}
+    assert set(LOG_STRINGS.keys()) == set(SUPPORTED_LOCALES)
+    reference = key_sets["en"]
+    for locale, keys in key_sets.items():
+        assert keys == reference, f"locale {locale!r} has mismatched log string keys: {keys ^ reference}"
+    print("test_every_supported_locale_has_the_same_log_keys: OK")
+
+
+def test_log_text_formats_context_and_error_and_defaults_to_japanese():
+    assert log_text(None, "exception_ignored", context="foo", error="bar") == \
+        "[pyside6-webusb] foo: 例外を無視: bar"
+    assert log_text("en", "exception_ignored", context="foo", error="bar") == \
+        "[pyside6-webusb] foo: exception ignored: bar"
+    assert log_text("zh", "exception_ignored", context="foo", error="bar") == \
+        "[pyside6-webusb] foo: 已忽略异常: bar"
+    # resolve_locale()経由なので"auto"も(chooser_strings_for/diagnostics_textと
+    # 同じく)正しく解決される。
+    print("test_log_text_formats_context_and_error_and_defaults_to_japanese: OK")
+
+
 if __name__ == "__main__":
     class _FakeMonkeypatch:
         """pytestなしでも走らせられるよう、monkeypatch.setenv/delenv相当を素朴に
@@ -141,4 +193,8 @@ if __name__ == "__main__":
     test_chooser_strings_for_returns_an_independent_copy()
     test_chooser_strings_heading_template_has_origin_placeholder()
     test_diagnostics_text_formats_and_defaults_to_japanese()
+    test_chooser_strings_for_auto_follows_detected_locale(mp)
+    mp.undo()
+    test_every_supported_locale_has_the_same_log_keys()
+    test_log_text_formats_context_and_error_and_defaults_to_japanese()
     print("ALL I18N TESTS PASSED")
