@@ -2,19 +2,19 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.5b3**
+⚠️ **Experimental Beta — v0.0.6**
 
 **PySide6 / QtWebEngine** アプリケーション向けの WebUSB API 実装です。
 
 JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** による実USB通信を組み合わせ、QtWebEngine では標準提供されていない `navigator.usb` を提供します。
 
-> GitHub上の開発・リリース表記は `v0.0.5b3` です。PyPI/PEP 440上で実際にパッケージへ入るバージョン文字列は `0.0.5.post7` です。
+> `0.0.6` はzip/sdist/wheel/`_version.py`のすべてで素のバージョン文字列を使います——`aN`/`bN`のプレリリースタグも、その上に付ける`.postN`も無し。`0.0.5`系列(GitHub上のzip表記`v0.0.5b3`とPyPI/PEP 440上の実際のバージョン`0.0.5.post7`が異なっていた)とは違う扱いです。理由は`CHANGELOG.md`参照。
 
 ## 特徴
 
 - WebUSB互換 `navigator.usb`
 - 実USBデバイスとの通信
-- ネイティブデバイス選択ダイアログ
+- ネイティブデバイス選択ダイアログ(英語/日本語/中国語の言語対応込み。ダイアログ・診断レポート・`pyside6-webusb-doctor` CLI、そして`0.0.6`からは`window.__pysideWebUSB`のDevTools名前空間と内部デバッグログ約50箇所も対象)
 - Originごとのデバイス権限
 - Frame-awareなOrigin処理
 - WebUSBセキュリティ保護
@@ -22,14 +22,15 @@ JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** に�
 - Transferの検証と安全制限
 - WebUSBフィルタ / `exclusionFilters` の照合
 - Hotplugの監視と `connect` / `disconnect` イベント
-- DevTools / F12向け `window.__pysideWebUSB`
+- DevTools / F12向け `window.__pysideWebUSB`(`locale()`/`help()`を`0.0.6`で追加)
 - オプションのRustネイティブアクセラレーション
 - ホスト環境診断ユーティリティ
-- `pyside6-webusb-doctor`
+- `pyside6-webusb-doctor`(`0.0.6`からChrome/FirefoxのNative Messagingホスト用`manifest.json`を検査する`--check-native-messaging`モード込み)
 - JSON形式の環境診断
 - ホストアプリからのデバイス事前認可
 - TypeScript定義
 - WebUSB API互換性を意識したDOMException / Transferモデル
+- `pyside6_webusb.native_messaging`: 姉妹プロジェクトfox-webusbと同じNative Messagingのワイヤフォーマット実装(`0.0.6`)
 
 ## なぜ必要なのか
 
@@ -247,9 +248,13 @@ window.__pysideWebUSB
 window.__pysideWebUSB.listGrantedDevices()
 window.__pysideWebUSB.bridgeInfo()
 window.__pysideWebUSB.explainTransferLimits()
+window.__pysideWebUSB.locale()   // 🆕 0.0.6: この名前空間自身のテキストが今使っている言語
+window.__pysideWebUSB.help()     // 🆕 0.0.6: 上記5コマンドの説明を1行でログ表示
 ```
 
 `bridgeInfo()` では、Bridge version、Rust accelerationの状態、Transfer制限などを確認できます。
+`explainTransferLimits()`と`help()`のメッセージも、チューザーダイアログや診断レポートと同じく
+`install(locale=...)` に追従するようになりました(`0.0.6`)。
 
 ## ホストアプリからの事前認可
 
@@ -327,6 +332,17 @@ python -m pyside6_webusb --json
 
 Frame-origin isolationについては、`QWebEngineFrame` が利用できない古いPySide6環境では、より限定的なmain-frame-only動作へfallbackします。診断結果から実際にどのモードが利用されているか確認できます。
 
+### Native Messagingのmanifest.jsonチェック(🆕 0.0.6)
+
+```bash
+pyside6-webusb-doctor --check-native-messaging path/to/manifest.json
+```
+
+姉妹プロジェクトfox-webusbがQtWebEngineへ埋め込む代わりに使っている、Chrome/Firefoxの
+[Native Messaging](https://developer.chrome.com/docs/apps/nativeMessaging)機構向けホストの
+`manifest.json`を静的に検査します。`--lang`/`--json`もこちらで使えます。詳細は
+`pyside6_webusb.native_messaging`とメインの`README.md`を参照してください。
+
 ## Native Acceleration
 
 オプションのRustアクセラレーション層を利用できます。
@@ -388,7 +404,7 @@ Rust
 
 このリリースの実行環境では:
 
-**184 passed, 2 skipped**
+**257 passed, 2 skipped**
 
 でした。
 
@@ -408,7 +424,7 @@ pyusbの公開APIではIsochronous Transferのper-packet length / result情報�
 
 ## 現在の状態
 
-**v0.0.5b3 — Experimental Beta**
+**v0.0.6 — Experimental Beta**
 
 ### 実装済み
 
@@ -425,18 +441,19 @@ pyusbの公開APIではIsochronous Transferのper-packet length / result情報�
 - [x] Hotplug monitoring
 - [x] Security hardening
 - [x] Chromium security-key blocklist
-- [x] DevTools debug namespace
+- [x] DevTools debug namespace(`locale()`/`help()`を`0.0.6`で追加)
 - [x] Optional Rust acceleration
 - [x] Host application pre-authorization
 - [x] Environment diagnostics
 - [x] JSON diagnostics
-- [x] `pyside6-webusb-doctor`
+- [x] `pyside6-webusb-doctor`(`0.0.6`からNative Messagingの`manifest.json`チェック込み)
 - [x] TypeScript definitions
 - [x] Automated tests
 - [x] Direct QWebChannel bypass hardening
 - [x] Canonical Base64 validation
 - [x] Malformed Base64 → `DataError`
 - [x] PySide6 / QtWebEngine import diagnostics
+- [x] `locale=`がチューザーダイアログ・診断・DevTools名前空間・内部デバッグログ全体へ一貫して反映される(`0.0.6`)
 
 ### まだ実験段階
 

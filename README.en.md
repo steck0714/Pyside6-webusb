@@ -2,19 +2,19 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.5b3**
+⚠️ **Experimental Beta — v0.0.6**
 
 A WebUSB API implementation for **PySide6 / QtWebEngine** applications.
 
 It combines a JavaScript polyfill, a QWebChannel bridge, and real USB access through **pyusb / libusb** to provide `navigator.usb`, which is not normally available in embedded QtWebEngine.
 
-> The GitHub development/release label is `v0.0.5b3`. The actual package version shipped under PyPI/PEP 440 is `0.0.5.post7`.
+> `0.0.6` ships as a plain version everywhere (zip / sdist / wheel / `_version.py`), with no `aN`/`bN` pre-release tag and no `.postN` suffix — unlike the `0.0.5` line, where the GitHub zip label (e.g. `v0.0.5b3`) and the actual PyPI/PEP 440 version (`0.0.5.post7`) differed. See `CHANGELOG.md` for why.
 
 ## Features
 
 - WebUSB-compatible `navigator.usb`
 - Communication with real USB devices
-- Native device chooser dialog, with built-in English / Japanese / Chinese translations
+- Native device chooser dialog, with built-in English / Japanese / Chinese translations covering the dialog, diagnostics report, `pyside6-webusb-doctor` CLI, and (since `0.0.6`) the `window.__pysideWebUSB` DevTools namespace and ~50 internal debug log lines
 - Per-origin device permissions
 - Frame-aware origin handling
 - WebUSB security protections
@@ -22,14 +22,15 @@ It combines a JavaScript polyfill, a QWebChannel bridge, and real USB access thr
 - Transfer validation and safety limits
 - WebUSB `filters` / `exclusionFilters` matching
 - Hotplug monitoring with `connect` / `disconnect` events
-- `window.__pysideWebUSB` DevTools / F12 helpers
+- `window.__pysideWebUSB` DevTools / F12 helpers, including `locale()`/`help()` (`0.0.6`)
 - Optional Rust native acceleration
 - Host environment diagnostics
-- `pyside6-webusb-doctor`
+- `pyside6-webusb-doctor`, including a `--check-native-messaging` mode (`0.0.6`) for checking a Chrome/Firefox Native Messaging host's `manifest.json`
 - JSON environment diagnostics
 - Host-application device pre-authorization
 - TypeScript definitions
 - WebUSB-compatible DOMException and transfer behavior
+- `pyside6_webusb.native_messaging`: a Native Messaging wire-format codec, for building a standalone host process the way sister project fox-webusb does (`0.0.6`)
 
 ## Why this exists
 
@@ -247,9 +248,13 @@ Main helpers:
 window.__pysideWebUSB.listGrantedDevices()
 window.__pysideWebUSB.bridgeInfo()
 window.__pysideWebUSB.explainTransferLimits()
+window.__pysideWebUSB.locale()   // 🆕 0.0.6: which language this namespace's own text is using
+window.__pysideWebUSB.help()     // 🆕 0.0.6: logs a one-line summary of these five commands
 ```
 
 `bridgeInfo()` reports the bridge version, Rust acceleration status, and transfer limits.
+`explainTransferLimits()`'s and `help()`'s messages now follow `install(locale=...)` (`0.0.6`) the
+same way the chooser dialog and diagnostics report always have.
 
 ## Host-application pre-authorization
 
@@ -327,6 +332,17 @@ The report can include:
 
 Frame-origin isolation reports whether the stronger `QWebEngineFrame`-based model is available. Older PySide6 environments fall back to the more limited main-frame-only behavior.
 
+### Native Messaging manifest check (🆕 0.0.6)
+
+```bash
+pyside6-webusb-doctor --check-native-messaging path/to/manifest.json
+```
+
+Statically checks a Chrome/Firefox [Native Messaging](https://developer.chrome.com/docs/apps/nativeMessaging)
+host's `manifest.json` — the mechanism sister project fox-webusb uses to make `navigator.usb` work
+in Firefox without embedding in QtWebEngine. `--lang`/`--json` both work here too. See
+`pyside6_webusb.native_messaging` and the main `README.md` for what is and isn't checked.
+
 ## Native acceleration
 
 An optional Rust acceleration layer is available.
@@ -388,7 +404,7 @@ Rust
 
 This release ran with:
 
-**184 passed, 2 skipped**
+**257 passed, 2 skipped**
 
 The Node polyfill and TypeScript checks were also re-run.
 
@@ -404,7 +420,7 @@ The current implementation therefore leaves this as a known limitation rather th
 
 ## Current status
 
-**v0.0.5b3 — Experimental Beta**
+**v0.0.6 — Experimental Beta**
 
 ### Implemented
 
@@ -421,18 +437,19 @@ The current implementation therefore leaves this as a known limitation rather th
 - [x] Hotplug monitoring
 - [x] Security hardening
 - [x] Chromium security-key blocklist
-- [x] DevTools debug namespace
+- [x] DevTools debug namespace, with `locale()`/`help()` (`0.0.6`)
 - [x] Optional Rust acceleration
 - [x] Host application pre-authorization
 - [x] Environment diagnostics
 - [x] JSON diagnostics
-- [x] `pyside6-webusb-doctor`
+- [x] `pyside6-webusb-doctor`, including a Native Messaging `manifest.json` checker (`0.0.6`)
 - [x] TypeScript definitions
 - [x] Automated tests
 - [x] Direct QWebChannel bypass hardening
 - [x] Canonical Base64 validation
 - [x] Malformed Base64 → `DataError`
 - [x] PySide6 / QtWebEngine import diagnostics
+- [x] `locale=` covering the device chooser, diagnostics, DevTools namespace, and internal debug logging consistently (`0.0.6`)
 
 ### Still experimental
 

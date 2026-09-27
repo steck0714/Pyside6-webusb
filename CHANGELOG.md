@@ -2,6 +2,205 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.6]
+
+**Versioning note:** by explicit request, this release ships as a plain `0.0.6` everywhere (zip,
+sdist, wheel, `_version.py`, `pyproject.toml`) — no `aN`/`bN` pre-release tag on the zip and no
+`.postN` suffix on top of that, unlike every `0.0.5.*` release before it (see the `0.0.5.post7`
+entry below and `RELEASE_NOTES.md` for why that two-track scheme exists in the first place). If a
+follow-up fix to this exact `0.0.6` code is needed later, it resumes the usual pattern as
+`0.0.6.post1`.
+
+### Added
+
+- **`window.__pysideWebUSB.locale()` and `.help()`.** Two new commands in the F12/DevTools debug
+  namespace (`0.0.4b2`): `locale()` returns which language (`"en"`/`"ja"`/`"zh"`) this namespace's
+  own messages are currently using (i.e. what `install(locale=...)` resolved to for this page,
+  `"auto"` included); `help()` logs and returns a one-line summary of all four commands, in that
+  same language. `explainTransferLimits()`'s existing `console.log()` explanation is now
+  translated into the same three languages instead of being English-only regardless of
+  `locale=` — install() now does a single targeted, install-call-scoped text substitution of one
+  safe-default line (`var _pysideWebUSBLocale = 'en';`) inside the otherwise-unchanged polyfill
+  script, rather than templating the whole ~40 KB constant (kept `tests/extract_polyfill_js.py`'s
+  direct-from-source-constant Node.js test path — which never goes through `install()` — working
+  unmodified, since the untouched constant is still valid, self-contained JavaScript on its own).
+- **`locale=` now reaches roughly 50 previously Japanese-only debug print statements** across
+  `bridge.py`, `frame_origin.py`, `hardening.py`, and `polyfill.py`'s `install()` — all of the
+  `print(f"[pyside6-webusb] X: 例外を無視: {e}")`-shaped "exception ignored" debug lines, plus a
+  few bespoke messages (`FrameOriginTracker`'s wiring/rescan failures, `install()`'s
+  subframes-restricted notice) that got folded into the same shared shape. Consolidated into one
+  new `i18n.LOG_STRINGS` table and a `log_text(locale, key, **kwargs)` helper — the same
+  "one shared template instead of N bespoke hand-translations" approach `errors.py` already used
+  for `DOMException` name prefixes — rather than hand-translating each call site individually,
+  which would have meant 50 independent opportunities for translation drift. `WebUSBBridge`/
+  `FrameOriginTracker` each gained a small `_log(context, error)` instance method bound to their
+  own `self._locale`; `hardening.py`'s free functions (`build_device_descriptor`,
+  `build_configurations_tree`, `device_matches_usb_filter`, `device_matches_any_usb_filter`,
+  `_device_interface_class_tuples`) gained an optional `locale=None` parameter threaded from their
+  `bridge.py` call sites instead, since they have no `self` of their own. One pre-existing message
+  (`"openDevice (LRU退去)"`) mixed a Japanese descriptor into what's otherwise an English technical
+  identifier (like `"_poll_hotplug(connect)"`) — renamed to `"openDevice(LRU eviction)"` so the
+  *context* portion stays language-neutral in every locale's output, consistent with every other
+  call site.
+- **`environment_report()`'s field labels are now localized too.** `format_environment_report()`
+  translated the *values* and the problem/note text correctly under `locale="ja"`/`"zh"` all along,
+  but the labels to their left — `"Qt runtime:"`, `"Rust acceleration:"`,
+  `"Frame-level origin isolation:"` — stayed English regardless of `locale=`. New
+  `label_qt_runtime`/`label_rust_acceleration`/`label_frame_isolation` (and, for structural
+  completeness, `label_pyside6`/`label_python`/`label_pyusb`, which are proper nouns and so read
+  the same in every locale) keys in `i18n.DIAGNOSTICS_STRINGS` fix this.
+- **`pyside6_webusb.native_messaging`: a wire-format codec and a `manifest.json` checker for
+  Chrome/Firefox "Native Messaging."** Researched sister project fox-webusb, which makes
+  `navigator.usb` work in Firefox by having a WebExtension talk to a standalone host process over
+  stdin/stdout using that browser-native mechanism, instead of embedding in QtWebEngine the way
+  this package does — a second, independent way to make `navigator.usb` *look* like it's working
+  via native code. `read_message()`/`write_message()` implement the documented wire format itself
+  (a 4-byte length prefix in native byte order + UTF-8 JSON, per both browsers' published native
+  messaging host documentation) so a host implementation (fox-webusb's own, or anyone else's)
+  doesn't have to reimplement that framing independently. `validate_native_messaging_manifest()`/
+  `format_manifest_check()` statically check a host's `manifest.json` (required keys, `"type":
+  "stdio"`, that `path` resolves to an existing, executable file, at least one of
+  `allowed_origins`/`allowed_extensions` present) — the same "diagnose the environment, don't
+  assume a code bug" idea `diagnostics.py` already applies to PySide6/`pyusb`, extended to
+  native-messaging deployments, where a misplaced or malformed manifest is a common way for a host
+  to silently never start. Deliberately does **not** reimplement fox-webusb's own USB backend,
+  chooser dialog, or attestation layer — those stay fox-webusb's own, separately-verified code.
+  New `pyside6-webusb-doctor --check-native-messaging path/to/manifest.json` CLI mode (`--lang`/
+  `--json` both work here too, same exit-code convention as the existing environment-diagnostic
+  mode: 1 if any problem was found, 0 otherwise).
+- **`native/libusb_probe.c`** — a small, optional, manually-built C program that calls
+  `libusb-1.0`'s C API directly (`libusb_init()`, `libusb_get_device_list()`,
+  `libusb_get_device_descriptor()`), entirely bypassing `pyusb`. `environment_report()` can report
+  that `pyusb`'s backend resolution failed, but from pure Python there isn't always a clean way to
+  tell whether that's because `libusb` itself isn't there, or because `pyusb`'s own backend-search
+  logic just didn't find it — this answers that independently. Not part of the build (same opt-in
+  posture as the Rust extension); compiles cleanly with `-Wall -Wextra` and confirmed running
+  (`libusb_init()` succeeds, correctly reports `devices found: 0` in this sandbox's
+  no-real-USB-hardware container) against `libusb-1.0.27` via both `pkg-config --cflags --libs
+  libusb-1.0` and a plain `-lusb-1.0` link line.
+- **`scripts/publish_to_pypi.ps1`** — a PowerShell port of `scripts/publish_to_pypi.sh`, so cutting
+  a release doesn't require bash/WSL/Git Bash on the Windows machines this project already does
+  real hands-on testing on (`checklog.md`/`checklog2.md`). Same sequence (check `twine` is
+  present, show the target file count, prompt for the PyPI token with the input hidden via
+  `Read-Host -AsSecureString`, `twine upload --skip-existing`) — deliberately passes the already-
+  enumerated `dist/*.whl`/`dist/*.tar.gz` file list's actual paths to `twine` explicitly rather
+  than a bare `dist/*.whl` wildcard argument, since PowerShell (unlike bash) doesn't reliably
+  expand wildcards itself when calling an external program. Maintainer-only tooling, same as the
+  `.sh` original — neither ships in the PyPI sdist (see `MANIFEST.in`).
+
+### Fixed
+
+- **🐛 `locale="auto"` never actually reached the device chooser dialog.** Reproduced directly:
+  with `PYSIDE6_WEBUSB_LOCALE=en` set, `i18n.chooser_strings_for("auto")["title"]` returned the
+  Japanese `"USBデバイスを選択"` instead of `"Select a USB Device"`, even though
+  `i18n.resolve_locale("auto")` — the function `environment_report()` already used, and which
+  correctly implements the "auto" → `detect_locale()` rule described in this module's own
+  docstring — returned `"en"` for the exact same environment. Root cause: `chooser_strings_for()`
+  called the lower-level `normalize_locale()` directly instead of `resolve_locale()`;
+  `normalize_locale()` has no special case for `"auto"` (it's not one of the three real language
+  codes in `SUPPORTED_LOCALES`), so it silently fell back to `DEFAULT_LOCALE`. Concretely: every
+  `install(page, locale="auto")` call — the exact usage `pyside6_webusb/__init__.py`'s own
+  docstring recommends for "follow the OS locale" — correctly localized the diagnostics report but
+  silently ignored the OS locale for the one piece of UI an end user actually sees, the device
+  chooser dialog itself, always rendering it in Japanese instead. Fixed by routing
+  `chooser_strings_for()` through `resolve_locale()` like `environment_report()` already did;
+  `diagnostics_text()` got the same defensive change even though its own call sites already
+  pre-resolved `locale` before calling it (so no observable behavior changed there) — for
+  consistency, and so a future direct caller passing `"auto"` doesn't hit the same class of bug.
+  New regression test: `tests/test_i18n.py`'s
+  `test_chooser_strings_for_auto_follows_detected_locale`, which fails against the pre-fix code
+  and passes against the fix.
+- **🐛 `diagnostics_text()`/`log_text()`/`native_messaging_text()` silently dropped
+  `str.format()`'s `{{`/`}}` escape sequences whenever a string needed no other substitution.**
+  All three shared the same `text.format(**kwargs) if kwargs else text` shortcut: when a lookup
+  needed zero keyword arguments, `.format()` itself was never called, so any literal `{{`/`}}` in
+  that particular string never got unescaped to `{`/`}`. Found while adding
+  `NATIVE_MESSAGING_STRINGS["manifest_not_an_object"]`, whose English/Japanese/Chinese text all
+  need to show a literal `'{...}'` inline — it was rendering as the doubled `'{{...}}'` instead.
+  No existing `DIAGNOSTICS_STRINGS`/`LOG_STRINGS` entry happened to need literal braces, so this
+  had no visible effect before `native_messaging.py` existed; fixed at the shared root (all three
+  helpers now always call `.format(**kwargs)`, kwargs empty or not) rather than only in the one
+  string that exposed it, so it can't resurface the next time any table gains a key that needs
+  literal braces. New regression test:
+  `test_manifest_not_an_object_message_shows_literal_braces_not_escaped_ones` in the new
+  `tests/test_native_messaging.py`.
+
+### Compatibility
+
+- **Confirmed `_b64_decode_supports_canonical()` (whether to pass `base64.b64decode()`'s
+  `canonical=` argument, added in Python 3.15 — `0.0.5a1`) keeps working correctly on Python 3.16
+  and beyond**, without waiting for a 3.16 interpreter to exist to prove it. The check was already
+  a `sys.version_info >= (3, 15)` *floor* comparison with no upper bound, so this was never
+  actually at risk — but there was previously no way to test that claim directly. Refactored the
+  module-level constant (kept, unchanged in name and value, for existing internal callers) into a
+  function that also accepts an injected version tuple, so
+  `tests/test_bridge.py`'s new `test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15`
+  can assert `True` for `(3, 16, 0)`, `(3, 17, 3)`, `(3, 99, 0)`, and even a hypothetical `(4, 0,
+  0)`, and `False` for every currently-supported pre-3.15 version down to this project's
+  `requires-python = ">=3.9"` floor — all without that interpreter needing to exist. Audited the
+  rest of the codebase for the same class of risk (any other `sys.version_info`/hardcoded-`3.15`
+  branch that might have an accidental *ceiling* instead of a floor): this was the only
+  version-gated branch in the whole package; nothing else needed changing. (The Rust extension's
+  own forward-compatibility story — building against the stable ABI so one wheel covers this
+  project's entire supported Python range — already existed via `abi3-py39`; see "Building against
+  very new Python versions" in the README.)
+
+### Tests
+
+- `tests/test_i18n.py`: `test_chooser_strings_for_auto_follows_detected_locale` (the `auto` bug
+  fix above), `test_every_supported_locale_has_the_same_log_keys`,
+  `test_log_text_formats_context_and_error_and_defaults_to_japanese`.
+- `tests/test_diagnostics.py`: extended `test_environment_report_locale_en_and_zh_translate_the_rendered_text`
+  to assert the newly-localized `"Rust高速化:"`/`"帧级别来源隔离:"`/etc. labels actually appear,
+  rather than documenting the old English-labels-everywhere limitation as intentional design.
+- `tests/test_install.py`: `test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script`
+  — confirms `install(locale=...)` actually rewrites the injected polyfill script's
+  `_pysideWebUSBLocale` line (`"ja"`/`"zh"`/default/`"auto"`, the last with
+  `PYSIDE6_WEBUSB_LOCALE` set), and that the original `WEBUSB_POLYFILL_JS` module constant itself
+  stays untouched across calls.
+- `tests/test_polyfill.js`: new assertions for `window.__pysideWebUSB.locale()`/`.help()`
+  (confirming the safe `'en'` default this direct-from-source-constant test path never overrides,
+  since it doesn't go through `install()`).
+- `tests/test_bridge.py`: `test_b64_decode_supports_canonical_is_forward_compatible_beyond_3_15`
+  (the Python 3.16 compatibility item above).
+- New `tests/test_native_messaging.py` (18 tests): wire-format round-trips (including multi-message
+  streams, clean stream-end-as-`None`, oversized-payload and mid-message-truncation error paths),
+  every `validate_native_messaging_manifest()` branch (well-formed manifest, already-loaded dict,
+  missing required keys, unsupported `type`, missing/non-executable `path` with relative-path
+  resolution, missing `allowed_origins`/`allowed_extensions`, invalid JSON, non-object manifest),
+  the literal-braces regression test above, `format_manifest_check()`'s reuse of
+  `diagnostics.py`'s existing headers across all three locales, and an end-to-end
+  `--check-native-messaging` CLI test via `pyside6_webusb.__main__.main()` directly.
+- Full suite (`scripts/verify_test_suite.py`, all 5 categories — `pytest`, each `tests/test_*.py`
+  run directly, the Node.js-based `tests/test_polyfill.js`, and `tsc --strict --noEmit` against
+  `types/`) re-run clean after every change in this release: 257 passed, 2 skipped (both
+  pre-existing, environment-dependent: the Rust extension isn't built in this sandbox, and this
+  sandbox's `libusb1` backend is available so the `libusb0`-fallback path can't be exercised here)
+  — up from `0.0.5.post7`'s 234 passed.
+
+### Documentation
+
+- `README.md`: new "Native messaging: checking a `manifest.json`" and "Native messaging,
+  PowerShell, and a standalone libusb probe" sections; extended "Multi-language chooser dialog and
+  diagnostics," "F12 / DevTools debug helpers," and "Building against very new Python versions"
+  for everything above.
+
+### Project metadata
+
+- Version bumped to `0.0.6` (see the versioning note at the top of this entry).
+- Environment this release was actually verified against in this development sandbox: Python
+  3.12.3, `PySide6` 6.11.2 (`PySide6-Essentials`/`PySide6-Addons`), `pyusb` 1.3.1 with a `libusb1`
+  backend (`libusb-1.0.27`), Node.js v22.22.2 / npm 10.9.7 / `tsc` 6.0.3, `gcc` 13.3.0 (used to
+  build and run `native/libusb_probe.c` against `libusb-1.0-0-dev` 1.0.27). `rustc`
+  1.75.0 (Ubuntu 24.04's `apt` package) is, as in prior entries, still below the Rust 1.83 MSRV
+  `pyo3 =0.29.0` needs (confirmed again this cycle: `cargo check` fails the same way as before) —
+  the Rust extension's own code was not touched this release for exactly that reason, so this is
+  unchanged from `0.0.5.post7`, not a new regression. `scripts/publish_to_pypi.ps1` could not be
+  executed in this sandbox (no PowerShell/`pwsh` available, and no `apt` package for it either) —
+  reviewed carefully and checked for balanced braces/parens and clean line-continuation syntax by
+  script instead of by running it; treat it as unverified-by-execution until it's actually run
+  once on Windows or against a real `pwsh` install.
+
 ## [0.0.5.post7]
 
 Informally `v0.0.5b3` (source zip filename/GitHub release label); `0.0.5.post7` is the version

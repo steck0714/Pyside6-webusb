@@ -2,19 +2,19 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.5b3**
+⚠️ **Experimental Beta — v0.0.6**
 
 面向 **PySide6 / QtWebEngine** 应用程序的 WebUSB API 实现。
 
 它结合 JavaScript Polyfill、QWebChannel Bridge 以及 **pyusb / libusb** 实际 USB 通信，为 QtWebEngine 提供通常不可直接使用的 `navigator.usb`。
 
-> GitHub 上的开发/发布标识为 `v0.0.5b3`。按照 PyPI / PEP 440，实际打包版本字符串为 `0.0.5.post7`。
+> `0.0.6` 在 zip/sdist/wheel/`_version.py` 中统一使用不带后缀的版本号——既没有 `aN`/`bN` 预发布标签，也没有 `.postN` 后缀。这与 `0.0.5` 系列(GitHub zip 标识 `v0.0.5b3` 与 PyPI/PEP 440 实际版本 `0.0.5.post7` 不一致)不同,原因见 `CHANGELOG.md`。
 
 ## 特性
 
 - WebUSB 兼容的 `navigator.usb`
 - 与真实 USB 设备通信
-- 原生设备选择对话框
+- 原生设备选择对话框(内置英语/日语/中文翻译,覆盖对话框本身、诊断报告、`pyside6-webusb-doctor` 命令行,以及自 `0.0.6` 起的 `window.__pysideWebUSB` DevTools 命名空间和约 50 处内部调试日志)
 - 按 Origin 管理设备权限
 - Frame-aware Origin 处理
 - WebUSB 安全保护
@@ -22,14 +22,15 @@
 - Transfer 验证与安全限制
 - WebUSB `filters` / `exclusionFilters` 匹配
 - Hotplug 监控以及 `connect` / `disconnect` 事件
-- `window.__pysideWebUSB` DevTools / F12 调试工具
+- `window.__pysideWebUSB` DevTools / F12 调试工具,`0.0.6` 新增 `locale()`/`help()`
 - 可选 Rust 原生加速
 - 主机环境诊断工具
-- `pyside6-webusb-doctor`
+- `pyside6-webusb-doctor`,`0.0.6` 新增 `--check-native-messaging` 模式,用于检查 Chrome/Firefox Native Messaging 主机的 `manifest.json`
 - JSON 格式环境诊断
 - 主机应用程序预授权设备
 - TypeScript 类型定义
 - WebUSB 兼容的 DOMException 和 Transfer 行为
+- `pyside6_webusb.native_messaging`:与姊妹项目 fox-webusb 相同的 Native Messaging 线路格式实现(`0.0.6`)
 
 ## 为什么需要它
 
@@ -247,9 +248,13 @@ window.__pysideWebUSB
 window.__pysideWebUSB.listGrantedDevices()
 window.__pysideWebUSB.bridgeInfo()
 window.__pysideWebUSB.explainTransferLimits()
+window.__pysideWebUSB.locale()   // 🆕 0.0.6: 此命名空间自身文本当前使用的语言
+window.__pysideWebUSB.help()     // 🆕 0.0.6: 以日志形式列出以上五个命令的说明
 ```
 
 `bridgeInfo()` 可以显示 Bridge 版本、Rust acceleration 状态以及 Transfer 限制。
+`explainTransferLimits()` 和 `help()` 的消息现在也会跟随 `install(locale=...)`(`0.0.6`)，
+与选择对话框和诊断报告的做法一致。
 
 ## 主机应用程序预授权
 
@@ -327,6 +332,17 @@ python -m pyside6_webusb --json
 
 Frame-origin isolation 会报告更强的 `QWebEngineFrame` 模型是否可用。较旧的 PySide6 环境会回退到能力更有限的 main-frame-only 行为。
 
+### Native Messaging manifest.json 检查(🆕 0.0.6)
+
+```bash
+pyside6-webusb-doctor --check-native-messaging path/to/manifest.json
+```
+
+静态检查 Chrome/Firefox [Native Messaging](https://developer.chrome.com/docs/apps/nativeMessaging)
+主机的 `manifest.json`——这正是姊妹项目 fox-webusb 用来在不嵌入 QtWebEngine 的情况下让
+`navigator.usb` 工作的机制。`--lang`/`--json` 在此模式下同样可用。详见
+`pyside6_webusb.native_messaging` 及主 `README.md`。
+
 ## Native Acceleration
 
 项目提供可选的 Rust 加速层。
@@ -388,7 +404,7 @@ Rust
 
 本版本运行结果：
 
-**184 passed, 2 skipped**
+**257 passed, 2 skipped**
 
 Node Polyfill 和 TypeScript 检查也已重新运行。
 
@@ -404,7 +420,7 @@ pyusb 的公开 API 无法提供完整的 per-packet 信息。具体来说，pyu
 
 ## 当前状态
 
-**v0.0.5b3 — Experimental Beta**
+**v0.0.6 — Experimental Beta**
 
 ### 已实现
 
@@ -421,18 +437,19 @@ pyusb 的公开 API 无法提供完整的 per-packet 信息。具体来说，pyu
 - [x] Hotplug monitoring
 - [x] Security hardening
 - [x] Chromium security-key blocklist
-- [x] DevTools debug namespace
+- [x] DevTools debug namespace(`0.0.6` 新增 `locale()`/`help()`)
 - [x] Optional Rust acceleration
 - [x] Host application pre-authorization
 - [x] Environment diagnostics
 - [x] JSON diagnostics
-- [x] `pyside6-webusb-doctor`
+- [x] `pyside6-webusb-doctor`(`0.0.6` 起含 Native Messaging `manifest.json` 检查)
 - [x] TypeScript definitions
 - [x] Automated tests
 - [x] Direct QWebChannel bypass hardening
 - [x] Canonical Base64 validation
 - [x] Malformed Base64 → `DataError`
 - [x] PySide6 / QtWebEngine import diagnostics
+- [x] `locale=` 在设备选择对话框、诊断、DevTools 命名空间与内部调试日志中保持一致(`0.0.6`)
 
 ### 仍处于实验阶段
 
