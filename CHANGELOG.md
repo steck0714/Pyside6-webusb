@@ -50,14 +50,21 @@ follow-up fix to this exact `0.0.6` code is needed later, it resumes the usual p
   completeness, `label_pyside6`/`label_python`/`label_pyusb`, which are proper nouns and so read
   the same in every locale) keys in `i18n.DIAGNOSTICS_STRINGS` fix this.
 - **`pyside6_webusb.native_messaging`: a wire-format codec and a `manifest.json` checker for
-  Chrome/Firefox "Native Messaging."** Researched sister project fox-webusb, which makes
-  `navigator.usb` work in Firefox by having a WebExtension talk to a standalone host process over
-  stdin/stdout using that browser-native mechanism, instead of embedding in QtWebEngine the way
-  this package does — a second, independent way to make `navigator.usb` *look* like it's working
-  via native code. `read_message()`/`write_message()` implement the documented wire format itself
-  (a 4-byte length prefix in native byte order + UTF-8 JSON, per both browsers' published native
-  messaging host documentation) so a host implementation (fox-webusb's own, or anyone else's)
-  doesn't have to reimplement that framing independently. `validate_native_messaging_manifest()`/
+  Chrome/Firefox "Native Messaging."** Built from sister project fox-webusb's architecture,
+  which makes `navigator.usb` work in Firefox by having a WebExtension talk to a standalone host
+  process over stdin/stdout using that browser-native mechanism, instead of embedding in
+  QtWebEngine the way this package does — a second, independent way to make `navigator.usb`
+  *look* like it's working via native code. (Caveat: fox-webusb's own source was not part of this
+  release's working tree, so this follows its architecture as recorded for this project, not a
+  line-by-line read of its host code — aligning the codec with `fox_webusb_host`'s actual
+  implementation is a natural follow-up once that source is at hand.)
+  `read_message()`/`write_message()` implement the documented wire format itself (a 4-byte length
+  prefix in native byte order + UTF-8 JSON, per both browsers' published native messaging host
+  documentation — which could not be re-fetched from this development sandbox, whose network
+  allowlist doesn't cover those sites, so the format is implemented from its long-established
+  published description rather than freshly re-verified; `DEFAULT_MAX_MESSAGE_BYTES` is a
+  deliberately conservative default, not a claimed browser limit) so a host implementation
+  (fox-webusb's own, or anyone else's) doesn't have to reimplement that framing independently. `validate_native_messaging_manifest()`/
   `format_manifest_check()` statically check a host's `manifest.json` (required keys, `"type":
   "stdio"`, that `path` resolves to an existing, executable file, at least one of
   `allowed_origins`/`allowed_extensions` present) — the same "diagnose the environment, don't

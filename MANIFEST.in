@@ -1,0 +1,33 @@
+# 🐛 バグ修正(v0.0.5a3): MANIFEST.inが存在しなかったため、setuptoolsのデフォルト
+# sdist生成ルールでは同梱されないファイルが多数あった(setup.cfg/pyproject.toml
+# だけではsrc/配下のPythonパッケージとLICENSE/README/pyproject.toml程度しか
+# 拾われない)。実際にv0.0.5.post3のsdistとこのzip(v0.0.5a2)のsrc/は完全一致して
+# いたが、tests/・security_audit/・security_report/・types/・examples/・
+# CHANGELOG.mdはsdistから丸ごと欠落していた——ソース配布物からテストを実行したい
+# 利用者(README「Running the tests」参照)や、TypeScript型定義(types/)を必要と
+# する利用者が、sdistだけでは何もできない状態だった。
+
+include README.md
+include CHANGELOG.md
+include LICENSE
+include MANIFEST.in
+include pyproject.toml
+
+recursive-include tests *.py *.js
+recursive-include security_audit *.py
+recursive-include security_report *.md
+recursive-include types *.ts
+recursive-include examples *.py *.html
+recursive-include native *.rs *.toml *.c
+# 🆕 v0.0.6: native/libusb_probe.c (pyusbを経由しない、libusb-1.0直結の
+# 独立診断ツール。native/pyside6_webusb_accel/と同じくビルド必須ではない
+# オプショナルな道具)を追加したため *.c を追記した。scripts/ 配下
+# (publish_to_pypi.sh/.ps1・verify_test_suite.py)は元々メンテナ向け
+# ツールとしてsdistに含めていない方針を維持し、ここでは変更していない。
+
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store
+# tests/extract_polyfill_js.py generates this at test-time; it's derived, not source
+# (see .gitignore) and shouldn't be shipped.
+exclude tests/_polyfill_extracted.js

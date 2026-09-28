@@ -2,7 +2,7 @@
 """native_messaging.py (🆕 v0.0.6) のテスト。
 
 fox-webusb(Firefox WebExtension + 独立したnative messagingホストプロセスで
-navigator.usbのポリフィルを実現する姉妹プロジェクト)を調査した上で、その
+navigator.usbのポリフィルを実現する姉妹プロジェクト)のアーキテクチャを踏まえて、その
 「native codeでnavigator.usbが機能しているように見せる」方式のうち、
 (1) Chrome/Firefox共通のワイヤフォーマット(read_message/write_message)、
 (2) manifest.json単体の静的チェッカー、の2つをpyside6-webusb側にも
