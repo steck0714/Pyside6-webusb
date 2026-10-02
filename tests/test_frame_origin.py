@@ -134,7 +134,8 @@ def test_tracker_assigns_token_to_frame_and_resolves_it():
 
     assert tracker.is_functional is True
     assert len(main.injected_scripts) == 1
-    assert "window.__pyUsbFrameToken" in main.injected_scripts[0]
+    assert "__pyUsbFrameToken" in main.injected_scripts[0]
+    assert "enumerable: false" in main.injected_scripts[0], "0.0.6a: トークンは非列挙で配る(Object.keys(window)に出さない)"
 
     # 実際に配ったトークンで解決できることを確認(発行したトークン文字列自体は
     # runJavaScript呼び出しのコード文字列から抜き出す)。

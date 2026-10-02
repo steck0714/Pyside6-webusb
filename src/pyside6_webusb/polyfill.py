@@ -2,8 +2,8 @@
 """
 polyfill.py
 ===========
-navigator.usb のJSポリフィル本体(WEBUSB_POLYFILL_JS)と、QWebEnginePageへの
-装着を1回の呼び出しで済ませる install() を提供する。
+navigator.usb のJSポリフィルと、QWebEnginePageへの装着を1回の呼び出しで済ませる
+install() を提供する。
 
     from pyside6_webusb import install
     install(my_web_engine_page)
@@ -11,7 +11,29 @@ navigator.usb のJSポリフィル本体(WEBUSB_POLYFILL_JS)と、QWebEnginePage
 だけで、そのページ上のJavaScriptから navigator.usb.getDevices() /
 navigator.usb.requestDevice() などが動くようになる(実機の選択はネイティブの
 Qtダイアログ、実際のUSB通信はpyusb/libusb経由)。
+
+🆕 v0.0.6a(配布版 0.0.6.post1)での作り直し:
+  - JSは jssrc/*.js に平文で書かれ、scripts/build_polyfill.py が _polyfill_bundle.py
+    (Pythonモジュール)へ束ねる。Android等「.py以外を同梱しない」配布形態でも動く。
+  - navigator.usb は Navigator.prototype 上のgetter(=ネイティブのWebIDL属性と同じ形)。
+    インスタンスの自前プロパティではないので `delete navigator.usb` では消えず、
+    既定では Navigator.prototype.usb 自体も non-configurable(lock_navigator_usb)。
+  - USB / USBDevice / USBConfiguration / USBInterface / USBAlternateInterface /
+    USBEndpoint / USBConnectionEvent / 各転送結果クラスを、Chromium(Blink)のIDLと
+    エラーメッセージに合わせて実装(Symbol.toStringTag、illegal constructor、
+    ブランドチェック、[native code]のtoString等)。
+  - qwebchannel.js は別スクリプトではなくポリフィルのクロージャ内へ取り込み、
+    QWebChannel/QObject等のグローバルがページへ漏れない。
+  - 転送層を差し替え可能に: QWebChannel(QtWebEngine) と WebSocket(QtWebView等)。
 """
+import json
+
+from ._polyfill_bundle import POLYFILL_JS_TEMPLATE
+
+_CONFIG_RE_BEGIN = "/*CONFIG_BEGIN*/"
+_CONFIG_RE_END = "/*CONFIG_END*/"
+_QWC_BEGIN = "/*QWC_LIB_BEGIN*/"
+_QWC_END = "/*QWC_LIB_END*/"
 
 _QWEBCHANNEL_JS_CACHE = None
 
@@ -52,11 +74,65 @@ def _load_qwebchannel_js():
     return data
 
 
+def _replace_between(text, begin, end, replacement):
+    """begin/endのマーカーコメントは残したまま、その間だけを置き換える
+    (注入後のソースからも設定を機械的に取り出せるように)。"""
+    i = text.index(begin) + len(begin)
+    j = text.index(end, i)
+    return text[:i] + replacement + text[j:]
+
+
+def build_polyfill_js(*, locale="en", lock_navigator_usb=True, native_lookalike=True,
+                      expose_commands=True, transport="webchannel", ws=None, version="",
+                      debug=False, qwebchannel_js=None):
+    """設定を埋め込んだ、注入用のポリフィルJSソースを返す。
+
+    locale:              F12コマンド出力の言語('en'/'ja'/'zh')。
+    lock_navigator_usb:  Navigator.prototype.usb を non-configurable にする(既定True)。
+                         Falseにするとネイティブと同じ configurable:true になる。
+    native_lookalike:    ポリフィルの関数を Function.prototype.toString で
+                         `function x() { [native code] }` と見せる(既定True)。
+    expose_commands:     window.__pysideWebUSB(非列挙)の独自コマンドを公開する。
+    transport:           'webchannel'(QtWebEngine) か 'websocket'(QtWebView等)。
+    ws:                  transport='websocket' のとき {"host","port","secret"}。
+    qwebchannel_js:      qwebchannel.js の中身。指定するとクロージャ内へ取り込む。
+                         省略時はページに既にある QWebChannel グローバルを使う
+                         (テストや、ホストが自前で注入する構成向け)。
+    debug:               Trueなら //# sourceURL を付け、DevToolsのSourcesで見つけやすくする。
+    """
+    config = {
+        "locale": locale,
+        "lockNavigatorUsb": bool(lock_navigator_usb),
+        "nativeLookalike": bool(native_lookalike),
+        "exposeCommands": bool(expose_commands),
+        "transport": transport,
+        "ws": ws,
+        "version": version,
+        "debug": bool(debug),
+    }
+    js = _replace_between(POLYFILL_JS_TEMPLATE, _CONFIG_RE_BEGIN, _CONFIG_RE_END,
+                          json.dumps(config, ensure_ascii=True))
+    if qwebchannel_js is not None:
+        js = _replace_between(js, _QWC_BEGIN, _QWC_END,
+                              "(function () {\n" + qwebchannel_js + "\nreturn QWebChannel;\n})()")
+    if debug:
+        js += "//# sourceURL=pyside6-webusb/polyfill.js\n"
+    return js
+
+
+# 既定設定のポリフィル(後方互換の公開定数。Nodeテストもこれを直接実行する)。
+WEBUSB_POLYFILL_JS = build_polyfill_js()
+
+
 def install(page, browser_window=None,
             settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
-            qwebchannel_js=None, locale=None, chooser_strings=None, extra_guard_js=None):
+            qwebchannel_js=None, locale=None, chooser_strings=None, extra_guard_js=None,
+            *, lock_navigator_usb=True, native_lookalike=True, expose_commands=True,
+            chooser=None, usb_backend=None, debug=False):
     """
-    唯一の公開エントリポイント。QWebEnginePage に navigator.usb ポリフィルを装着する。
+    QWebEnginePage に navigator.usb ポリフィルを装着する(QtWebEngine向けの公開エントリポイント)。
+    QtWebView(Android/iOS/macOS/Windowsのネイティブ・ウェブビュー)向けは
+    pyside6_webusb.install_webview() を使う。
 
     page: QWebEnginePage。このページ(と、そのページで開かれる以降のドキュメント)上で
         navigator.usb が有効になる。
@@ -65,76 +141,57 @@ def install(page, browser_window=None,
         settings_organization/settings_applicationでQSettingsへフォールバックする。
     settings_organization / settings_application: browser_window省略時に使う
         QSettingsの組織名・アプリ名(省略時は"pyside6-webusb"/"WebUSBBridge")。
+        ⚠ 既定値のままだと、同じ既定値を使う別アプリと許可リストを共有する。
+        製品では必ず自分の値を渡すこと。
     qwebchannel_js: 通常は不要(Qtの内蔵リソースから自動取得する)。取得に失敗する
         環境向けに、qwebchannel.jsの中身を直接渡すための上書き用パラメータ。
-    locale / chooser_strings: 🆕 v0.0.5b3。デバイスチューザーダイアログの表示言語。
-        そのまま WebUSBBridge(locale=, chooser_strings=) へ転送する
-        (詳細はbridge.pyのWebUSBBridge.__init__docstring参照)。
-    extra_guard_js: 🆕 v0.0.5b3。任意のJavaScriptソース文字列。指定すると、
-        WEBUSB_POLYFILL_JSより前に実行される専用の QWebEngineScript として追加で
-        注入される(DocumentCreation/MainWorld、他の注入スクリプトと同じ
-        setRunsOnSubFramesの扱い)。ここで `window.__pysideWebUSBExtraGuard` を
-        `function({origin, filters, exclusionFilters}) { return true/false; }`
-        の形で定義しておくと、navigator.usb.requestDevice() は実際のチューザー
-        ダイアログを開く(=ブリッジへ到達する)前に必ずこの関数を呼び、
-        戻り値が厳密に false の場合はSecurityErrorで即座に拒否する
-        (WEBUSB_POLYFILL_JS内、`window.__pysideWebUSBExtraGuard` を参照している
-        箇所のコメント参照)。ドメイン固有の追加ガード条件——例えば「特定の
-        イントラネットオリジンでだけ有効化する」「特定のvendorId以外は常に
-        拒否する」等——をホストアプリ側のJSだけで完結させて差し込むための
-        フックであり、この関数が無い/trueを返す場合はこのパッケージ自身の
-        通常の検証(セキュアコンテキスト・filters妥当性・user gesture等)を
-        何も変えない、純粋な追加の絞り込みにしかならない設計(このフック単体で
-        既存のチェックを緩めることはできない)。
+    locale / chooser_strings: デバイスチューザーダイアログの表示言語
+        (WebUSBBridge(locale=, chooser_strings=)へ転送)。
+    extra_guard_js: 任意のJavaScriptソース文字列。ポリフィルより前に別スクリプトとして
+        注入され、`window.__pysideWebUSBExtraGuard = function({origin, filters,
+        exclusionFilters}) { return true/false; }` を定義しておくと、requestDevice() は
+        チューザーを開く前に必ずそれを呼び、厳密にfalseならSecurityErrorで拒否する。
+        🆕 v0.0.6a: 関数はポリフィル起動時に1度だけ捕捉されるため、後からページが
+        window.__pysideWebUSBExtraGuard を書き換え/削除してもガードは外せない。
+    lock_navigator_usb: 🆕 v0.0.6a。Trueなら Navigator.prototype.usb を non-configurable にし、
+        `delete Navigator.prototype.usb` や Object.defineProperty での差し替えを防ぐ。
+        Falseにするとネイティブと完全に同じ記述子(configurable:true)になる。
+    native_lookalike: 🆕 v0.0.6a。ポリフィルの関数を [native code] 表示にする。
+    expose_commands: 🆕 v0.0.6a。window.__pysideWebUSB(非列挙)の独自コマンドを公開する。
+    chooser: 🆕 v0.0.6a。デバイス選択UIの差し替え。callable(devices, origin, strings) ->
+        選んだデバイス情報dict または None。省略時はQtWidgetsのダイアログ。
+    usb_backend: (usb.core, usb.util)相当のペア。テストや独自バックエンド(Android等)向け。
+    debug: 🆕 v0.0.6a。Trueなら注入JSへ //# sourceURL を付ける。
 
     戻り値: 生成した WebUSBBridge インスタンス(追加の配線やデバッグに使える)。
         QWebChannel自体が使えない環境では例外を送出せず None を返す
         (WebUSB機能だけが無効になり、アプリ全体は落とさない設計)。
     """
-    import json
-
+    from ._version import __version__
     from .bridge import WebUSBBridge
     from .frame_origin import FrameOriginTracker
     from .i18n import log_text, resolve_locale
 
     try:
-        # 🛡️ バグ修正(v0.0.5a1): このimport 2行は、以前は本try節の外(関数の
-        # 冒頭)に置かれていた。QtWebChannel/QtWebEngineCoreはこのパッケージの
-        # どのモジュールもトップレベルではimportしていない(意図的な遅延
-        # import)ため、「QWebChannel自体が使えない環境ではNoneを返す」という
-        # 上のdocstringの約束にも関わらず、これらのimport自体が失敗する環境
-        # (例: PySide6-Addonsは入っているがQtWebEngineだけが欠けている、
-        # 壊れた/部分的なインストール)では生のImportError/ModuleNotFoundErrorが
-        # そのままここから送出され、約束が実際には守られていなかった
-        # (PySide6 6.12.0a1開発版でQtWebEngineがPySide6-WebEngineという別
-        # パッケージへ分離されたのを実機確認した際に、この経路で発見)。
-        # try節の中へ移すことで、他の失敗(QWebChannel(page)がpageの型を
-        # 受け付けない、等)と同じく静かにNoneを返すようになる——原因の
-        # 切り分けは`environment_report()`/`format_environment_report()`
-        # (診断専用に作られたモジュールで、意図的にPySide6非依存)に任せる。
+        # PySide6.QtWebChannel/QtWebEngineCoreのimportもこのtry節の中に置く:
+        # 環境によっては(QtWebEngineが別パッケージ化された開発版など)importに失敗し、
+        # 「例外を送出せずNoneを返す」という約束をここで守るため。
         from PySide6.QtWebChannel import QWebChannel
         from PySide6.QtWebEngineCore import QWebEngineScript
 
         bridge = WebUSBBridge(browser_window=browser_window, parent=page,
-                               settings_organization=settings_organization,
-                               settings_application=settings_application,
-                               locale=locale, chooser_strings=chooser_strings)
+                              settings_organization=settings_organization,
+                              settings_application=settings_application,
+                              usb_backend=usb_backend, locale=locale,
+                              chooser_strings=chooser_strings, chooser=chooser,
+                              transport_kind="webchannel")
         channel = QWebChannel(page)
         channel.registerObject("pyUsbBridge", bridge)
         page.setWebChannel(channel)
     except Exception:
-        return None  # QWebChannel自体が使えない環境では静かに諦める(アプリ全体は落とさない)
+        return None
 
     try:
-        # 🛡️ フレーム単位オリジン特定(frame_origin.FrameOriginTracker、詳細はそちらの
-        #    モジュールdocstring及びCHANGELOG.mdの0.0.2b0/0.0.3/0.0.3a0/0.0.3bを参照)。
-        #    これが無かった0.0.2b0では、setRunsOnSubFrames(False)にしてiframeへの
-        #    公開自体を諦めることで安全側に倒していた。ここで実際に配線することで、
-        #    各フレーム(メインフレーム含む)が個別に発行されたトークンを持ち、
-        #    WebUSBBridge._current_origin(frame_token)がそのトークンからのみ
-        #    オリジンを解決できるようになる(トークンを渡さない/不正なトークンは
-        #    常に「オリジン不明」= 拒否になる。トップレベルページへのフォール
-        #    バックは一切行わない)。
         tracker = FrameOriginTracker(page, locale=locale)
         tracker.wire()
         if tracker.is_functional:
@@ -144,7 +201,7 @@ def install(page, browser_window=None,
             bridge._frame_tracker = None
     except Exception as e:
         print(log_text(locale, "exception_ignored",
-                        context="install(FrameOriginTracker)", error=e))
+                       context="install(FrameOriginTracker)", error=e))
         bridge._frame_tracker = None
 
     try:
@@ -153,853 +210,30 @@ def install(page, browser_window=None,
         print(log_text(locale, "exception_ignored", context="install(qwebchannel.js)", error=e))
         return bridge  # ブリッジ自体は生成済みだが、スクリプト注入はできていない
 
-    # 🆕 v0.0.5b3: extra_guard_jsが指定された場合のみ、専用スクリプトとして
-    # PySide6WebUSBPolyfillより前(qwebchannel.jsより後)に追加する。指定が無い
-    # (None/空文字)場合は従来どおり2本のまま——test_install.pyの既存アサーション
-    # (`len(page._scripts.inserted) == 2`)が示すとおり、この分岐自体がこれまでの
-    # install()の挙動を一切変えないことを保証する。
-    _script_specs = [
-        ("PySide6WebUSBQWebChannelLib", qwc_js),
-    ]
-    if extra_guard_js:
-        _script_specs.append(("PySide6WebUSBExtraGuard", extra_guard_js))
-    # 🌐 v0.0.6: window.__pysideWebUSB(F12コンソールから叩ける自己診断用の
-    # 「独自コマンド」——listGrantedDevices()/bridgeInfo()/explainTransferLimits())
-    # 自身のテキストにも、install(locale=...)と同じ言語を反映する。
-    #
-    # なぜWEBUSB_POLYFILL_JS定数そのものをf-string化/.format()しないか:
-    # tests/extract_polyfill_js.pyがこの定数をinstall()を一切経由せず生の
-    # まま抜き出してNode.jsへ直接渡す(tests/test_polyfill.js)ため、定数自体は
-    # 「未置換のまま実行しても構文的に有効なJavaScript」であり続ける必要が
-    # ある。そこでJSソース中には安全な既定値 var _pysideWebUSBLocale = 'en';
-    # という1行(＝それ単体で有効なJS)だけを埋め込んでおき、install()はこの
-    # 1行だけを対象に、実際に解決したロケールへ.replace()で個別に置き換える
-    # (chooser_strings/extra_guard_jsのような「別スクリプトとして注入」方式に
-    # すると、test_install.pyの`len(page._scripts.inserted) == 2`という既存の
-    # 想定スクリプト数を崩してしまうため、ここでは採用しない)。
     loc = resolve_locale(locale)
-    localized_polyfill_js = WEBUSB_POLYFILL_JS.replace(
-        "var _pysideWebUSBLocale = 'en';",
-        f"var _pysideWebUSBLocale = {json.dumps(loc)};",
-        1,
-    )
-    _script_specs.append(("PySide6WebUSBPolyfill", localized_polyfill_js))
+    polyfill_js = build_polyfill_js(
+        locale=loc, lock_navigator_usb=lock_navigator_usb, native_lookalike=native_lookalike,
+        expose_commands=expose_commands, transport="webchannel", version=__version__,
+        debug=debug, qwebchannel_js=qwc_js)
 
-    for name, code in _script_specs:
+    # extra_guard_js は必ずポリフィルより前に注入する(ポリフィルが起動時に捕捉するため)。
+    script_specs = []
+    if extra_guard_js:
+        script_specs.append(("PySide6WebUSBExtraGuard", extra_guard_js))
+    script_specs.append(("PySide6WebUSBPolyfill", polyfill_js))
+
+    for name, code in script_specs:
         try:
             script = QWebEngineScript()
             script.setName(name)
             script.setSourceCode(code)
             script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
             script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-            # 🛡️ FrameOriginTrackerが上で正常に配線できた場合のみTrueにする。
-            #    配線に失敗した(=bridge._frame_trackerがNoneのままの)場合は、
-            #    0.0.2b0の判断を踏襲してFalseのままにする(安全側優先。
-            #    詳しくはWebUSBBridge._current_origin()のdocstring参照)。
+            # FrameOriginTrackerが正常に配線できた場合のみサブフレームでも実行する。
+            # 配線に失敗した場合はFalse(安全側。WebUSBBridge._current_origin()参照)。
             script.setRunsOnSubFrames(bridge._frame_tracker is not None)
             page.scripts().insert(script)
         except Exception as e:
             print(log_text(locale, "exception_ignored", context="install(script)", error=e))
 
     return bridge
-
-
-WEBUSB_POLYFILL_JS = r"""
-(function() {
-    'use strict';
-    if (navigator.usb) return;  // 既にネイティブAPIがあれば上書きしない（将来Qtが対応した場合の保険）
-    if (typeof qt === 'undefined' || !qt.webChannelTransport) return;  // QWebChannel未提供の文脈では何もしない
-    // 🛡️ 本物のWebUSB同様、セキュアコンテキスト(https/localhost)以外では一切定義しない。
-    if (typeof window.isSecureContext !== 'undefined' && !window.isSecureContext) return;
-
-    var _bridgeReady = new Promise(function(resolve) {
-        try {
-            new QWebChannel(qt.webChannelTransport, function(channel) {
-                resolve(channel.objects.pyUsbBridge || null);
-            });
-        } catch (e) { resolve(null); }
-    });
-
-    function callBridge(method) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        return _bridgeReady.then(function(bridge) {
-            if (!bridge) throw new Error('WebUSB bridge unavailable');
-            return new Promise(function(resolve) {
-                bridge[method].apply(bridge, args.concat([function(res) { resolve(JSON.parse(res)); }]));
-            });
-        });
-    }
-
-    // 🛡️ frame_origin.FrameOriginTracker がPython側から
-    //    runJavaScript('window.__pyUsbFrameToken = "...";') で書き込む値。
-    //    これをPython側のオリジン判定(WebUSBBridge._current_origin())へ渡すことで、
-    //    このフレームが本当は誰なのかをQt/Chromium自身の判定に基づいて特定できる
-    //    (このスクリプト自身がwindow.location.originを自己申告するのではない --
-    //    素のQWebChannelオブジェクトを直接叩く敵対的なコードに対しても安全)。
-    //    ページ読み込み直後、トークンがまだ届いていない短い時間帯は空文字になり、
-    //    その間の呼び出しはPython側で「オリジン不明」として安全に拒否される。
-    function _frameToken() {
-        return window.__pyUsbFrameToken || '';
-    }
-
-    // 🚚 大容量転送対応(v0.0.4a0, WebADB等を想定): 旧実装はhex文字列
-    //    (1バイト→2文字、2倍膨張)でブリッジとやり取りしていたが、base64
-    //    (1バイト→約1.33文字)に切り替えて往復するJSON文字列サイズを抑える。
-    //    ⚠️ チャンク分割が必須: String.fromCharCode.apply(null, bytes)へ配列を
-    //    「分割せず丸ごと」渡すと、各バイトが個別の関数引数として展開される
-    //    ため、エンジンの引数上限(V8実測: 数十万バイト規模で
-    //    'RangeError: Maximum call stack size exceeded')を超えて例外になる。
-    //    WebADBのような数百KB〜数MB級のペイロードは容易にこの閾値を超える
-    //    ため、0x8000バイトずつのチャンクに分けて処理する。
-    function bytesToBase64(view) {
-        var arr = view instanceof ArrayBuffer ? new Uint8Array(view) :
-                   (view.buffer ? new Uint8Array(view.buffer, view.byteOffset || 0, view.byteLength) : new Uint8Array(view));
-        var binary = '';
-        var chunkSize = 0x8000;
-        for (var i = 0; i < arr.length; i += chunkSize) {
-            binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunkSize));
-        }
-        return btoa(binary);
-    }
-    function base64ToUint8(b64) {
-        var binary = atob(b64 || '');
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return bytes;
-    }
-
-    // 🛡️ 実仕様(wicg.github.io/webusb#dom-usb-requestdevice)の
-    //    「A USBDeviceFilter filter is valid」をそのまま再現。より上位の
-    //    フィールドを伴わない下位フィールドの指定はTypeErrorで拒否する対象
-    //    (例: vendorId無しでproductIdだけを指定 等)。
-    function isValidUsbDeviceFilter(f) {
-        if (!f || typeof f !== 'object') return false;
-        if (('productId' in f) && !('vendorId' in f)) return false;
-        if (('subclassCode' in f) && !('classCode' in f)) return false;
-        if (('protocolCode' in f) && !('subclassCode' in f)) return false;
-        if (('vendorId' in f) && (typeof f.vendorId !== 'number' || f.vendorId < 0 || f.vendorId > 0xFFFF || Math.floor(f.vendorId) !== f.vendorId)) return false;
-        if (('productId' in f) && (typeof f.productId !== 'number' || f.productId < 0 || f.productId > 0xFFFF || Math.floor(f.productId) !== f.productId)) return false;
-        if (('classCode' in f) && (typeof f.classCode !== 'number' || f.classCode < 0 || f.classCode > 0xFF || Math.floor(f.classCode) !== f.classCode)) return false;
-        if (('subclassCode' in f) && (typeof f.subclassCode !== 'number' || f.subclassCode < 0 || f.subclassCode > 0xFF || Math.floor(f.subclassCode) !== f.subclassCode)) return false;
-        if (('protocolCode' in f) && (typeof f.protocolCode !== 'number' || f.protocolCode < 0 || f.protocolCode > 0xFF || Math.floor(f.protocolCode) !== f.protocolCode)) return false;
-        if (('serialNumber' in f) && typeof f.serialNumber !== 'string') return false;
-        return true;
-    }
-
-    // 🛡️ 実WebUSB仕様(wicg.github.io/webusb)を確認して比較した結果に基づく修正。
-    //    claimInterface()は仕様上「保護対象クラスによる拒否」だけがSecurityError、
-    //    それ以外(ハンドル不正・libusb側のclaim失敗等)はNetworkErrorが正しい
-    //    (open()の「ブロックリスト機器による拒否」も同様にSecurityErrorが正しい)。
-    //    requestDeviceChooser()の「チューザーが既に開いている」再入防止ガードは
-    //    InvalidStateErrorが正しい(操作を受け付けられる状態ではない、という
-    //    一般的なDOMException用法に合わせた)。
-    //    Python側はこれらの拒否理由の場合にだけエラー文字列の先頭へ対応する
-    //    "XxxError:"を付けて返す取り決めなので、ここではそのプレフィックスだけを見て
-    //    DOMExceptionの種別を仕様どおりに振り分ける。それ以外の失敗はメソッドごとの
-    //    デフォルト(通常はNetworkError)のままにする。
-    // 🛡️ バグ修正(v0.0.4b2, 実Chrome/Blinkソース精査中に発覚): このリストは
-    //    元々'SecurityError:'/'InvalidStateError:'の2つしか無く、Python側
-    //    (errors.py)が実際に生成しうる 'NotFoundError:' / 'InvalidAccessError:' /
-    //    'IndexSizeError:' / 'DataError:' が一切ここで振り分けられていなかった。
-    //    該当した場合、DOMExceptionの.nameが(呼び出し元がdefaultErrorNameを
-    //    明示していない限り)本来と違う既定値(通常'NetworkError')になり、
-    //    かつ.messageの先頭に"IndexSizeError: "のような接頭辞がそのまま
-    //    残ってしまう(=ページ側が.nameで正しく分岐できず、メッセージ文面も
-    //    おかしい)という実害のあるバグだった。errors.py側で定義している
-    //    プレフィックスを漏れなくここに列挙するのが正しい対処であり、
-    //    個々の呼び出し箇所でdefaultErrorNameを都度指定する方式は今回のように
-    //    漏れが生まれやすいため採らない。
-    // 🛡️ security_audit No.2b: Python側(requestDeviceChooser)がfilters/
-    //    exclusionFiltersの構造検証を素のQWebChannel直叩きに対する最終防衛
-    //    として追加したことに伴う対応。実仕様(wicg.github.io/webusb)では、
-    //    無効なUSBDeviceFilterは(下のisValidUsbDeviceFilterによるJS側の
-    //    正規チェックと同様)DOMExceptionではなく組み込みの TypeError に
-    //    なるべきものなので、'TypeError:'プレフィックスだけは他と扱いを分け、
-    //    DOMExceptionではなく本物のTypeErrorとしてthrowする。
-    var KNOWN_ERROR_PREFIXES = [
-        'SecurityError:', 'InvalidStateError:', 'NotFoundError:',
-        'InvalidAccessError:', 'IndexSizeError:', 'DataError:',
-    ];
-    function throwFromResult(res, defaultMessage, defaultErrorName) {
-        var msg = (res && res.error) || defaultMessage;
-        var name = defaultErrorName || 'NetworkError';
-        if (typeof msg === 'string' && msg.indexOf('TypeError:') === 0) {
-            throw new TypeError(msg.slice('TypeError:'.length).trim());
-        }
-        if (typeof msg === 'string') {
-            for (var i = 0; i < KNOWN_ERROR_PREFIXES.length; i++) {
-                var prefix = KNOWN_ERROR_PREFIXES[i];
-                if (msg.indexOf(prefix) === 0) {
-                    name = prefix.slice(0, -1); // 末尾の ':' を落とす
-                    msg = msg.slice(prefix.length).trim();
-                    break;
-                }
-            }
-        }
-        throw new DOMException(msg, name);
-    }
-
-    // 🛡️ 実仕様のUSBInterface.alternate/.claimedを再現する。
-    //    Python側(webusb_hardening.build_configurations_tree)はinterfaceNumberごとに
-    //    alternates配列だけを組み立てて返すため、「今どのalternateが有効か」
-    //    「このインターフェースは今claim済みか」はJS側で補う必要がある。
-    //    MDN: 「USBInterface.alternate ... By default this is the USBAlternateInterface
-    //    from alternates with alternateSetting equal to 0.」を再現(先頭要素決め打ちではなく
-    //    alternateSetting===0を探す。無ければ安全側で先頭にフォールバック)。
-    function deriveInterfaceState(configurations) {
-        (configurations || []).forEach(function(cfg) {
-            (cfg.interfaces || []).forEach(function(iface) {
-                var alts = iface.alternates || [];
-                var zero = alts.filter(function(a) { return a.alternateSetting === 0; })[0];
-                iface.alternate = zero || alts[0] || null;
-                if (typeof iface.claimed !== 'boolean') iface.claimed = false;
-            });
-        });
-        return configurations;
-    }
-
-    function setInterfaceClaimed(device, interfaceNumber, claimed) {
-        var iface = ((device.configuration && device.configuration.interfaces) || [])
-            .filter(function(i) { return i.interfaceNumber === interfaceNumber; })[0];
-        if (iface) iface.claimed = claimed;
-    }
-
-    function OpenWebUSBDevice(info) {
-        info = info || {};
-        this.vendorId = info.vendorId;
-        this.productId = info.productId;
-        this.productName = info.productName || null;
-        this.manufacturerName = info.manufacturerName || null;
-        this.serialNumber = info.serialNumber || null;
-        this.deviceClass = info.deviceClass || 0;
-        this.deviceSubclass = info.deviceSubclass || 0;
-        this.deviceProtocol = info.deviceProtocol || 0;
-        this.usbVersionMajor = info.usbVersionMajor || 0;
-        this.usbVersionMinor = info.usbVersionMinor || 0;
-        this.usbVersionSubminor = info.usbVersionSubminor || 0;
-        this.deviceVersionMajor = info.deviceVersionMajor || 0;
-        this.deviceVersionMinor = info.deviceVersionMinor || 0;
-        this.deviceVersionSubminor = info.deviceVersionSubminor || 0;
-        this.configurations = deriveInterfaceState(info.configurations || []);
-        // 実仕様のconfiguration getterは「bConfigurationValueが現在値と一致するもの」を
-        // 都度探す形。Python側(dev.get_active_configuration())が実機の値を
-        // activeConfigurationValueとして渡してくればそれを使い、取得できなかった
-        // 場合(古いデバイス等)のみ従来どおり先頭要素へ安全側フォールバックする。
-        var activeMatch = null;
-        if (info.activeConfigurationValue !== undefined && info.activeConfigurationValue !== null) {
-            activeMatch = (this.configurations || []).filter(function(c) {
-                return c.configurationValue === info.activeConfigurationValue;
-            })[0] || null;
-        }
-        this.configuration = activeMatch || (this.configurations && this.configurations[0]) || null;
-        this.opened = false;
-        this._handle = null;
-    }
-    OpenWebUSBDevice.prototype.open = function() {
-        // 🛡️ 実Chrome(usb_device.ccのUSBDevice::open())を確認して判明した欠落:
-        //    「すでにopened済みなら即座に成功解決する」という冪等性が無かった。
-        //    このままだとJS側でopen()を2回呼ぶたびにPython側で新しいハンドルが
-        //    発行され続け、1回目のハンドル(claim済みインターフェースの情報を
-        //    含む)は self._handle が上書きされて二度と参照できなくなり、
-        //    Python側に開いたままのpyusbデバイスリソースとして孤立してしまう
-        //    (closeDevice()を呼ぶ手段が失われるリーク)。
-        if (this.opened) return Promise.resolve();
-        var self = this;
-        return callBridge('openDevice', this.vendorId, this.productId, _frameToken(), this.serialNumber || '').then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to open device');
-            self._handle = res.handle;
-            self.opened = true;
-        });
-    };
-    // 🐛 バグ修正(v0.0.5a3、実仕様のUSBDevice.close()/selectConfiguration()/
-    //    reset()アルゴリズムを実際に取得して確認): この3つはいずれも、成功後は
-    //    [[claimedInterface]]を全interfaceにわたって全てfalseへリセットすると
-    //    定めている(close()は「全claim済みinterfaceに対してreleaseInterface()が
-    //    呼ばれたのと同じ状態」、selectConfiguration()/reset()は明示的に
-    //    [[claimedInterface]]を全てfalseで埋め直す)。旧実装はPython側
-    //    (bridge.py)ではこれを正しく行っていたが、JS側のOpenWebUSBDeviceオブジェクト
-    //    自身が持つ各interfaceの.claimed/.alternateはどの経路でもリセットして
-    //    いなかった。結果として、例えば「interface 0をclaimし、
-    //    selectConfiguration()で別のconfigurationへ移り、元のconfigurationへ
-    //    selectConfiguration()で戻る」といった操作をすると、Python側は
-    //    正しくclaimed_interfacesを空に戻しているにもかかわらず、JS側の
-    //    device.configuration.interfaces[0].claimedはtrueのまま残り続け、
-    //    ページ側のコードが「既にclaim済みのはず」と誤認したままbulk/interrupt
-    //    転送を試みてNotFoundError(claim済みかつ選択中のalternateとしては
-    //    見つからない)になる、という実害のある状態不整合だった。
-    function resetAllClaimedInterfaces(device) {
-        (device.configurations || []).forEach(function(cfg) {
-            (cfg.interfaces || []).forEach(function(iface) {
-                iface.claimed = false;
-                var alts = iface.alternates || [];
-                var zero = alts.filter(function(a) { return a.alternateSetting === 0; })[0];
-                iface.alternate = zero || alts[0] || null;
-            });
-        });
-    }
-    OpenWebUSBDevice.prototype.close = function() {
-        // 🛡️ 実仕様: openedがfalse(既に閉じている/一度も開いていない)なら
-        //    ブリッジへは何も送らず、即座に成功解決するno-op。
-        if (!this.opened) return Promise.resolve();
-        var self = this;
-        return _bridgeReady.then(function(bridge) {
-            // 🛡️ バグ修正(v0.0.4): frame_tokenを渡し忘れていた。closeDevice()は
-            //    Python側で @Slot(int, str) として2引数必須で登録されているため、
-            //    1引数(handleのみ)で呼ぶとQWebChannelがスロット呼び出しを黙って
-            //    dispatchせず(実機のQWebChannel往復で検証済み)、Python側の
-            //    closeDevice()が一度も実行されないままだった。結果としてpyusbの
-            //    デバイスハンドルが実際には一切解放されず(_open_devicesにも
-            //    残り続け)、close()を呼んでも何も起きていなかった。
-            if (bridge && self._handle != null) bridge.closeDevice(self._handle, _frameToken());
-            self.opened = false;
-            self._handle = null;
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.selectConfiguration = function(configurationValue) {
-        var self = this;
-        return callBridge('selectConfiguration', this._handle, configurationValue, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to select configuration');
-            // 実仕様どおり、選択成功後はconfigurationが新しい設定を指すよう更新する。
-            var match = (self.configurations || []).filter(function(c) { return c.configurationValue === configurationValue; })[0];
-            if (match) self.configuration = match;
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.claimInterface = function(n) {
-        var self = this;
-        return callBridge('claimInterface', this._handle, n, _frameToken()).then(function(res) {
-            // 保護対象クラスによる拒否だけがSecurityError、それ以外(ハンドル不正・
-            // libusb側のclaim失敗)はNetworkErrorが実仕様どおりの振り分け。
-            if (!res.success) throwFromResult(res, 'Failed to claim interface');
-            setInterfaceClaimed(self, n, true);
-        });
-    };
-    OpenWebUSBDevice.prototype.releaseInterface = function(n) {
-        var self = this;
-        return callBridge('releaseInterface', this._handle, n, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to release interface');
-            setInterfaceClaimed(self, n, false);
-        });
-    };
-    OpenWebUSBDevice.prototype.selectAlternateInterface = function(interfaceNumber, alternateSetting) {
-        var self = this;
-        return callBridge('selectAlternateInterface', this._handle, interfaceNumber, alternateSetting, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to select alternate interface');
-            var iface = ((self.configuration && self.configuration.interfaces) || [])
-                .filter(function(i) { return i.interfaceNumber === interfaceNumber; })[0];
-            if (iface) {
-                var alt = (iface.alternates || []).filter(function(a) { return a.alternateSetting === alternateSetting; })[0];
-                if (alt) iface.alternate = alt;
-            }
-        });
-    };
-    OpenWebUSBDevice.prototype.reset = function() {
-        var self = this;
-        return callBridge('resetDevice', this._handle, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to reset device');
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.clearHalt = function(direction, endpointNumber) {
-        return callBridge('clearHalt', this._handle, direction, endpointNumber, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to clear halt');
-        });
-    };
-    OpenWebUSBDevice.prototype.forget = function() {
-        var self = this;
-        return callBridge('forgetGrantedDevice', this.vendorId, this.productId, _frameToken()).then(function() {
-            self.opened = false;
-        });
-    };
-    OpenWebUSBDevice.prototype.transferIn = function(endpoint, length) {
-        return callBridge('bulkTransferIn', this._handle, endpoint, length, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Transfer failed');
-            // 🛡️ 実仕様(USBTransferStatus): STALLはrejectではなくstatus:'stall'を
-            //    伴う成功resolveとして返る。Python側がstall検出時はres.statusに
-            //    'stall'を入れてくる(それ以外はres.status==='ok')。
-            // 🔓 v0.0.4b2: res.warningがあれば(=実Chromeの32MiB上限を超えた等)
-            //    DevTools consoleへ警告として転送する。実Chromeを騙るのではなく、
-            //    「実Chromeならここでエラーになるが、これはpyside6-webusbなので
-            //    続行している」という相違を透明に説明するためのもの
-            //    (chrome_transfer_limit_warning()、hardening.py参照)。
-            if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-            var bytes = base64ToUint8(res.data || '');
-            return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
-        });
-    };
-    OpenWebUSBDevice.prototype.transferOut = function(endpoint, data) {
-        var b64 = bytesToBase64(data);
-        return callBridge('bulkTransferOut', this._handle, endpoint, b64, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Transfer failed');
-            return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
-        });
-    };
-    // 🛡️ spec: isochronousTransferIn/Outはどちらも「対象endpointを探し、
-    //    見つからなければNotFoundError、typeがisochronousでなければ
-    //    InvalidAccessError」という事前チェックを実機へ問い合わせる前に行う
-    //    (USBDevice.isochronousTransferIn(endpointNumber, packetLengths)の
-    //    アルゴリズム手順4-6相当)。claim済みのalternateだけを対象にする
-    //    (未claimのインターフェースのendpointはそもそも見つからない扱い)。
-    function _findClaimedEndpoint(device, endpointNumber, direction) {
-        var cfg = device.configuration;
-        if (!cfg) return null;
-        var interfaces = cfg.interfaces || [];
-        for (var i = 0; i < interfaces.length; i++) {
-            var iface = interfaces[i];
-            if (!iface.claimed) continue;
-            var alternates = iface.alternates || [];
-            for (var j = 0; j < alternates.length; j++) {
-                var endpoints = alternates[j].endpoints || [];
-                for (var k = 0; k < endpoints.length; k++) {
-                    var ep = endpoints[k];
-                    if (ep.endpointNumber === endpointNumber && ep.direction === direction) {
-                        return ep;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    OpenWebUSBDevice.prototype.isochronousTransferIn = function(endpointNumber, packetLengths) {
-        var ep = _findClaimedEndpoint(this, endpointNumber, 'in');
-        if (!ep) {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not part of a claimed and selected alternate interface.',
-                'NotFoundError'));
-        }
-        if (ep.type !== 'isochronous') {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError'));
-        }
-        return callBridge('isochronousTransferIn', this._handle, endpointNumber, JSON.stringify(packetLengths), _frameToken())
-            .then(function(res) {
-                if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
-                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-                var totalLength = 0;
-                var packetBytes = (res.packets || []).map(function(p) {
-                    var b = base64ToUint8(p.data || '');
-                    totalLength += b.length;
-                    return b;
-                });
-                var combined = new Uint8Array(totalLength);
-                var offset = 0;
-                var packets = packetBytes.map(function(b, i) {
-                    combined.set(b, offset);
-                    var view = new DataView(combined.buffer, offset, b.length);
-                    offset += b.length;
-                    return { data: view, status: (res.packets[i] && res.packets[i].status) || 'ok' };
-                });
-                return { data: new DataView(combined.buffer), packets: packets };
-            });
-    };
-    OpenWebUSBDevice.prototype.isochronousTransferOut = function(endpointNumber, data, packetLengths) {
-        var ep = _findClaimedEndpoint(this, endpointNumber, 'out');
-        if (!ep) {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not part of a claimed and selected alternate interface.',
-                'NotFoundError'));
-        }
-        if (ep.type !== 'isochronous') {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError'));
-        }
-        var b64 = bytesToBase64(data);
-        return callBridge('isochronousTransferOut', this._handle, endpointNumber, b64, JSON.stringify(packetLengths), _frameToken())
-            .then(function(res) {
-                if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
-                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-                return { packets: res.packets || [] };
-            });
-    };
-    OpenWebUSBDevice.prototype.controlTransferIn = function(setup, length) {
-        var reqType = (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
-                      (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00) |
-                      0x80; // Device-to-host
-        return callBridge('controlTransferIn', this._handle, reqType, setup.request, setup.value, setup.index, length, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Control transfer failed');
-            var bytes = base64ToUint8(res.data || '');
-            return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
-        });
-    };
-    OpenWebUSBDevice.prototype.controlTransferOut = function(setup, data) {
-        var reqType = (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
-                      (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00);
-        var b64 = data ? bytesToBase64(data) : '';
-        return callBridge('controlTransferOut', this._handle, reqType, setup.request, setup.value, setup.index, b64, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Control transfer failed');
-            return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
-        });
-    };
-
-    // --- navigator.usb 本体、及びconnect/disconnect イベント ---
-    // Python側(PyUsbBridge)がホットプラグ監視タイマーで差分検出し、許可済み
-    // オリジンに関係するデバイスの抜き挿しだけをQtシグナルとして送ってくる。
-    // 🐛 バグ修正(v0.0.5a3、実DevTools上で `navigator.usb instanceof EventTarget`
-    //    が false になることを確認して発覚): 旧実装はEventTargetを継承する
-    //    代わりに、addEventListener/removeEventListener/on(connect|disconnect)
-    //    プロパティへ個別対応した独自の最小ディスパッチャを実装していた
-    //    (types/webusb-polyfill.d.tsは`interface USB extends EventTarget`と
-    //    宣言しているにもかかわらず、実行時の実体はただのオブジェクトリテラルで
-    //    EventTargetを継承していなかった)。QtWebEngine(実質Chromium)を含む
-    //    現代的なJSエンジンはグローバルのEventTargetコンストラクタを持つため、
-    //    それを実際に継承したUSBクラス(及びEventを継承した本物の
-    //    USBConnectionEvent)へ差し替える。EventTarget自体が存在しない
-    //    (極めて古い/簡易な)実行環境向けに、その場合だけ従来の独自
-    //    ディスパッチャへフォールバックする防御的な作りにしてある。
-    var _HasNativeEventTarget = typeof EventTarget === 'function';
-
-    // ⚠️ EventTarget/EventはES5の「コンストラクタ借用」(Parent.call(this))では
-    //    継承できないネイティブのクラスコンストラクタ(`new`無しで呼ぶと
-    //    TypeErrorになる実機/Node.js双方で確認済み)。このファイルの他の部分は
-    //    意図的にES5関数式スタイルで統一しているが、ネイティブEventTarget/Event
-    //    を実際に継承するにはES6の`class ... extends`構文が必須なため、ここだけ
-    //    (_HasNativeEventTargetがtrueの、モダンなエンジンだと確定している枝の中でだけ)
-    //    使う。フォールバック側は従来どおりのES5スタイルを維持する。
-    var USBConnectionEvent, USB;
-    if (_HasNativeEventTarget) {
-        USBConnectionEvent = class extends Event {
-            constructor(type, eventInitDict) {
-                super(type, eventInitDict || {});
-                this.device = (eventInitDict || {}).device;
-            }
-        };
-        USB = class extends EventTarget {
-            constructor() {
-                super();
-                this.onconnect = null;
-                this.ondisconnect = null;
-            }
-        };
-    } else {
-        // フォールバック: 素のEventTargetが無い環境向けの最小限の自前実装
-        // (instanceof EventTargetにはならないが、機能自体はここまでと同じく動く)。
-        USBConnectionEvent = function(type, eventInitDict) {
-            var init = eventInitDict || {};
-            this.type = type;
-            this.device = init.device;
-        };
-        USB = function() {
-            this.onconnect = null;
-            this.ondisconnect = null;
-        };
-        var _fallbackListeners = { connect: [], disconnect: [] };
-        USB.prototype.addEventListener = function(type, fn) {
-            if (_fallbackListeners[type] && typeof fn === 'function') _fallbackListeners[type].push(fn);
-        };
-        USB.prototype.removeEventListener = function(type, fn) {
-            if (_fallbackListeners[type]) {
-                _fallbackListeners[type] = _fallbackListeners[type].filter(function(f) { return f !== fn; });
-            }
-        };
-        USB.prototype.dispatchEvent = function(evt) {
-            (_fallbackListeners[evt.type] || []).forEach(function(fn) {
-                try { fn(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
-            });
-            return true;
-        };
-    }
-
-    navigator.usb = new USB();
-
-    function _dispatchUsbEvent(type, device) {
-        var evt = new USBConnectionEvent(type, { device: device });
-        try { navigator.usb.dispatchEvent(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
-        var handlerProp = 'on' + type;
-        if (typeof navigator.usb[handlerProp] === 'function') {
-            try { navigator.usb[handlerProp](evt); } catch (e) { /* 同上 */ }
-        }
-    }
-    _bridgeReady.then(function(bridge) {
-        if (!bridge) return;
-        // 🛡️ security_audit No.5: Python側のdeviceConnected/deviceDisconnected
-        // シグナルは、QWebChannelにフレーム単位配信の仕組みが無いため、ページ内の
-        // 全フレームへブロードキャストされる。発火条件も「トップレベルページの
-        // 許可状況」だけで、"このイベントを受け取っている個々のフレーム自身"の
-        // オリジンは一切見ていない(bridge.pyの_poll_hotplug()のコメント参照)。
-        // その結果、トップレベルページが許可したデバイスの抜き挿しが、同じページに
-        // 埋め込まれた無関係なクロスオリジンiframe(そのデバイスへの許可を一度も
-        // 得ていない第三者広告等)にまで届いてしまう。
-        // QWebChannel/Qt Signal自体をフレーム単位配信に作り直すことはできないが、
-        // 受け取った側であるここで、getDevices()と同じ判定(=このフレーム自身の
-        // オリジンが実際にこのvendorId/productIdへの許可を持っているか)を
-        // isGrantedToThisFrame()で再検証し、許可が無ければpageへdispatchせずに
-        // 静かに捨てる。これによりobservableな挙動としては正しく
-        // フレームごとにスコープされる。
-        function _dispatchIfGrantedToThisFrame(type, info) {
-            try {
-                bridge.isGrantedToThisFrame(info.vendorId, info.productId, _frameToken(), function(granted) {
-                    if (granted) _dispatchUsbEvent(type, new OpenWebUSBDevice(info));
-                });
-            } catch (e) { /* 判定できなければ安全側(dispatchしない) */ }
-        }
-        if (bridge.deviceConnected && bridge.deviceConnected.connect) {
-            bridge.deviceConnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('connect', JSON.parse(infoJson)); } catch (e) {}
-            });
-        }
-        if (bridge.deviceDisconnected && bridge.deviceDisconnected.connect) {
-            bridge.deviceDisconnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('disconnect', JSON.parse(infoJson)); } catch (e) {}
-            });
-        }
-    });
-
-    // 🐛 v0.0.5a3: 以前はここでnavigator.usbをオブジェクトリテラルとして丸ごと
-    // 代入していたが、今はnavigator.usb自体は既に(上でEventTargetを継承した
-    // USBのインスタンスとして)生成済みなので、残りのメソッドをその
-    // インスタンスへ生やす形にする。addEventListener/removeEventListener/
-    // dispatchEventはUSB.prototype側(EventTarget由来、またはフォールバック)に
-    // 既にあるため、ここで再定義しない。
-    navigator.usb.getDevices = function() {
-        return callBridge('listDevices', _frameToken()).then(function(res) {
-            return (res.devices || []).map(function(d) { return new OpenWebUSBDevice(d); });
-        });
-    };
-    navigator.usb.requestDevice = function(_options) {
-            // 🛡️ 実仕様: USBDeviceRequestOptions.filtersは必須(required)フィールド。
-            //    省略された場合、実ブラウザではWebIDLの辞書変換の時点でTypeErrorになる
-            //    (wicg.github.io/webusb の USBDeviceRequestOptions定義)。旧実装は
-            //    optionsを一切見ておらず、常に全デバイスをチューザーに表示していた。
-            if (!_options || !Array.isArray(_options.filters)) {
-                return Promise.reject(new TypeError(
-                    "Failed to execute 'requestDevice' on 'USB': required member filters is undefined."));
-            }
-            var exclusionFilters = Array.isArray(_options.exclusionFilters) ? _options.exclusionFilters : [];
-            // 🛡️ 実仕様: filters/exclusionFiltersの各要素が「A USBDeviceFilter filter
-            //    is valid」に反する場合はTypeErrorで拒否する(例: vendorId無しで
-            //    productIdだけを指定 等)。
-            var allFilters = _options.filters.concat(exclusionFilters);
-            for (var fi = 0; fi < allFilters.length; fi++) {
-                if (!isValidUsbDeviceFilter(allFilters[fi])) {
-                    return Promise.reject(new TypeError(
-                        "Failed to execute 'requestDevice' on 'USB': the provided filter value is invalid."));
-                }
-            }
-            // 🆕 v0.0.5b3: install()のextra_guard_js=フック。ホストアプリが
-            //    window.__pysideWebUSBExtraGuard をfunctionとして定義していれば、
-            //    チューザーダイアログを開く(=ブリッジへ到達する)前にここで必ず
-            //    呼び出し、ドメイン固有の追加ガード条件を課せるようにする。
-            //    厳密に false を返した場合のみ拒否する(true/undefined/例外は
-            //    「このフックでは追加の制限をしない」の意味——このフック単体で
-            //    既存の検証を緩めることはできない、純粋な追加の絞り込みとして
-            //    設計してある)。ガード自身が例外を投げた場合は安全側(拒否)に倒す。
-            if (typeof window.__pysideWebUSBExtraGuard === 'function') {
-                var _guardResult;
-                try {
-                    _guardResult = window.__pysideWebUSBExtraGuard({
-                        origin: (typeof window.location !== 'undefined' && window.location) ? window.location.origin : '',
-                        filters: _options.filters,
-                        exclusionFilters: exclusionFilters,
-                    });
-                } catch (eGuard) {
-                    _guardResult = false;
-                }
-                if (_guardResult === false) {
-                    return Promise.reject(new DOMException(
-                        "Rejected by this page's configured WebUSB guard (extra_guard_js).", 'SecurityError'));
-                }
-            }
-            // 🛡️ 本物のWebUSB同様、信頼できるユーザー操作(クリック等)のハンドラ内から
-            //    呼ばれた場合のみ受け付ける。navigator.userActivationが無い古い/簡易な
-            //    エンジンでは判定できないため、その場合はチェックをスキップする
-            //    (その場合でも実際のデバイス選択にはネイティブのチューザーダイアログでの
-            //    明示的なユーザー操作が別途必要であり、無許可アクセスには繋がらない)。
-            if (typeof navigator.userActivation !== 'undefined' && navigator.userActivation &&
-                navigator.userActivation.isActive === false) {
-                return Promise.reject(new DOMException(
-                    'Must be handling a user gesture to call navigator.usb.requestDevice().', 'SecurityError'));
-            }
-            // 🛡️ security_audit No.2: 直前で確認した「本物のユーザー操作から
-            //    呼ばれている」という事実を、Python側(requestDeviceChooser)が
-            //    独立に検証できる形にするため、短命・使い切りのトークンを
-            //    発行してもらってから渡す(see: bridge.pyのmintGestureToken/
-            //    __init__のself._gesture_tokensのコメント、および既知の限界)。
-            //    mintGestureTokenはJSONではなく生のトークン文字列を返す設計
-            //    なので、常にJSON.parseする callBridge は使わず直接呼ぶ。
-            return _bridgeReady.then(function(bridge) {
-                return new Promise(function(resolve) {
-                    if (!bridge) return resolve('');
-                    bridge.mintGestureToken(function(token) { resolve(token || ''); });
-                });
-            }).then(function(gestureToken) {
-                return callBridge('requestDeviceChooser', JSON.stringify({
-                    filters: _options.filters,
-                    exclusionFilters: exclusionFilters,
-                }), _frameToken(), gestureToken);
-            }).then(function(res) {
-                if (res.cancelled) {
-                    // 🛡️ res.errorがある場合(再入防止ガード発火・pyusbバックエンド不通・
-                    //    ダイアログ例外など)は実際の理由を伝える。無い場合(=ユーザーが
-                    //    素直にCancelを押した/ダイアログを閉じた)は従来どおり
-                    //    汎用のNotFoundErrorにする。
-                    if (res.error) throwFromResult(res, 'No device selected.', 'NotFoundError');
-                    throw new DOMException('No device selected.', 'NotFoundError');
-                }
-                if (!res.device) {
-                    throw new DOMException('No device selected.', 'NotFoundError');
-                }
-                return new OpenWebUSBDevice(res.device);
-            });
-    };
-
-    // 🔧 v0.0.4b2: F12(DevTools Console)向けのデバッグ用ネームスペース。
-    // ページを開発中にnavigator.usbの状態を手軽に確認できるユーティリティ集。
-    // 🛡️ 安全上の設計方針: ここで公開する情報は「オリジンに紐付かない静的情報
-    // (バージョン・Rust高速化の有無・転送上限値)」と「呼び出し元オリジン自身が
-    // 既にnavigator.usb.getDevices()経由で見えている情報を見やすく整形しただけの
-    // もの」に限定している。他オリジンの許可済みデバイス一覧のような機微情報は
-    // 絶対に含めない——install()はこのポリフィル自体をMainWorld(=ページ自身の
-    // JSと同じ実行コンテキスト)へ注入するため、ここに書いたものは事実上どの
-    // Webページからも(DevTools越しの人間だけでなく、そのページ自身のスクリプト
-    // からも)見える。listKnownDevices等の@Slotを外した理由(bridge.py参照)と
-    // 全く同じ原則がここにも適用される。
-    window.__pysideWebUSB = (function() {
-    // 🌐 v0.0.6: install(locale=...)と同じ言語を、この__pysideWebUSB自身の
-    // メッセージ(explainTransferLimits()のconsole.log文言、新設のhelp())にも
-    // 反映する。既定値は'en'——この定数(WEBUSB_POLYFILL_JS)はtests/
-    // extract_polyfill_js.pyによりinstall()を経由せず直接Node.jsのテストへ
-    // 渡されることがある(tests/test_polyfill.js)ため、install()が下の1行を
-    // 実際のロケールへ書き換える前の状態でも単体で有効なJavaScriptであり
-    // 続ける必要がある(polyfill.py側でこの1行だけを対象に.replace()する
-    // 実装になっている——詳細はinstall()内のコメント参照)。
-    var _pysideWebUSBLocale = 'en';
-    var _pysideWebUSBStrings = {
-        en: {
-            transferLimits: function(limits) {
-                return '[pyside6-webusb] Transfer size policy: transfers up to ' +
-                    limits.hostSafetyHardLimit + ' bytes are allowed here. Real Chrome ' +
-                    'would reject anything over ' + limits.chromeCompatibleWarnThreshold +
-                    ' bytes with DataError -- this implementation instead logs a ' +
-                    'console.warn() on that specific transfer and lets it proceed, since ' +
-                    'it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
-                    'implementation with its own, more permissive extensions. ' +
-                    'See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
-            },
-            help: '[pyside6-webusb] Available __pysideWebUSB commands: ' +
-                'listGrantedDevices() - devices already granted to this origin; ' +
-                "bridgeInfo() - this bridge's own version/backend/acceleration status; " +
-                "explainTransferLimits() - this implementation's transfer size policy vs " +
-                'real Chrome; locale() - the language this debug output currently uses ' +
-                '(from install(locale=...)).',
-        },
-        ja: {
-            transferLimits: function(limits) {
-                return '[pyside6-webusb] 転送サイズの方針: ここでは ' +
-                    limits.hostSafetyHardLimit + ' バイトまでの転送を許可しています。' +
-                    '実際のChromeなら ' + limits.chromeCompatibleWarnThreshold +
-                    ' バイトを超えるとDataErrorで拒否しますが、この実装ではその転送に' +
-                    '対してconsole.warn()を出すだけで処理は継続します——これはChromeの' +
-                    '完全な代替品を目指したものではなく、より寛容な独自拡張を持つ' +
-                    'WebUSB互換の実装だからです。詳しい理由はpyside6-webusbの' +
-                    'README/CHANGELOG(v0.0.4b2)を参照してください。';
-            },
-            help: '[pyside6-webusb] __pysideWebUSBで使えるコマンド: ' +
-                'listGrantedDevices() - このオリジンに既に許可済みのデバイス一覧 / ' +
-                'bridgeInfo() - このブリッジ自身のバージョン・バックエンド・' +
-                'アクセラレーション状況 / explainTransferLimits() - この実装の' +
-                '転送サイズ方針と実Chromeとの違い / locale() - このデバッグ出力が' +
-                '現在使っている言語(install(locale=...)から)。',
-        },
-        zh: {
-            transferLimits: function(limits) {
-                return '[pyside6-webusb] 传输大小策略: 此处允许最多 ' +
-                    limits.hostSafetyHardLimit + ' 字节的传输。真正的 Chrome 会对超过 ' +
-                    limits.chromeCompatibleWarnThreshold + ' 字节的传输以 DataError 拒绝,' +
-                    '而本实现只会针对该次传输输出 console.warn() 并允许其继续——因为本' +
-                    '实现并非要成为 Chrome 的完全替代品,而是一个带有更宽松扩展的 ' +
-                    'WebUSB 兼容实现。完整原因请参阅 pyside6-webusb 的 ' +
-                    'README/CHANGELOG(v0.0.4b2)。';
-            },
-            help: '[pyside6-webusb] __pysideWebUSB 可用命令: ' +
-                'listGrantedDevices() - 列出已授权给此来源的设备 / ' +
-                'bridgeInfo() - 本桥接自身的版本/后端/加速状态 / ' +
-                'explainTransferLimits() - 本实现的传输大小策略与真实 Chrome 的差异 / ' +
-                'locale() - 此调试输出当前使用的语言(来自 install(locale=...))。',
-        },
-    };
-    function _pysideWebUSBLocalized() {
-        return _pysideWebUSBStrings[_pysideWebUSBLocale] || _pysideWebUSBStrings.en;
-    }
-
-    return {
-        // 呼び出し元オリジンが既に許可済みのデバイス一覧を、DevTools上で
-        // console.table()を使って見やすく表示するショートカット。中身は
-        // navigator.usb.getDevices()と完全に同じデータ(=追加の情報開示は無い)。
-        listGrantedDevices: function() {
-            return navigator.usb.getDevices().then(function(devices) {
-                var rows = devices.map(function(d) {
-                    return {
-                        vendorId: '0x' + d.vendorId.toString(16),
-                        productId: '0x' + d.productId.toString(16),
-                        productName: d.productName,
-                        manufacturerName: d.manufacturerName,
-                        serialNumber: d.serialNumber,
-                        opened: d.opened,
-                    };
-                });
-                if (typeof console !== 'undefined' && console.table) console.table(rows);
-                return rows;
-            });
-        },
-
-        // 🆕 独自拡張(実Chromeのnavigator.usbには相当機能が無い): このブリッジ
-        // 自体の状態(バージョン・Rustアクセラレーションが実際に効いているか・
-        // 転送サイズの上限方針)。navigator.usb自体からは通常知りようがない
-        // 情報なので、getDevices()の整形と違い、これは純粋にこの実装が
-        // 追加で公開している情報。
-        bridgeInfo: function() {
-            return callBridge('isAvailable').then(function(res) {
-                if (typeof console !== 'undefined' && console.log) {
-                    console.log('[pyside6-webusb] bridge info:', res);
-                }
-                return res;
-            });
-        },
-
-        // 🆕 独自拡張: 実Chromeの32MiB上限(kUsbTransferLengthLimit)をこの
-        // 実装がどう扱っているか(拒否ではなく警告に留める方針、
-        // hardening.pyのCHROME_USB_TRANSFER_LENGTH_LIMIT/HOST_SAFETY_MAX_
-        // TRANSFER_LENGTH参照)をDevTools上で説明する。実際に上限を超えた
-        // 転送が起きた際は、この説明を読まなくてもtransferIn/Out自体が
-        // console.warn()でその都度知らせる(res.warning、上記callBridge経由の
-        // transferIn実装を参照)。
-        //
-        // 🌐 v0.0.6: 説明文のconsole.log自体は、install(locale=...)に応じて
-        // en/ja/zhの3言語で出す(戻り値のlimitsオブジェクト自体の中身・形は
-        // 言語に関わらず不変——tests/test_polyfill.jsはこのlimitsオブジェクトの
-        // 値だけを検証しており、console.log文言そのものは検証していない)。
-        explainTransferLimits: function() {
-            return callBridge('isAvailable').then(function(res) {
-                var limits = res.transferLimits || {};
-                var msg = _pysideWebUSBLocalized().transferLimits(limits);
-                if (typeof console !== 'undefined' && console.log) console.log(msg);
-                return limits;
-            });
-        },
-
-        // 🆕 v0.0.6: この__pysideWebUSB自身が現在使っている言語("en"/"ja"/"zh"。
-        // install(locale=...)から、"auto"指定時はdetect_locale()の結果)。
-        // navigator.usb自体には相当機能が無い、独自拡張。
-        locale: function() {
-            return _pysideWebUSBLocale;
-        },
-
-        // 🆕 v0.0.6: 上記コマンド一覧をDevTools上に表示するショートカット
-        // ("独自コマンド"自身にもen/ja/zhの言語対応を、という要望に応える
-        // ための追加コマンド)。
-        help: function() {
-            var msg = _pysideWebUSBLocalized().help;
-            if (typeof console !== 'undefined' && console.log) console.log(msg);
-            return msg;
-        },
-    };
-    })();
-
-    // 🌐 WebUSB標準クラス群をwindowへ公開(実ブラウザ同様、Windowコンテキストから参照可能にする)
-    if (typeof window.USB === 'undefined') window.USB = USB;
-    if (typeof window.USBConnectionEvent === 'undefined') window.USBConnectionEvent = USBConnectionEvent;
-    if (typeof window.USBDevice === 'undefined') window.USBDevice = OpenWebUSBDevice;
-})();
-"""

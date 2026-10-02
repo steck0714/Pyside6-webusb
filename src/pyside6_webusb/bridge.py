@@ -29,11 +29,13 @@ import json
 import secrets
 import sys
 import time
+import weakref
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, QTimer, QSettings
 
 from ._version import __version__
 from .i18n import chooser_strings_for, log_text, resolve_locale
+from .platform_support import capability_summary, platform_summary, setup_hints
 
 # 🆕 v0.0.5a1: Python 3.15 (Doc/whatsnew/3.15.rst, Lib/base64.py,
 # Modules/binascii.c を実ソース確認済み)でbase64.b64decode()にcanonical
@@ -266,6 +268,39 @@ def _find_usb_device(usb_core, usb_util, vendor_id, product_id, serial_number=No
     return candidates[0]
 
 
+try:
+    import shiboken6 as _shiboken
+    _is_valid_qobject = _shiboken.isValid
+except Exception:  # pragma: no cover - shibokenが無い環境では常にTrue扱い
+    def _is_valid_qobject(_obj):
+        return True
+
+
+def _weak_callback(obj, method_name):
+    """QObjectのメソッドを「弱参照つきの素のPython関数」として返す(Signal接続用)。
+
+    🛡️ security_audit No.9(v0.0.6a): `sig.connect(self._method)` のようにQObject
+    自身のバウンドメソッドをSignalへ接続すると、PySide6はそのメソッドを動的スロット
+    としてQObjectのメタオブジェクトへ登録する。QWebChannelは登録済みオブジェクトの
+    「全ての公開スロット」をJavaScriptへ露出するため、`_on_page_navigated` や
+    `_poll_hotplug` のような内部メソッドが**任意のWebページから直接呼べて**しまった
+    (実機のQtWebEngineで、他オリジンのオープン中ハンドルを破棄できることを確認)。
+    素のクロージャ経由で接続すればメタオブジェクトには載らない。弱参照なので
+    ブリッジの寿命も延ばさない。
+    """
+    ref = weakref.ref(obj)
+
+    def _callback(*_args):
+        target = ref()
+        if target is None or not _is_valid_qobject(target):
+            return
+        try:
+            getattr(target, method_name)()
+        except RuntimeError:
+            pass  # C++側が既に破棄されている
+    return _callback
+
+
 class WebUSBBridge(QObject):
     """
     navigator.usb ポリフィル用のPython側ブリッジ（QWebChannel経由でJSと通信）。
@@ -302,7 +337,8 @@ class WebUSBBridge(QObject):
 
     def __init__(self, browser_window=None, parent=None,
                  settings_organization="pyside6-webusb", settings_application="WebUSBBridge",
-                 usb_backend=None, locale=None, chooser_strings=None):
+                 usb_backend=None, locale=None, chooser_strings=None,
+                 chooser=None, transport_kind="webchannel"):
         """
         browser_window: 任意。`.settings` 属性(QSettingsオブジェクト)を持つホストアプリの
             メインウィンドウ等を渡すと、許可の永続化にそれを使う。渡さない場合は
@@ -338,6 +374,13 @@ class WebUSBBridge(QObject):
         self._settings_organization = settings_organization
         self._settings_application = settings_application
         self._usb_backend_override = usb_backend
+        # 🆕 v0.0.6a: デバイス選択UIの差し替え(callable(devices, origin, strings)->dict|None)と、
+        #    このブリッジがどの転送層(webchannel/websocket)で使われているか。
+        self._chooser_override = chooser
+        self._transport_kind = transport_kind
+        self._allow_delete = False
+        self._hotplug_listeners = []
+        self._top_level_url_provider = None   # callable() -> QUrl|str|None (QtWebView等 page.url() が無い場合)
         self._locale = locale
         self._chooser_strings_override = chooser_strings
         self._open_devices = {}   # handle_id(int) -> {"device":.., "origin":.., "claimed_interfaces": set()}
@@ -386,7 +429,7 @@ class WebUSBBridge(QObject):
         #    parentは実際にはこのブリッジを保持する QWebEnginePage。
         try:
             if parent is not None and hasattr(parent, "urlChanged"):
-                parent.urlChanged.connect(self._on_page_navigated)
+                parent.urlChanged.connect(_weak_callback(self, "_on_page_navigated"))
         except Exception as e:
             self._log("__init__", e)
 
@@ -400,7 +443,7 @@ class WebUSBBridge(QObject):
             self._hotplug_watcher = UsbHotplugWatcher(_enum_vid_pid_set)
             self._hotplug_timer = QTimer(self)
             self._hotplug_timer.setInterval(1500)  # 1.5秒間隔。頻度と消費電力のバランス
-            self._hotplug_timer.timeout.connect(self._poll_hotplug)
+            self._hotplug_timer.timeout.connect(_weak_callback(self, "_poll_hotplug"))
             self._hotplug_timer.start()
         except Exception as e:
             self._log("PyUsbBridge hotplug watcher init", e)
@@ -421,6 +464,55 @@ class WebUSBBridge(QObject):
         except Exception:
             pass
 
+    def event(self, e):
+        """🛡️ security_audit No.9(v0.0.6a): ページからの `bridge.deleteLater()` を無効化する。
+
+        deleteLater()はQObject由来の公開スロットなので、QWebChannel経由で任意のページが
+        呼べてしまい、ブリッジ(=そのページのWebUSB機能全体)を破棄できた。
+        DeferredDeleteイベントを飲み込めば、ページからの呼び出しは何も起こさない。
+        ホスト側が本当に破棄したいときは dispose() を使う(親QObjectの破棄に伴う
+        デストラクタ経由の削除はDeferredDeleteを使わないので影響を受けない)。
+        """
+        try:
+            from PySide6.QtCore import QEvent
+            if e.type() == QEvent.Type.DeferredDelete and not self._allow_delete:
+                return True
+        except Exception:
+            pass
+        return super().event(e)
+
+    def dispose(self):
+        """ホスト側からブリッジを安全に破棄する(ページからのdeleteLater()は無効)。"""
+        self._allow_delete = True
+        try:
+            if self._hotplug_timer is not None:
+                self._hotplug_timer.stop()
+        except Exception as ex:
+            self._log("dispose", ex)
+        # 注意: ページが先に deleteLater() を呼んでいた(=上のevent()が飲み込んだ)場合、Qtは
+        # 「deleteLater済み」のフラグを立てたままにするので、その後の deleteLater() は
+        # 黙って無視される(実測)。DeferredDeleteイベントを直接postすればフラグを迂回できる。
+        try:
+            from PySide6.QtCore import QCoreApplication, QEvent
+            QCoreApplication.postEvent(self, QEvent(QEvent.Type.DeferredDelete))
+        except Exception:
+            self.deleteLater()
+
+    def add_hotplug_listener(self, listener):
+        """listener(kind: 'connect'|'disconnect', vendor_id:int, product_id:int) を登録する。
+
+        WebSocket転送層(QtWebView)など、Signalを使わない配送先向け。フィルタ(どの
+        オリジン/接続へ流すか)は登録側の責任。
+        """
+        if callable(listener) and listener not in self._hotplug_listeners:
+            self._hotplug_listeners.append(listener)
+
+    def remove_hotplug_listener(self, listener):
+        try:
+            self._hotplug_listeners.remove(listener)
+        except ValueError:
+            pass
+
     def _poll_hotplug(self):
         """1.5秒ごとに接続USBデバイス一覧を差分検出し、現在のオリジンに許可済みの
         デバイスについてのみ connect/disconnect をJSへ配送する(未許可オリジンへは
@@ -431,33 +523,32 @@ class WebUSBBridge(QObject):
             connected, disconnected = self._hotplug_watcher.poll()
             if not connected and not disconnected:
                 return
-            # 🛡️ deviceConnected/deviceDisconnectedはQt Signalとしてページ内の
-            #    全フレームへブロードキャストされる(Signal配信をフレーム単位に
-            #    絞る仕組みは無い)。フレームごとに異なる許可状況で出し分ける
-            #    ことは今のところできないため、トップレベルページの許可状況を
-            #    基準にする(frame_token経由の個別フレーム判定ではなく)。
+            events = ([("connect", v, p) for v, p in sorted(connected)] +
+                      [("disconnect", v, p) for v, p in sorted(disconnected)])
+            for listener in list(self._hotplug_listeners):
+                for kind, vid, pid in events:
+                    try:
+                        listener(kind, vid, pid)
+                    except Exception as e:
+                        self._log("_poll_hotplug(listener)", e)
+            if self._transport_kind != "webchannel":
+                return
+            # 🛡️ deviceConnected/deviceDisconnectedはQt Signalとしてページ内の全フレームへ
+            #    ブロードキャストされる(フレーム単位に絞る仕組みは無い)ので、トップレベル
+            #    ページの許可状況を基準にし、**VID/PIDだけ**を流す(0.0.6a: それまでは
+            #    製品名・シリアル番号まで含む記述子を全フレームへ流していた)。許可済みの
+            #    フレームだけが listDevices() で詳細を取得する。
             origin = self._top_level_origin()
             if not origin:
                 return
-            usb_core, usb_util = self._pyusb()
-            for vid, pid in connected:
+            for kind, vid, pid in events:
                 if not self._is_granted(origin, vid, pid):
                     continue
                 try:
-                    dev = usb_core.find(idVendor=vid, idProduct=pid)
-                    if dev is None:
-                        continue
-                    info = build_device_descriptor(dev, usb_util, include_configurations=False, locale=self._locale)
-                    self.deviceConnected.emit(_json_dumps(info))
+                    signal = self.deviceConnected if kind == "connect" else self.deviceDisconnected
+                    signal.emit(_json_dumps({"vendorId": vid, "productId": pid}))
                 except Exception as e:
-                    self._log("_poll_hotplug(connect)", e)
-            for vid, pid in disconnected:
-                if not self._is_granted(origin, vid, pid):
-                    continue
-                try:
-                    self.deviceDisconnected.emit(_json_dumps({"vendorId": vid, "productId": pid}))
-                except Exception as e:
-                    self._log("_poll_hotplug(disconnect)", e)
+                    self._log("_poll_hotplug(emit)", e)
         except Exception as e:
             self._log("_poll_hotplug", e)
 
@@ -522,13 +613,18 @@ class WebUSBBridge(QObject):
         return info.get("device")
 
     def _top_level_origin(self):
-        """トップレベルページ自身の「現在表示中」のオリジンを、フレームトークンとは
-        無関係に直接取得する(常にpage.url()を見る)。
-        _current_origin(frame_token) は「特定のフレームからの呼び出し」を検証する
-        ためのものだが、_on_page_navigated() のようにトップレベルページの
-        ナビゲーションそのものを検知したいだけの内部処理にはトークンという概念が
-        そぐわない(フレームトラッカー配線時、frame_token無しの_current_origin()は
-        意図的に常にNoneを返すため、代わりにこちらを使う必要がある)。"""
+        """トップレベルページのオリジン。0.0.6a: top_level_url_provider(QtWebView等)を先に見る。"""
+        provider = self._top_level_url_provider
+        if provider is not None:
+            try:
+                value = provider()
+                if isinstance(value, str):
+                    from PySide6.QtCore import QUrl
+                    value = QUrl(value)
+                return self._origin_from_url(value)
+            except Exception as e:
+                self._log("_top_level_origin(provider)", e)
+                return None
         page = self.parent()
         if page is None or not hasattr(page, "url"):
             return None
@@ -537,6 +633,16 @@ class WebUSBBridge(QObject):
         except Exception as e:
             self._log("_top_level_origin", e)
             return None
+
+    def set_top_level_url_provider(self, provider):
+        """QtWebViewのようにpage.url()を持たない埋め込みビュー向け。provider() は現在の
+        トップレベルURL(QUrlかstr)を返すcallable。"""
+        self._top_level_url_provider = provider
+
+    def notify_navigated(self):
+        """ホストがトップレベルの遷移を検知したときに呼ぶ(オリジンが変わったら、
+        旧オリジンが開いたままのデバイスハンドルを閉じる)。"""
+        self._on_page_navigated()
 
     def _on_page_navigated(self, *_args):
         """別オリジンへ遷移した瞬間、開いていたUSBハンドルを破棄する。
@@ -685,9 +791,43 @@ class WebUSBBridge(QObject):
                     "hostSafetyHardLimit": HOST_SAFETY_MAX_TRANSFER_LENGTH,
                     "controlTransferMaxLength": CONTROL_TRANSFER_MAX_LENGTH,
                 },
+                "platform": platform_summary(),
+                "capabilities": capability_summary(),
+                "transport": self._transport_kind,
             })
         except Exception as e:
-            return _json_dumps({"available": False, "error": safe_error_str(e)})
+            return _json_dumps({
+                "available": False, "error": safe_error_str(e), "bridgeVersion": __version__,
+                "platform": platform_summary(), "capabilities": capability_summary(),
+                "transport": self._transport_kind,
+            })
+
+    @Slot(result=str)
+    def getDiagnostics(self):
+        """🆕 v0.0.6a: window.__pysideWebUSB.diagnose() の実体。ページへ渡して安全な範囲
+        (パス・ユーザー名・例外の生テキストを含まない)の環境レポートをJSONで返す。"""
+        try:
+            report = {
+                "bridgeVersion": __version__,
+                "transport": self._transport_kind,
+                "platform": platform_summary(),
+                "capabilities": capability_summary(),
+                "hints": setup_hints(),
+                "customBackend": self._usb_backend_override is not None,
+                "chooser": "custom" if self._chooser_override is not None else "qt-dialog",
+                "hotplug": {"polling": self._hotplug_watcher is not None},
+                "backendUsable": False,
+            }
+            try:
+                usb_core, _usb_util = self._pyusb()
+                usb_core.find()
+                report["backendUsable"] = True
+            except Exception as e:
+                self._log("getDiagnostics(backend)", e)
+            return _json_dumps(report)
+        except Exception as e:
+            self._log("getDiagnostics", e)
+            return _json_dumps({"bridgeVersion": __version__, "error": "diagnostics unavailable"})
 
     @Slot(int, int, str, result=bool)
     def isGrantedToThisFrame(self, vendor_id, product_id, frame_token=""):
@@ -961,6 +1101,47 @@ class WebUSBBridge(QObject):
 
         return None
 
+    def _run_chooser(self, devices_info, origin, refresh_callback):
+        """デバイス選択UIを実行し、選ばれたデバイス情報(dict)かNoneを返す。
+
+        🆕 v0.0.6a: install(chooser=...)/install_webview(chooser=...) で差し替え可能。
+        差し替えcallableは chooser(devices_info, origin, strings) -> dict | None。
+        戻り値は必ず列挙済み候補のどれか(vendorId/productId/serialNumberが一致)で
+        なければならず、候補に無いデバイスを返した場合は無視する(=バグのある/悪意の
+        あるチューザーが、フィルタに合わない任意のデバイスへ許可を与えられない)。
+        """
+        override = self._chooser_override
+        if override is not None:
+            picked = override(list(devices_info), origin, self._resolve_chooser_strings())
+            if picked is None:
+                return None
+            for cand in devices_info:
+                if (cand.get("vendorId") == picked.get("vendorId")
+                        and cand.get("productId") == picked.get("productId")
+                        and (cand.get("serialNumber") or None) == (picked.get("serialNumber") or None)):
+                    return cand
+            self._log("_run_chooser", ValueError("custom chooser returned a device that was not offered"))
+            return None
+        from PySide6.QtWidgets import QApplication
+        if not isinstance(QCoreApplication.instance(), QApplication):
+            # QGuiApplication(=QML/QtWebViewアプリ)ではQtWidgetsのダイアログを作れない
+            # (QApplicationが無いままQWidgetを作るとプロセスごと異常終了する)。
+            raise RuntimeError("no QApplication: pass chooser=... (see pyside6_webusb.QmlDeviceChooser)")
+        parent = self._resolve_chooser_parent_window()
+        dlg = WebUsbDeviceChooserDialog(
+            devices_info, parent,
+            strings=self._resolve_chooser_strings(),
+            origin=origin,
+            refresh_callback=refresh_callback,
+        )
+        # parentがあってもプラットフォームによっては前面に来ないことがあるので明示的に前面へ。
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        result = dlg.exec()
+        accepted = (result == WebUsbDeviceChooserDialog.DialogCode.Accepted)
+        return dlg.selected_device if accepted else None
+
     def _request_device_chooser_impl(self, options_json, frame_token=""):
         """navigator.usb.requestDevice() の実処理本体。実デバイス選択ダイアログを表示し、
         ユーザーが明示的に選んだ場合のみデバイス情報を返す（WebUSB本来のセキュリティ設計を踏襲）。
@@ -1009,6 +1190,17 @@ class WebUSBBridge(QObject):
                     ),
                 })
 
+            # 🛡️ security_audit No.10(v0.0.6a): 呼び出し元フレームのオリジンを特定できない
+            #    (about:blank / data: / file: / サンドボックス化されたiframe / 未知のトークン)
+            #    場合は、チューザーを開かずにSecurityErrorで拒否する。これまではダイアログが
+            #    開き(オリジン表示なし)、選ばれたデバイスの完全な記述子(シリアル番号・
+            #    全コンフィグレーション)が、許可(_grant)が記録されないまま呼び出し元へ
+            #    返っていた。
+            if not origin:
+                return _json_dumps({
+                    "cancelled": True,
+                    "error": security_error("The calling frame has an opaque or unknown origin and cannot request a USB device."),
+                })
             try:
                 usb_core, usb_util = self._pyusb()
             except Exception as e:
@@ -1026,28 +1218,11 @@ class WebUSBBridge(QObject):
                 u_core, u_util = self._pyusb()
                 return self._enumerate_filtered_devices(u_core, u_util, filters, exclusion_filters)
 
-            parent = self._resolve_chooser_parent_window()
-
             try:
-                dlg = WebUsbDeviceChooserDialog(
-                    devices_info, parent,
-                    strings=self._resolve_chooser_strings(),  # 🆕 v0.0.5b3: locale=/chooser_strings=
-                    origin=origin,
-                    refresh_callback=_refresh,
-                )
-                # 🛡️ parentがNoneの場合はもちろん、parentがあってもプラット
-                #    フォームによっては新規トップレベルウィンドウが前面に来ない
-                #    ことがあるため、明示的にraise_()/activateWindow()して確実に
-                #    前面へ出す(exec()は内部でshow()相当を行うため、ここでの
-                #    明示呼び出しと重複しても無害)。
-                dlg.show()
-                dlg.raise_()
-                dlg.activateWindow()
-                result = dlg.exec()
-                accepted = (result == WebUsbDeviceChooserDialog.DialogCode.Accepted)
-                selected = dlg.selected_device if accepted else None
+                selected = self._run_chooser(devices_info, origin, _refresh)
             except Exception as e:
-                return _json_dumps({"cancelled": True, "error": f"Dialog error: {e}"})
+                self._log("requestDeviceChooser(chooser)", e)
+                return _json_dumps({"cancelled": True, "error": "Dialog error"})
 
             if selected is not None:
                 try:

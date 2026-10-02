@@ -283,7 +283,13 @@ class FrameOriginTracker:
             #    1引数では "not enough arguments" になり、コールバック(無視してよい)を
             #    含めて最低2引数が必要と判明した。
             import json as _json
-            frame.runJavaScript(f"window.__pyUsbFrameToken = {_json.dumps(token)};", lambda _result=None: None)
+            # 🆕 v0.0.6a: 非列挙(enumerable:false)で定義する。単純代入だと Object.keys(window)/
+            #    for-in に `__pyUsbFrameToken` が現れ、F12から見たときの「ポリフィルの存在」の
+            #    目印になっていた。configurable/writableはtrue(再スキャンで上書きするため)。
+            frame.runJavaScript(
+                "Object.defineProperty(window, '__pyUsbFrameToken', "
+                "{value: %s, writable: true, configurable: true, enumerable: false});" % _json.dumps(token),
+                lambda _result=None: None)
         except Exception as e:
             self._log("FrameOriginTracker._assign_token(runJavaScript)", e)
 

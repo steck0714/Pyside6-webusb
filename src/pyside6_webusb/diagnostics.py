@@ -27,6 +27,7 @@ import platform
 
 from ._version import __version__
 from .i18n import DEFAULT_LOCALE, diagnostics_text, resolve_locale
+from .platform_support import capability_summary, detect_platform, recommended_transport, setup_hints
 
 
 def _pyside6_versions():
@@ -156,6 +157,25 @@ def _qtwebengine_status(locale):
     return False, diagnostics_text(locale, "qtwebengine_missing", missing="/".join(missing))
 
 
+def _qtwebview_status():
+    """(QtWebViewをimportできるか, QtWebSocketsをimportできるか)。PySide6自体が無ければ(None, None)。"""
+    try:
+        import PySide6  # noqa: F401
+    except Exception:
+        return None, None
+    try:
+        import PySide6.QtWebView  # noqa: F401
+        webview = True
+    except Exception:
+        webview = False
+    try:
+        import PySide6.QtWebSockets  # noqa: F401
+        websockets = True
+    except Exception:
+        websockets = False
+    return webview, websockets
+
+
 def _frame_origin_isolation_status(locale):
     """(available: bool | None, note: str) を返す。
 
@@ -204,6 +224,11 @@ def environment_report(locale=None) -> dict:
     rust_accelerated, rust_accel_version = _rust_accel_status()
     qtwebengine_importable, qtwebengine_note = _qtwebengine_status(loc)
     frame_isolation_available, frame_isolation_note = _frame_origin_isolation_status(loc)
+    qtwebview_importable, qtwebsockets_importable = _qtwebview_status()
+    os_name = detect_platform()
+    transport = recommended_transport(
+        os_name, have_webengine=qtwebengine_importable,
+        have_webview=qtwebview_importable, have_websockets=qtwebsockets_importable)
 
     problems = []
     if pyside6_version is None:
@@ -212,6 +237,8 @@ def environment_report(locale=None) -> dict:
         problems.append(qtwebengine_note)
     if pyusb_problem is not None:
         problems.append(pyusb_problem)
+    if qtwebengine_importable is False and qtwebview_importable and qtwebsockets_importable is False:
+        problems.append(diagnostics_text(loc, "qtwebview_missing_note"))
 
     return {
         "pyside6_webusb_version": __version__,
@@ -219,6 +246,12 @@ def environment_report(locale=None) -> dict:
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
         "platform": platform.platform(),
+        "host_os": os_name,
+        "capabilities": capability_summary(os_name),
+        "setup_hints": setup_hints(os_name),
+        "qtwebview_importable": qtwebview_importable,
+        "qtwebsockets_importable": qtwebsockets_importable,
+        "recommended_transport": transport,
         "pyside6_version": pyside6_version,
         "shiboken6_version": shiboken6_version,
         "qt_runtime_version": qt_runtime_version,
@@ -234,6 +267,20 @@ def environment_report(locale=None) -> dict:
         "frame_origin_isolation_note": frame_isolation_note,
         "problems": problems,
     }
+
+
+def _transport_line(report, loc):
+    label = diagnostics_text(loc, "label_transport")
+    key = {"webchannel": "report_transport_webchannel", "websocket": "report_transport_websocket"}.get(
+        report.get("recommended_transport"), "report_transport_none")
+    line = f"{label}: {diagnostics_text(loc, key)}"
+    wv = report.get("qtwebview_importable")
+    ws = report.get("qtwebsockets_importable")
+    if wv is not None or ws is not None:
+        yes, no = diagnostics_text(loc, "report_available"), diagnostics_text(loc, "report_unavailable")
+        line += (f"\n{diagnostics_text(loc, 'label_qtwebview')}: {yes if wv else no}, "
+                 f"{diagnostics_text(loc, 'label_qtwebsockets')}: {yes if ws else no}")
+    return line
 
 
 def format_environment_report(report: dict = None, locale=None) -> str:
@@ -296,8 +343,20 @@ def format_environment_report(report: dict = None, locale=None) -> str:
         pyusb_line,
         rust_line,
         frame_line,
-        "",
+        _transport_line(report, loc),
     ]
+    caps = report.get("capabilities")
+    if caps:
+        lines.append(f"{diagnostics_text(loc, 'label_host_os')}: {report.get('host_os', '?')}")
+        lines.append(diagnostics_text(loc, "report_capabilities_header"))
+        for key in sorted(caps):
+            lines.append(f"  {key}: {caps[key]}")
+    hints = report.get("setup_hints")
+    if hints:
+        lines.append(diagnostics_text(loc, "report_setup_hints_header"))
+        for h in hints:
+            lines.append(f"  - {h}")
+    lines.append("")
     if report["problems"]:
         lines.append(diagnostics_text(loc, "report_problems_header"))
         for p in report["problems"]:

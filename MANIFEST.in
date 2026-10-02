@@ -19,6 +19,12 @@ recursive-include security_report *.md
 recursive-include types *.ts
 recursive-include examples *.py *.html
 recursive-include native *.rs *.toml *.c
+# 🆕 0.0.6.post1: ポリフィルのJavaScriptソース(jssrc/*.js)と、それを束ねて
+# src/pyside6_webusb/_polyfill_bundle.py を生成するスクリプト。wheelに載るのは生成物
+# (_polyfill_bundle.py)の方だが、sdistからポリフィルを編集・再生成できるようにソースも入れる
+# (tests/test_polyfill_build.py が「生成物が最新か」を検査する)。
+recursive-include jssrc *.js
+include scripts/build_polyfill.py
 # 🆕 v0.0.6: native/libusb_probe.c (pyusbを経由しない、libusb-1.0直結の
 # 独立診断ツール。native/pyside6_webusb_accel/と同じくビルド必須ではない
 # オプショナルな道具)を追加したため *.c を追記した。scripts/ 配下
@@ -31,3 +37,4 @@ global-exclude .DS_Store
 # tests/extract_polyfill_js.py generates this at test-time; it's derived, not source
 # (see .gitignore) and shouldn't be shipped.
 exclude tests/_polyfill_extracted.js
+exclude tests/_bridge_signatures.json

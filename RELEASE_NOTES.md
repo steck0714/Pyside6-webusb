@@ -136,3 +136,23 @@ Enterを押すだけです。**一度PyPIに上げたバージョン番号は、
 サンプルを `github-actions-publish-pypi.yml` として同梱しました。よければ
 `.github/workflows/` に置いて使ってください(不要であれば無視していただいて
 問題ありません)。
+
+## 6. 0.0.6.post1(開発名 v0.0.6a)の配布物
+
+| 成果物 | ファイル名 | 名乗るバージョン |
+|---|---|---|
+| ソースzip(GitHubリリース用) | `v0.0.6a.zip`(中身のフォルダは `v.0.0.6a/`) | `0.0.6.post1`(`_version.py`/`pyproject.toml`) |
+| sdist | `pyside6_webusb-0.0.6.post1.tar.gz` | `0.0.6.post1` |
+| wheel | `pyside6_webusb-0.0.6.post1-py3-none-any.whl` | `0.0.6.post1` |
+
+- 「v0.0.6a」はzipとGitHubタグの呼び名だけで、パッケージ自体は常に PEP 440 の
+  `0.0.6.post1` です(`0.0.6a0` は `0.0.6` より**古い**扱いになり、0.0.6の後に出す版の名前には
+  使えないため。これまでの `v0.0.5b3` ↔ `0.0.5.post7` と同じ二本立て運用です)。
+- 0.0.6 を既にPyPIへ上げている場合も、`0.0.6.post1` は別のバージョン番号なのでそのまま
+  アップロードできます(`publish_to_pypi.sh`/twine は `dist/` の2ファイルを対象にします)。
+- wheelは純Python(`py3-none-any`)です。ポリフィルのJavaScriptは `.js` ファイルではなく
+  生成された Python モジュール(`_polyfill_bundle.py`)として入っているので、Android
+  (`pyside6-android-deploy`)のように `.py` 以外を同梱しない配布形態でもそのまま動きます。
+- sdist/zip には、そのJavaScriptの元ファイル(`jssrc/*.js`)と生成スクリプト
+  (`scripts/build_polyfill.py`)も入っています。`jssrc/` を編集したら
+  `python scripts/build_polyfill.py` を実行してください(古いと `tests/test_polyfill_build.py` が落ちます)。

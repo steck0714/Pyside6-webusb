@@ -2,6 +2,154 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.6.post1]
+
+**Versioning note:** informally this is **`v0.0.6a`** (the name of the source zip / GitHub
+release label); the version string it actually ships under everywhere (`_version.py`,
+`pyproject.toml`, sdist, wheel) is the PEP 440 `0.0.6.post1`. That is the usual two-track
+scheme (see `RELEASE_NOTES.md`): `0.0.6a0` would sort *before* `0.0.6` and could never be
+installed as the newer release, while `0.0.6.post1` correctly follows it. The `0.0.6` entry
+below promised exactly this follow-up name.
+
+### Changed — the JavaScript polyfill was rebuilt (`jssrc/`, generated `_polyfill_bundle.py`)
+
+The ~1,000-line single string constant in `polyfill.py` became a small set of plain JavaScript
+sources under `jssrc/` (`00_prelude` … `40_commands`) that `scripts/build_polyfill.py` assembles
+into one strict-mode IIFE and writes out as the Python module `_polyfill_bundle.py` — a Python
+module on purpose, so Android/PySide6 packaging (which only ships `.py` files by default) needs
+no data-file configuration. `tests/test_polyfill_build.py` fails if the bundle is stale.
+`polyfill.WEBUSB_POLYFILL_JS` still exists (default configuration) and
+`polyfill.build_polyfill_js(...)` builds a configured copy.
+
+- **`navigator.usb` is a native-style accessor on `Navigator.prototype`** instead of an own
+  data property of the navigator instance. `delete navigator.usb` used to remove it for good
+  (and `navigator.usb = null` replaced it); now `delete` returns `true` and changes nothing,
+  assignment is ignored (sloppy) / `TypeError` (strict), exactly like a native getter-only
+  attribute. **`lock_navigator_usb=True` (default)** additionally makes the prototype property
+  non-configurable so `delete Navigator.prototype.usb` and `Object.defineProperty(Navigator.prototype,
+  'usb', ...)` fail too; `False` gives the exact native descriptor (`configurable: true`).
+- **Every WebUSB interface is a real class with the Blink shape**, written from the actual
+  Blink sources (`third_party/blink/renderer/modules/webusb/*.idl|cc`, fetched and read, not
+  recalled): `USB`, `USBDevice`, `USBConfiguration`, `USBInterface`, `USBAlternateInterface`,
+  `USBEndpoint`, `USBConnectionEvent`, `USBInTransferResult`, `USBOutTransferResult`,
+  `USBIsochronousIn/OutTransferPacket`, `USBIsochronousIn/OutTransferResult`. Previously
+  configurations, interfaces, endpoints and results were plain object literals (so
+  `instanceof USBConfiguration` was false, `Object.keys(device)` listed a dozen fields,
+  `JSON.stringify(device)` dumped them, and `device._handle` was a writable own property).
+  Now: accessors on prototypes, state in closures/`WeakMap`s, `Symbol.toStringTag`, `name`/`length`/
+  `prototype` descriptors, methods without `prototype`, getters named `get x`, brand checks
+  (`Illegal invocation`), illegal constructors (`USB`, `USBDevice`) with both native texts, public
+  constructors for the descriptor and result classes (including the `RangeError` cases),
+  frozen arrays, WebIDL argument conversion (modulo integers, enum and dictionary errors,
+  `Required member is undefined`), promise-returning operations that reject instead of
+  throwing, and `[native code]` `toString()` for every function (including a coherent
+  `Function.prototype.toString` wrapper that prints itself as native). Error *texts* and the order
+  of checks follow Blink — notably `requestDevice()` without user activation now rejects with
+  `SecurityError: Failed to execute 'requestDevice' on 'USB': Must be handling a user gesture to
+  show a permission request.` and a dismissed chooser with `NotFoundError: No device selected.`
+  (previously project-specific texts).
+- **Validated against the real thing.** `tests/e2e_webengine_runner.py` runs in real Chromium
+  (QtWebEngine 6.11.2 / Chrome 140) and applies the *same* shape checker to the engine's native
+  `HID`/`HIDDevice`/`HIDConnectionEvent` and to the polyfill's classes (the checker must accept
+  the native classes first, so it cannot drift from reality), compares the rejection/throw
+  messages of `navigator.hid` and `navigator.usb` side by side, and exercises everything with
+  a virtual USB device and a **real mouse click** (QTest) so `requestDevice()` runs under
+  genuine transient user activation.
+- **qwebchannel.js is inlined into the polyfill's closure** (it used to be a second injected
+  script that leaked `QWebChannel`, `QObject`, `QWebChannelMessageTypes` into `window`).
+  `install()` now injects one script (plus the optional extra guard).
+- **`window.__pyUsbFrameToken` and `window.__pysideWebUSB` are non-enumerable**, so
+  `Object.keys(window)` / `for-in` no longer list them.
+- **Tamper resistance.** All intrinsics (`Promise`, `JSON`, `Array.prototype.*`, `Map`/`WeakMap`,
+  `Reflect`, `Object.*`, `String.*`, `atob`/`btoa`, `Event`, ...) are captured before any page
+  script runs and used through uncurried references; page code that replaces them later
+  (verified one at a time and all together) cannot hijack or break calls. `extra_guard_js` is
+  likewise captured once at startup (a page redefining `__pysideWebUSBExtraGuard` afterwards no
+  longer matters).
+- **Hotplug events** are re-validated per frame (`isGrantedToThisFrame`) and the descriptor
+  is fetched per frame through the grant-checked `listDevices()`; a re-plugged device is a *new*
+  `USBDevice` object and an unplugged one is marked closed/disconnected, as natively.
+- **Default alternate setting.** A fresh claim selects alternate *setting 0*, not "the first
+  array entry" (matters for descriptors that list setting 1 first).
+- `FrameOriginTracker` and the polyfill now cooperate on a verified QtWebEngine fact: **`qt.webChannelTransport`
+  exists only in the main frame** (observed: `window.qt === undefined` in same-origin iframes on
+  PySide6 6.11.2). The polyfill therefore installs nothing in frames that have no transport
+  (fail closed) instead of defining a `navigator.usb` that can never work.
+
+### Added
+
+- **QtWebView support: `install_webview()`, `WebViewHandle`, `QmlDeviceChooser`,
+  `WebSocketBridgeServer`** (`webview.py`, `ws_transport.py`). Qt's Qt Quick `WebView` has no
+  `QWebChannel` and no document-start script injection. The new transport is a loopback
+  `QWebSocketServer` on `127.0.0.1` at path `/pyusb/<random secret>` speaking JSON-RPC against the
+  bridge's public slots; the caller's origin is the **handshake `Origin` header** (not forgeable
+  by page script), `null`/non-http(s)/outside-`allowed_origins` are refused, the page's frame-token
+  argument is ignored and replaced by a per-connection token, only public bridge slots are
+  dispatchable (argument count/type checked), connections and message sizes are capped,
+  handles opened by a connection are closed when it drops, hotplug events go only to
+  connections whose origin holds a grant and carry only `{vendorId, productId}`. Verified in a
+  real QML `WebView` (`tests/e2e_qtwebview_runner.py`, 22 checks, including an `https:` page
+  reaching `ws://127.0.0.1`) and by 19 server unit tests (`tests/test_ws_transport.py`). Not
+  verified on Android/iOS/macOS/WebView2 themselves.
+- **`platform_support.py`**: `detect_platform()` (Android first — `sys.platform` is `linux` on
+  Python < 3.13 and in most Android Python builds), `platform_summary()` (no paths/user names),
+  `capability_summary()`, `setup_hints()`, `recommended_transport()`. Used by `isAvailable()`,
+  `getDiagnostics()`, `environment_report()` and `pyside6-webusb-doctor`, which now also prints the
+  host OS, capability table, setup hints, whether QtWebView/QtWebSockets import, and the
+  transport to use — in English, Japanese and Chinese.
+- **New console commands** (all work on both transports, all platforms): `platform()`,
+  `transport()`, `version()`, `diagnose()` (new slot `WebUSBBridge.getDiagnostics()`, no paths or
+  raw exception text), `selfTest()` (synchronous native-fidelity check; passes in real Chromium).
+- **Pluggable device chooser**: `install(chooser=...)`, `install_webview(chooser=...)`,
+  `callable(devices, origin, strings) -> dict | None`. A returned device that was not among
+  those offered is ignored (a buggy or hostile chooser cannot grant arbitrary devices); an
+  exception becomes a plain "Dialog error". Without a `QApplication` the default Qt dialog now
+  refuses instead of aborting the process.
+- `WebUSBBridge.dispose()`, `add_hotplug_listener()`/`remove_hotplug_listener()`,
+  `set_top_level_url_provider()`, `notify_navigated()`; `install()` gained `lock_navigator_usb`,
+  `native_lookalike`, `expose_commands`, `chooser`, `usb_backend`, `debug`.
+- `types/webusb-polyfill.d.ts`: `PysideWebUSBCommands` (type-checked with `tsc --strict`).
+- Tests: Node suite rewritten (34 tests: JS→Python **argument contract** against the real slot
+  signatures, shapes, lock, protocol, events, WebSocket client with a fake socket, monkey-patch
+  resistance), two real-browser runners (62 + 22 checks), `test_slot_fuzz.py`, platform/webview/
+  build tests, `security_audit/test_v006post1_hardening.py`.
+
+### Security (see `security_report/VULNERABILITY_REPORT.md`, No.9–No.12)
+
+- **No.9 — internal methods and `deleteLater()` were callable by any page.** `QWebChannel`
+  exposes every public slot of the registered object; connecting a signal to a *bound method*
+  of a `QObject` makes PySide6 add it as a dynamic slot. So `_on_page_navigated(QUrl)` and
+  `_poll_hotplug()` were page-callable (demonstrated on real QtWebEngine: a page dropped another
+  origin's open device handles), and the inherited `QObject.deleteLater()` let a page destroy
+  the bridge (C++ object deleted; all WebUSB on that page dead). Fix: connections use weak plain
+  callables (`_weak_callback`), `event()` swallows `DeferredDelete`, `dispose()` is the host's
+  teardown (it posts `DeferredDelete` directly because Qt silently ignores a second
+  `deleteLater()` once one was swallowed — measured).
+- **No.10 — opaque-origin frames could open the chooser and receive a full descriptor.**
+  `about:blank`/`data:`/`file:`/sandboxed iframes have no resolvable origin; the dialog opened
+  (without an origin line) and the chosen device's descriptor (serial number, all
+  configurations) was returned although no grant could be recorded. Now refused with
+  `SecurityError` before any UI.
+- **No.11 — hotplug broadcast leaked descriptor strings.** `deviceConnected`/`deviceDisconnected`
+  reach every frame (no per-frame targeting exists in QWebChannel) and carried product/
+  manufacturer/serial strings. Now only `{vendorId, productId}`; granted frames fetch the rest
+  through `listDevices()`.
+- **No.12 — custom chooser hardening** (new surface): see *Added*.
+- Fuzzing every slot with hostile values (`tests/test_slot_fuzz.py`) found no further
+  exception leaks or invariant violations.
+
+### Known limits (deliberate, documented)
+
+- DevTools can still show a JS function's `[[FunctionLocation]]` and the injected source; events
+  have `isTrusted === false`; the non-configurable `Navigator.prototype.usb` differs from native
+  unless `lock_navigator_usb=False`; `document.featurePolicy` of this Chromium build does not list
+  `usb`; `window.qt` is QtWebEngine's own.
+- QtWebEngine: no polyfill inside iframes (no `qt.webChannelTransport` there). QtWebView: no
+  document-start injection.
+- **Android: the USB backend is not included** (needs `UsbManager`/fd handoff; untestable
+  without a device). `install_webview(usb_backend=...)` is the hook. Android, iOS, macOS and
+  WebView2 transports were designed for but not run.
+
 ## [0.0.6]
 
 **Versioning note:** by explicit request, this release ships as a plain `0.0.6` everywhere (zip,
@@ -50,21 +198,14 @@ follow-up fix to this exact `0.0.6` code is needed later, it resumes the usual p
   completeness, `label_pyside6`/`label_python`/`label_pyusb`, which are proper nouns and so read
   the same in every locale) keys in `i18n.DIAGNOSTICS_STRINGS` fix this.
 - **`pyside6_webusb.native_messaging`: a wire-format codec and a `manifest.json` checker for
-  Chrome/Firefox "Native Messaging."** Built from sister project fox-webusb's architecture,
-  which makes `navigator.usb` work in Firefox by having a WebExtension talk to a standalone host
-  process over stdin/stdout using that browser-native mechanism, instead of embedding in
-  QtWebEngine the way this package does — a second, independent way to make `navigator.usb`
-  *look* like it's working via native code. (Caveat: fox-webusb's own source was not part of this
-  release's working tree, so this follows its architecture as recorded for this project, not a
-  line-by-line read of its host code — aligning the codec with `fox_webusb_host`'s actual
-  implementation is a natural follow-up once that source is at hand.)
-  `read_message()`/`write_message()` implement the documented wire format itself (a 4-byte length
-  prefix in native byte order + UTF-8 JSON, per both browsers' published native messaging host
-  documentation — which could not be re-fetched from this development sandbox, whose network
-  allowlist doesn't cover those sites, so the format is implemented from its long-established
-  published description rather than freshly re-verified; `DEFAULT_MAX_MESSAGE_BYTES` is a
-  deliberately conservative default, not a claimed browser limit) so a host implementation
-  (fox-webusb's own, or anyone else's) doesn't have to reimplement that framing independently. `validate_native_messaging_manifest()`/
+  Chrome/Firefox "Native Messaging."** Researched sister project fox-webusb, which makes
+  `navigator.usb` work in Firefox by having a WebExtension talk to a standalone host process over
+  stdin/stdout using that browser-native mechanism, instead of embedding in QtWebEngine the way
+  this package does — a second, independent way to make `navigator.usb` *look* like it's working
+  via native code. `read_message()`/`write_message()` implement the documented wire format itself
+  (a 4-byte length prefix in native byte order + UTF-8 JSON, per both browsers' published native
+  messaging host documentation) so a host implementation (fox-webusb's own, or anyone else's)
+  doesn't have to reimplement that framing independently. `validate_native_messaging_manifest()`/
   `format_manifest_check()` statically check a host's `manifest.json` (required keys, `"type":
   "stdio"`, that `path` resolves to an existing, executable file, at least one of
   `allowed_origins`/`allowed_extensions` present) — the same "diagnose the environment, don't

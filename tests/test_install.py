@@ -74,18 +74,23 @@ def test_install_returns_a_bridge_and_registers_the_web_channel():
     print("test_install_returns_a_bridge_and_registers_the_web_channel: OK")
 
 
-def test_install_injects_exactly_two_scripts_with_correct_injection_point_and_world():
+def test_install_injects_exactly_one_script_with_correct_injection_point_and_world():
+    """v0.0.6a: qwebchannel.jsは別スクリプトではなくポリフィルのクロージャ内へ取り込まれる
+    (QWebChannel/QObject等のグローバルがページへ漏れないように)ので、注入スクリプトは1本。"""
     _make_app()
     page = FakePage()
     install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install")
     names = sorted(s.name() for s in page._scripts.inserted)
-    assert names == ["PySide6WebUSBPolyfill", "PySide6WebUSBQWebChannelLib"]
+    assert names == ["PySide6WebUSBPolyfill"]
     for s in page._scripts.inserted:
         from PySide6.QtWebEngineCore import QWebEngineScript
         assert s.injectionPoint() == QWebEngineScript.InjectionPoint.DocumentCreation
         assert s.worldId() == QWebEngineScript.ScriptWorldId.MainWorld
         assert s.sourceCode(), f"{s.name()} のソースコードが空になっている"
-    print("test_install_injects_exactly_two_scripts_with_correct_injection_point_and_world: OK")
+    src = page._scripts.inserted[0].sourceCode()
+    assert "QWebChannelMessageTypes" in src, "qwebchannel.jsがクロージャ内へ取り込まれていない"
+    assert not src.lstrip().startswith('"use strict";\n\nvar QWebChannelMessageTypes'), "qwebchannel.jsがグローバルスコープのまま注入されている"
+    print("test_install_injects_exactly_one_script_with_correct_injection_point_and_world: OK")
 
 
 def test_install_does_not_run_scripts_on_subframes():
@@ -100,7 +105,7 @@ def test_install_does_not_run_scripts_on_subframes():
     _make_app()
     page = FakePage()
     install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install")
-    assert len(page._scripts.inserted) == 2
+    assert len(page._scripts.inserted) == 1
     for s in page._scripts.inserted:
         assert s.runsOnSubFrames() is False, (
             f"{s.name()} が runsOnSubFrames=True のままだと、クロスオリジンiframeへ"
@@ -156,12 +161,10 @@ def test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimpor
 
 
 def test_install_injects_extra_guard_js_before_the_polyfill_when_given():
-    """🆕 v0.0.5b3: extra_guard_js=を渡すと、qwebchannel.jsとPySide6WebUSBPolyfillの
-    間に3本目のスクリプトとして注入されること、その内容・注入ポイント・World・
-    runsOnSubFramesの扱いが他の2本と同じであることを確認する。渡さない場合
-    (=このファイルの他のテストすべて)は従来どおり2本のままであることは
-    既存のtest_install_injects_exactly_two_scripts_with_correct_injection_point_and_world/
-    test_install_does_not_run_scripts_on_subframesが引き続き保証する。"""
+    """🆕 v0.0.5b3: extra_guard_js=を渡すと、ポリフィルの直前に別スクリプトとして注入される
+    こと、その内容・注入ポイント・World・runsOnSubFramesの扱いがポリフィルと同じであること
+    を確認する(v0.0.6a: qwebchannel.jsがポリフィルへ統合されたので合計2本)。ポリフィルは
+    起動時にガード関数を捕捉するため、順序(ガードが先)が本質的に重要。"""
     from PySide6.QtWebEngineCore import QWebEngineScript
     _make_app()
     page = FakePage()
@@ -169,14 +172,12 @@ def test_install_injects_extra_guard_js_before_the_polyfill_when_given():
     install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install",
             extra_guard_js=guard_src)
     names = [s.name() for s in page._scripts.inserted]
-    assert names == ["PySide6WebUSBQWebChannelLib", "PySide6WebUSBExtraGuard", "PySide6WebUSBPolyfill"], names
-    guard_script = page._scripts.inserted[1]
+    assert names == ["PySide6WebUSBExtraGuard", "PySide6WebUSBPolyfill"], names
+    guard_script = page._scripts.inserted[0]
     assert guard_script.sourceCode() == guard_src
     assert guard_script.injectionPoint() == QWebEngineScript.InjectionPoint.DocumentCreation
     assert guard_script.worldId() == QWebEngineScript.ScriptWorldId.MainWorld
-    # runsOnSubFramesは他の2本と同じ値(bridge._frame_trackerの配線可否)に揃っているはず。
-    assert guard_script.runsOnSubFrames() == page._scripts.inserted[0].runsOnSubFrames()
-    assert guard_script.runsOnSubFrames() == page._scripts.inserted[2].runsOnSubFrames()
+    assert guard_script.runsOnSubFrames() == page._scripts.inserted[1].runsOnSubFrames()
     print("test_install_injects_extra_guard_js_before_the_polyfill_when_given: OK")
 
 
@@ -207,46 +208,40 @@ def _polyfill_script_source(page):
     raise AssertionError("PySide6WebUSBPolyfillという名前のスクリプトが見つからない")
 
 
-def test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script():
-    """🆕 v0.0.6: install(locale=...)は、WebUSBBridge/チューザーダイアログだけで
-    なく、注入するPySide6WebUSBPolyfillスクリプト自体の中身
-    (window.__pysideWebUSB.explainTransferLimits()/help()が使うテキストの
-    言語)にも反映されるべき——という新機能の配線を確認する回帰テスト。
+def _polyfill_config(src):
+    """注入ソースに埋め込まれたCONFIG(JSON)を取り出す。"""
+    import json
+    a = src.index("/*CONFIG_BEGIN*/") + len("/*CONFIG_BEGIN*/")
+    b = src.index("/*CONFIG_END*/")
+    return json.loads(src[a:b])
 
-    polyfill.WEBUSB_POLYFILL_JS内の安全な既定値 "var _pysideWebUSBLocale =
-    'en';" という1行だけをinstall()が対象に書き換える設計(詳細はpolyfill.py
-    のinstall()内コメント、および_pysideWebUSBLocaleのJS側コメント参照)なので、
-    ここではその1行が実際に書き換わっていること・元のWEBUSB_POLYFILL_JS定数
-    自身は変更されない(=他のinstall()呼び出しに影響しない)ことを確認する。"""
+
+def test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script():
+    """🆕 v0.0.6: install(locale=...)は、WebUSBBridge/チューザーダイアログだけでなく、注入する
+    ポリフィル自体の中身(window.__pysideWebUSB のコマンド出力の言語)にも反映される。
+    v0.0.6a: 設定は `/*CONFIG_BEGIN*/{...}/*CONFIG_END*/` の1か所(JSON)に集約された。
+    元のWEBUSB_POLYFILL_JS定数は変更されない(各install()が独立したコピーを注入する)。"""
     from pyside6_webusb.polyfill import WEBUSB_POLYFILL_JS
-    assert "var _pysideWebUSBLocale = 'en';" in WEBUSB_POLYFILL_JS
+    assert _polyfill_config(WEBUSB_POLYFILL_JS)["locale"] == "en"
 
     _make_app()
 
     page_ja = FakePage(url="https://a.example/")
     install(page_ja, settings_organization="pyside6-webusb-tests", settings_application="test_install",
             locale="ja")
-    src_ja = _polyfill_script_source(page_ja)
-    # 🔍 json.dumps()はJSON仕様どおり常にダブルクォートで文字列を出力するため、
-    # 置換後は元のシングルクォート("= 'en';")ではなくダブルクォート
-    # ("= \"ja\";")になる——どちらも有効なJavaScriptであり、動作上の違いは無い。
-    assert 'var _pysideWebUSBLocale = "ja";' in src_ja
-    assert "var _pysideWebUSBLocale = 'en';" not in src_ja
+    assert _polyfill_config(_polyfill_script_source(page_ja))["locale"] == "ja"
 
     page_zh = FakePage(url="https://b.example/")
     install(page_zh, settings_organization="pyside6-webusb-tests", settings_application="test_install",
             locale="zh")
-    assert 'var _pysideWebUSBLocale = "zh";' in _polyfill_script_source(page_zh)
+    assert _polyfill_config(_polyfill_script_source(page_zh))["locale"] == "zh"
 
-    # locale省略時は既定(i18n.DEFAULT_LOCALE=="ja")と同じになる(他の公開APIと
-    # 挙動を揃える。i18n.py/resolve_locale()参照)。
+    # locale省略時は既定(i18n.DEFAULT_LOCALE=="ja")と同じになる。
     page_default = FakePage(url="https://c.example/")
     install(page_default, settings_organization="pyside6-webusb-tests", settings_application="test_install")
-    assert 'var _pysideWebUSBLocale = "ja";' in _polyfill_script_source(page_default)
+    assert _polyfill_config(_polyfill_script_source(page_default))["locale"] == "ja"
 
-    # locale="auto"はdetect_locale()の結果に従う(chooser_strings_for("auto")と
-    # 同じ解決経路——test_i18n.pyのtest_chooser_strings_for_auto_follows_detected_locale
-    # 参照)。
+    # locale="auto"はdetect_locale()の結果に従う。
     page_auto = FakePage(url="https://d.example/")
     old_env = os.environ.get("PYSIDE6_WEBUSB_LOCALE")
     os.environ["PYSIDE6_WEBUSB_LOCALE"] = "en"
@@ -258,12 +253,24 @@ def test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_
             os.environ.pop("PYSIDE6_WEBUSB_LOCALE", None)
         else:
             os.environ["PYSIDE6_WEBUSB_LOCALE"] = old_env
-    assert 'var _pysideWebUSBLocale = "en";' in _polyfill_script_source(page_auto)
+    assert _polyfill_config(_polyfill_script_source(page_auto))["locale"] == "en"
 
-    # 元のモジュール定数自体は変更されていない(各install()呼び出しが独立した
-    # コピーを注入している)ことも確認する。
-    assert "var _pysideWebUSBLocale = 'en';" in WEBUSB_POLYFILL_JS
+    assert _polyfill_config(WEBUSB_POLYFILL_JS)["locale"] == "en"
     print("test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script: OK")
+
+
+def test_install_config_flags_reach_the_injected_polyfill():
+    """🆕 v0.0.6a: lock_navigator_usb/native_lookalike/expose_commands/debug が注入CONFIGへ届く。"""
+    _make_app()
+    page = FakePage(url="https://e.example/")
+    install(page, settings_organization="pyside6-webusb-tests", settings_application="test_install",
+            lock_navigator_usb=False, native_lookalike=False, expose_commands=False, debug=True)
+    src = _polyfill_script_source(page)
+    cfg = _polyfill_config(src)
+    assert cfg["lockNavigatorUsb"] is False and cfg["nativeLookalike"] is False
+    assert cfg["exposeCommands"] is False and cfg["transport"] == "webchannel"
+    assert src.rstrip().endswith("//# sourceURL=pyside6-webusb/polyfill.js")
+    print("test_install_config_flags_reach_the_injected_polyfill: OK")
 
 
 if __name__ == "__main__":
@@ -287,7 +294,7 @@ if __name__ == "__main__":
 
     mp = _FakeMonkeypatch()
     test_install_returns_a_bridge_and_registers_the_web_channel()
-    test_install_injects_exactly_two_scripts_with_correct_injection_point_and_world()
+    test_install_injects_exactly_one_script_with_correct_injection_point_and_world()
     test_install_does_not_run_scripts_on_subframes()
     test_install_is_scoped_to_the_pages_own_origin_not_a_shared_default()
     test_install_returns_none_instead_of_raising_when_qtwebenginecore_is_unimportable(mp)
@@ -295,4 +302,5 @@ if __name__ == "__main__":
     test_install_injects_extra_guard_js_before_the_polyfill_when_given()
     test_install_forwards_locale_and_chooser_strings_to_the_bridge()
     test_install_localizes_the_pysidewebusb_debug_namespace_inside_the_injected_script()
+    test_install_config_flags_reach_the_injected_polyfill()
     print("ALL INSTALL TESTS PASSED")

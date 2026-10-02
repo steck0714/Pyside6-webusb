@@ -2,13 +2,33 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.6**
+⚠️ **Experimental Beta — 0.0.6.post1 (informally v0.0.6a)**
 
 A WebUSB API implementation for **PySide6 / QtWebEngine** applications.
 
 It combines a JavaScript polyfill, a QWebChannel bridge, and real USB access through **pyusb / libusb** to provide `navigator.usb`, which is not normally available in embedded QtWebEngine.
 
 > `0.0.6` ships as a plain version everywhere (zip / sdist / wheel / `_version.py`), with no `aN`/`bN` pre-release tag and no `.postN` suffix — unlike the `0.0.5` line, where the GitHub zip label (e.g. `v0.0.5b3`) and the actual PyPI/PEP 440 version (`0.0.5.post7`) differed. See `CHANGELOG.md` for why.
+
+## What's new in 0.0.6.post1 (v0.0.6a)
+
+- **A native-looking `navigator.usb`**, rebuilt from the Blink IDL/sources: an accessor on `Navigator.prototype`
+  (so `delete navigator.usb` is a no-op returning `true`; `Navigator.prototype.usb` is also non-configurable by
+  default, `lock_navigator_usb=False` restores the native descriptor), real `USB`/`USBDevice`/`USBConfiguration`/
+  `USBInterface`/`USBAlternateInterface`/`USBEndpoint`/`USBConnectionEvent`/result classes with native descriptors,
+  `Symbol.toStringTag`, illegal-constructor/argument error texts and `[native code]` `toString()` — verified against the
+  native `navigator.hid` of the same Chromium.
+- **Tamper resistance**: intrinsics are captured at startup; monkey-patching `Promise`/`JSON`/`Array`/`Function.prototype.call`... cannot break it.
+- **QtWebView support** via `install_webview()` (loopback WebSocket; origin from the handshake `Origin` header).
+  No document-start injection exists there, so injection happens on load start/finish.
+- **Windows / macOS / Linux / Android**: OS detection, capability table, setup hints, `doctor` transport advice, and the
+  `window.__pysideWebUSB` commands (now also `platform()`, `transport()`, `version()`, `diagnose()`, `selfTest()`) on every transport.
+  **Android needs a host-supplied `UsbManager`-based `usb_backend`** (not included: untestable without a device).
+- Pluggable `chooser=` and `QmlDeviceChooser`. Security fixes No.9-No.12 (internal slots/`deleteLater()` reachable from pages,
+  opaque-origin chooser, hotplug broadcast contents). In QtWebEngine `qt.webChannelTransport` exists only in the main frame,
+  so the polyfill stays out of iframes.
+
+See README.md ("Native-looking surface", "QtWebView") for details and what the polyfill cannot hide.
 
 ## Features
 

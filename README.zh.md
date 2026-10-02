@@ -2,13 +2,39 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.6**
+⚠️ **Experimental Beta — 0.0.6.post1(开发代号 v0.0.6a)**
 
 面向 **PySide6 / QtWebEngine** 应用程序的 WebUSB API 实现。
 
 它结合 JavaScript Polyfill、QWebChannel Bridge 以及 **pyusb / libusb** 实际 USB 通信，为 QtWebEngine 提供通常不可直接使用的 `navigator.usb`。
 
 > `0.0.6` 在 zip/sdist/wheel/`_version.py` 中统一使用不带后缀的版本号——既没有 `aN`/`bN` 预发布标签，也没有 `.postN` 后缀。这与 `0.0.5` 系列(GitHub zip 标识 `v0.0.5b3` 与 PyPI/PEP 440 实际版本 `0.0.5.post7` 不一致)不同,原因见 `CHANGELOG.md`。
+
+## 0.0.6.post1(v0.0.6a)的变化
+
+- **外观与原生一致的 `navigator.usb`**:依据 Blink(Chromium)的 IDL/源码重写了 polyfill。`navigator.usb` 是
+  `Navigator.prototype` 上的 getter(不是 navigator 实例自身的属性),因此 **`delete navigator.usb` 无法移除它**
+  (返回 `true`,功能照常)。默认情况下 `Navigator.prototype.usb` 本身也是 non-configurable
+  (`lock_navigator_usb=False` 可得到与原生完全一致的描述符)。`USB`/`USBDevice`/`USBConfiguration`/`USBInterface`/
+  `USBAlternateInterface`/`USBEndpoint`/`USBConnectionEvent` 及 6 个传输结果类,其描述符、`Symbol.toStringTag`、
+  Illegal constructor、参数错误文案、`[native code]` 的 `toString()` 都遵循原生规则;并用**同一判定函数在同一 Chromium 上与真正的
+  `navigator.hid` 对照验证**。
+- **抗篡改**:启动时保存全部所需内置对象,页面即使改写 `Promise`/`JSON`/`Array.prototype`/`Function.prototype.call`/`atob`
+  等也无法破坏或劫持桥接。
+- **支持 QtWebView**:`install_webview()`(本地回环 WebSocket 传输)。来源由 WebSocket 握手的 `Origin` 头决定(页面 JS 无法伪造)。
+  QtWebView 没有 QWebChannel,也没有"文档开始时注入",所以在加载开始/完成时用 `runJavaScript()` 注入(若页面在首个脚本中同步检查
+  `navigator.usb`,可能看不到;需要严格的开始时注入请使用 QtWebEngine + `install()`)。
+- **Windows / macOS / Linux / Android**:操作系统检测、按系统的功能表与设置提示,`doctor` 会指出应使用的传输层;
+  自定义命令 `window.__pysideWebUSB`(不可枚举,新增 `platform()` `transport()` `version()` `diagnose()` `selfTest()`)
+  在所有传输层和系统上行为一致。**Android 需要宿主应用提供基于 `UsbManager` 的 `usb_backend`**(本版本未包含:没有真机无法验证)。
+- **可替换的设备选择器**(`chooser=`)与 `QmlDeviceChooser`(面向没有 QtWidgets 的应用)。
+- **安全修复**(均在真实 QtWebEngine 上复现确认,见 `security_report` No.9–No.12):任意页面可经 QWebChannel 调用桥接的内部方法和
+  `deleteLater()`;来源未知的框架也会弹出选择器并拿到完整描述符;热插拔通知会把产品名/序列号广播给所有框架。
+- QtWebEngine 中 `qt.webChannelTransport` 只存在于主框架(在 PySide6 6.11.2 上确认),因此 iframe 内不注入 polyfill(安全侧)。
+  需要 WebUSB 的内容请作为顶层页面加载。
+
+无法隐藏的部分:DevTools 的 `[[FunctionLocation]]`/Sources 面板、`isTrusted===false`、non-configurable 描述符差异
+(`lock_navigator_usb`)、`window.qt`。详见 README.md 的 “Native-looking surface”。
 
 ## 特性
 

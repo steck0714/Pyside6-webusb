@@ -2,13 +2,42 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — v0.0.6**
+⚠️ **Experimental Beta — 0.0.6.post1(開発名 v0.0.6a)**
 
 **PySide6 / QtWebEngine** アプリケーション向けの WebUSB API 実装です。
 
 JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** による実USB通信を組み合わせ、QtWebEngine では標準提供されていない `navigator.usb` を提供します。
 
 > `0.0.6` はzip/sdist/wheel/`_version.py`のすべてで素のバージョン文字列を使います——`aN`/`bN`のプレリリースタグも、その上に付ける`.postN`も無し。`0.0.5`系列(GitHub上のzip表記`v0.0.5b3`とPyPI/PEP 440上の実際のバージョン`0.0.5.post7`が異なっていた)とは違う扱いです。理由は`CHANGELOG.md`参照。
+
+## 0.0.6.post1(v0.0.6a)の変更点
+
+- **ネイティブそっくりの `navigator.usb`**: Blink(Chromium)のIDL/ソースに合わせてポリフィルを作り直しました。
+  `navigator.usb` は `Navigator.prototype` 上のgetter(インスタンスの自前プロパティではない)なので
+  **`delete navigator.usb` では消えません**(`true` を返し、そのまま使えます)。既定では
+  `Navigator.prototype.usb` 自体も non-configurable です(`lock_navigator_usb=False` でネイティブと同じ記述子)。
+  `USB`/`USBDevice`/`USBConfiguration`/`USBInterface`/`USBAlternateInterface`/`USBEndpoint`/`USBConnectionEvent`/
+  転送結果6クラスは、記述子・`Symbol.toStringTag`・Illegal constructor・引数エラー文言・`[native code]` の
+  `toString()` までネイティブと同じ規則です。**同じChromium上の本物の `navigator.hid` と同じ判定関数で比較して検証**しています。
+- **改ざん耐性**: 起動時に必要な組み込みを全て退避するため、ページが `Promise`/`JSON`/`Array.prototype`/
+  `Function.prototype.call`/`atob` などを書き換えてもブリッジを壊せません。
+- **QtWebView 対応**: `install_webview()`(ループバックWebSocket転送)。オリジンはWebSocketハンドシェイクの
+  `Origin` ヘッダ(ページJSは偽造不可)から決まります。QtWebViewにはQWebChannelも「ドキュメント開始時注入」も無いため、
+  ロード開始/完了時に `runJavaScript()` で注入します(ページが起動直後に同期的に `navigator.usb` を調べる場合は
+  見えないことがあります。厳密な開始時注入が必要なら QtWebEngine + `install()` を使ってください)。
+- **Windows / macOS / Linux / Android**: OS判定・OS別の機能表・セットアップのヒント、`doctor` が使うべき転送層を案内、
+  独自コマンド `window.__pysideWebUSB`(非列挙。`platform()` `transport()` `version()` `diagnose()` `selfTest()` を追加)は
+  どの転送層・どのOSでも同じ。**Androidは `UsbManager` ベースの `usb_backend` をホスト側で用意する必要があります**
+  (この版には含めていません: 実機が無く検証できないため)。
+- **差し替え可能なチューザー**(`chooser=`)と `QmlDeviceChooser`(QtWidgets無しのアプリ向け)。
+- **セキュリティ修正**(実物のQtWebEngineで再現して確認。`security_report` No.9〜No.12): QWebChannel経由で任意のページが
+  ブリッジの内部メソッドや `deleteLater()` を呼べた/オリジン不明のフレームでもチューザーが開き記述子が返った/
+  ホットプラグ通知が製品名・シリアル番号まで全フレームへ流れていた。
+- QtWebEngineでは `qt.webChannelTransport` がメインフレームにしか無い(PySide6 6.11.2で確認)ため、iframe内には
+  ポリフィルを入れません(安全側)。WebUSBが必要なコンテンツはトップレベルのページにしてください。
+
+隠せないもの: DevToolsの `[[FunctionLocation]]` / Sourcesパネル、`isTrusted===false`、non-configurableという記述子の差
+(`lock_navigator_usb`)、`window.qt`。詳細は README.md の「Native-looking surface」を参照してください。
 
 ## 特徴
 

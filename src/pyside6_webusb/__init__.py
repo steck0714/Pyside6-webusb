@@ -47,11 +47,25 @@ wire-format codec (`read_message`/`write_message`) plus a `manifest.json` static
 `pyside6-webusb-doctor --check-native-messaging <path/to/manifest.json>`. See
 pyside6_webusb.native_messaging's module docstring for why this lives here rather than in
 fox-webusb itself.
+
+QtWebView / Android / native-looking navigator.usb (🆕 v0.0.6a)
+----------------------------------------------------------------
+    from pyside6_webusb import install_webview          # Qt Quick `WebView` (QtWebView)
+    handle = install_webview(webview_item, chooser=QmlDeviceChooser())
+
+`install()` (QtWebEngine, QWebChannel) and `install_webview()` (QtWebView, loopback
+WebSocket) share the same bridge and the same JavaScript object model. `navigator.usb` is
+an accessor on `Navigator.prototype` (so `delete navigator.usb` cannot remove it) and every
+WebUSB interface (USB, USBDevice, USBConfiguration, ..., USBConnectionEvent) has the shape,
+error messages and `[native code]` toString of a native Chromium build. The `__pysideWebUSB`
+console commands (platform(), transport(), diagnose(), selfTest(), ...) work on every
+transport and platform. See README.md / CHANGELOG.md (0.0.6.post1).
 """
 
 from .diagnostics import environment_report, format_environment_report
 from ._version import __version__
 from .i18n import SUPPORTED_LOCALES, detect_locale
+from .platform_support import capability_summary, detect_platform, platform_summary, setup_hints
 from .native_messaging import (
     NativeMessagingError,
     format_manifest_check,
@@ -70,7 +84,9 @@ from .virtual import (
 try:
     from .bridge import WebUSBBridge
     from .chooser_dialog import WebUsbDeviceChooserDialog
-    from .polyfill import WEBUSB_POLYFILL_JS, install
+    from .polyfill import WEBUSB_POLYFILL_JS, build_polyfill_js, install
+    from .webview import QmlDeviceChooser, WebViewHandle, install_webview
+    from .ws_transport import WebSocketBridgeServer
 except ImportError as _e:
     # 🆕 v0.0.5a0: 修正前はこのtry/exceptが無く、PySide6-Essentials/PySide6-Addonsの
     # どちらかでも欠けている環境では `import pyside6_webusb` 自体がここで生の
@@ -113,10 +129,24 @@ except ImportError as _e:
     WebUSBBridge = _pyside6_unavailable
     WebUsbDeviceChooserDialog = _pyside6_unavailable
     install = _pyside6_unavailable
+    install_webview = _pyside6_unavailable
+    QmlDeviceChooser = _pyside6_unavailable
+    WebViewHandle = _pyside6_unavailable
+    WebSocketBridgeServer = _pyside6_unavailable
+    build_polyfill_js = _pyside6_unavailable
     WEBUSB_POLYFILL_JS = None
 
 __all__ = [
     "install",
+    "install_webview",
+    "QmlDeviceChooser",
+    "WebViewHandle",
+    "WebSocketBridgeServer",
+    "build_polyfill_js",
+    "detect_platform",
+    "platform_summary",
+    "capability_summary",
+    "setup_hints",
     "WebUSBBridge",
     "WebUsbDeviceChooserDialog",
     "WEBUSB_POLYFILL_JS",

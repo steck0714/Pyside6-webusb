@@ -47,8 +47,18 @@ FAILし、bridge.py/hardening.py/chooser_dialog.py側に対応する修正を入
 | `test_direct_channel_bypass.py` | polyfill.pyを経由しない素のQWebChannel直叩き(ユーザー操作要求・filter構造検証の不在、全Slotへの敵対的引数フラッディング) |
 | `test_malicious_device_ui_and_descriptors.py` | 悪意あるUSBデバイスが返す文字列記述子によるUIスプーフィング、短い応答時のバッファ汚染、壊れた記述子への耐性 |
 | `test_cross_origin_hotplug_leak.py` | ホットプラグイベントのクロスオリジンブロードキャスト、フレームトークンキャッシュの溢れ耐性 |
+| `test_v006post1_hardening.py` | 🆕 0.0.6.post1: QWebChannel経由で内部メソッド/`deleteLater()`が呼べた(No.9)、オリジン不明フレームへのチューザー/記述子(No.10)、ホットプラグ通知の中身(No.11)、差し替えチューザー(No.12) |
 
 ## 現在の結果の要約
 
 実環境(Python 3.14.4 / PySide6 6.11.2)での最終実行結果: **80件中14件FAIL、
 66件PASS**。FAILの内訳と対応する脆弱性番号は `../security_report/` を参照。
+
+## 0.0.6.post1(v0.0.6a)での追加
+
+`test_v006post1_hardening.py` の13件は、いずれも**修正前のコードで再現を確認した問題**
+(実物のQtWebEngine上での再現を含む)の回帰テストで、すべてPASSします。実物のQtWebEngine/QML
+WebViewを使う検証は `tests/e2e_webengine_runner.py`・`tests/e2e_qtwebview_runner.py` が担当し、
+WebSocket転送層の敵対的入力は `tests/test_ws_transport.py`、全スロットへの値ファズは
+`tests/test_slot_fuzz.py` が担当します(詳細は `../security_report/VULNERABILITY_REPORT.md` の
+Addendum: No.9〜No.12)。

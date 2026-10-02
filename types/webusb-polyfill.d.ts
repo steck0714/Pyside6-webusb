@@ -28,6 +28,13 @@
 // CHANGELOG.mdを参照してください(型定義そのものには影響しません — 例外は
 // どの名前であってもcatch (e)で受けられます)。
 //
+// 🆕 0.0.6.post1(開発名 v0.0.6a): ポリフィルがChromium(Blink)のIDLどおりの形になりました。
+// 型の面での変更は次のとおりです(実行時の見た目の変更は README「Native-looking surface」参照):
+//   - USB / USBDevice は公開コンストラクタを持たない(`new USBDevice()` は TypeError: Illegal constructor)。
+//   - USBConfiguration / USBInterface / USBAlternateInterface / USBEndpoint /
+//     各転送結果クラスは実在するクラスで、`instanceof` が使える。
+//   - `window.__pysideWebUSB`(非列挙)の独自コマンドの型を `PysideWebUSBCommands` として追加。
+//
 // バージョン対応: pyside6-webusb v0.0.5b2 時点のUSBDevice/USB実装を反映しています
 // (v0.0.4a0のbabbleステータス対応以降の主な追従: navigator.usbが実際に
 // EventTargetを継承するようになった/close()・selectConfiguration()・reset()が
@@ -259,5 +266,73 @@ declare global {
     ): Promise<USBIsochronousOutTransferResult>;
 
     reset(): Promise<void>;
+  }
+
+  // ============================================================
+  // 🆕 0.0.6.post1: F12 / DevTools 用の独自コマンド(window.__pysideWebUSB)
+  //   - `Object.keys(window)` / for-in には現れない(非列挙)。名前を直接入力すると呼べる。
+  //   - install(expose_commands=False) / install_webview(expose_commands=False) で無効化できる。
+  //   - 転送層(QWebChannel / WebSocket)・OS(Windows/macOS/Linux/Android)を問わず同じ。
+  // ============================================================
+  interface PysideWebUSBHostInfo {
+    os: "windows" | "macos" | "linux" | "android" | "ios" | "freebsd" | "other";
+    machine: string;
+    python: string;
+  }
+  type PysideWebUSBCapability = "supported" | "limited" | "unsupported";
+  interface PysideWebUSBSelfTestCheck {
+    name: string;
+    ok: boolean;
+    detail: string;
+  }
+  interface PysideWebUSBCommands {
+    /** このオリジンに既に許可されているデバイス一覧(console.tableにも出す)。 */
+    listGrantedDevices(): Promise<Array<{
+      vendorId: string;
+      productId: string;
+      productName: string | null;
+      manufacturerName: string | null;
+      serialNumber: string | null;
+      opened: boolean;
+    }>>;
+    /** ブリッジ自身のバージョン・バックエンド・転送制限などのJSON(isAvailable()の結果)。 */
+    bridgeInfo(): Promise<Record<string, unknown>>;
+    /** 転送サイズ方針(Chrome互換の警告しきい値と、このホストの上限)。 */
+    explainTransferLimits(): Promise<{
+      chromeCompatibleWarnThreshold: number;
+      hostSafetyHardLimit: number;
+      controlTransferMaxLength: number;
+    }>;
+    /** デバッグ出力の言語('en' | 'ja' | 'zh')。 */
+    locale(): string;
+    /** コマンド一覧(文字列を返し、consoleにも出す)。 */
+    help(): string;
+    /** ホストのOS/アーキテクチャと、そのOSでの機能の対応状況。 */
+    platform(): Promise<{
+      host: PysideWebUSBHostInfo | null;
+      capabilities: Record<string, PysideWebUSBCapability> | null;
+      page: { userAgent: string; platform: string };
+    }>;
+    /** ページがPythonへ到達する方式。 */
+    transport(): Promise<{ kind: "webchannel" | "websocket"; ready: boolean }>;
+    /** ポリフィルとブリッジのバージョン。 */
+    version(): Promise<{ polyfill: string; bridge: string | null }>;
+    /** 環境レポート(パス・ユーザー名を含まない): libusb使用可否・OS別のセットアップのヒント等。 */
+    diagnose(): Promise<{
+      bridgeVersion: string;
+      transport: "webchannel" | "websocket";
+      platform: PysideWebUSBHostInfo;
+      capabilities: Record<string, PysideWebUSBCapability>;
+      hints: string[];
+      customBackend: boolean;
+      chooser: "custom" | "qt-dialog";
+      hotplug: { polling: boolean };
+      backendUsable: boolean;
+    }>;
+    /** WebUSBの各インターフェースがネイティブのブラウザと同じ形・挙動かを同期的に検査する。 */
+    selfTest(): { ok: boolean; passed: number; total: number; checks: PysideWebUSBSelfTestCheck[] };
+  }
+  interface Window {
+    readonly __pysideWebUSB?: PysideWebUSBCommands;
   }
 }
