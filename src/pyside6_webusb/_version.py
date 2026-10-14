@@ -20,4 +20,7 @@ __init__.py は bridge.py を import するため、bridge.py 側が
 # PEP 440の "0.0.6.post1"(0.0.6の追従リリース。"0.0.6a0"は0.0.6より古い扱いに
 # なるため、0.0.6のあとに出す版としては使えない)。CHANGELOG/RELEASE_NOTESの
 # 二本立て運用の規約どおり。
-__version__ = "0.0.6.post1"
+# 🛠️ 0.0.6.post2(開発中の呼び名/zip名: v0.0.6a1): v0.0.6a(=0.0.6.post1)の追従リリース。
+# Python 3.15.0a8 + PySide6 6.12.0 での実機検証で見つかった
+# native_messaging/CLIの不具合修正(詳細はCHANGELOG.md)。命名規約は上記と同じ。
+__version__ = "0.0.6.post2"

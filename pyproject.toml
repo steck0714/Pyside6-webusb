@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyside6-webusb"
-version = "0.0.6.post1"
+version = "0.0.6.post2"
 description = "A WebUSB API implementation for PySide6 apps: QtWebEngine (QWebChannel) and QtWebView (loopback WebSocket), pyusb backend, native-looking JS polyfill"
 readme = "README.md"
 license = "MIT AND BSD-3-Clause AND W3C-20150513"
@@ -17,6 +17,14 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Hardware",
     "Environment :: X11 Applications :: Qt",
@@ -27,7 +35,14 @@ classifiers = [
 ]
 dependencies = [
     "PySide6-Essentials>=6.5",
-    "PySide6-Addons>=6.5",
+    # 🛠️ 0.0.6.post2: PySide6 6.12でQtWebEngineがPySide6-Addonsから別配布物
+    # PySide6-WebEngineへ分離された。Addons 6.12は公式のextra "webengine"(=
+    # PySide6-WebEngine==対応版)を提供するので、それを要求する。6.12より前の
+    # Addonsにはこのextraが無い(pipが"does not provide the extra"と警告するだけで
+    # インストールは通り、QtWebEngineは従来どおりAddonsに含まれる)。
+    # ⚠️ PySide6-WebEngineを直接依存に書かないこと: PyPIには6.12.0.140のほかに
+    # 0.0.1のプレースホルダがあり、Python 3.9等では解決時にそれを拾う恐れがある。
+    "PySide6-Addons[webengine]>=6.5",
     "pyusb>=1.2.1",
 ]
 

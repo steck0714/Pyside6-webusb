@@ -1,0 +1,220 @@
+{
+ "bulkTransferIn": [
+  {
+   "params": [
+    "int",
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "bulkTransferOut": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "claimInterface": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "clearHalt": [
+  {
+   "params": [
+    "int",
+    "QString",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "closeDevice": [
+  {
+   "params": [
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "controlTransferIn": [
+  {
+   "params": [
+    "int",
+    "int",
+    "int",
+    "int",
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "controlTransferOut": [
+  {
+   "params": [
+    "int",
+    "int",
+    "int",
+    "int",
+    "int",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "forgetGrantedDevice": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "getDiagnostics": [
+  {
+   "params": [],
+   "returns": "QString"
+  }
+ ],
+ "isAvailable": [
+  {
+   "params": [],
+   "returns": "QString"
+  }
+ ],
+ "isGrantedToThisFrame": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "bool"
+  }
+ ],
+ "isochronousTransferIn": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "isochronousTransferOut": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "listDevices": [
+  {
+   "params": [
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "mintGestureToken": [
+  {
+   "params": [],
+   "returns": "QString"
+  }
+ ],
+ "openDevice": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  },
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "releaseInterface": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "requestDeviceChooser": [
+  {
+   "params": [
+    "QString",
+    "QString",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "resetDevice": [
+  {
+   "params": [
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "selectAlternateInterface": [
+  {
+   "params": [
+    "int",
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ],
+ "selectConfiguration": [
+  {
+   "params": [
+    "int",
+    "int",
+    "QString"
+   ],
+   "returns": "QString"
+  }
+ ]
+}

@@ -2,6 +2,89 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.6.post2]
+
+**Versioning note:** informally **`v0.0.6a1`** (source zip / GitHub release label); the version the
+sdist, wheel, `_version.py` and `pyproject.toml` ship under is the PEP 440 `0.0.6.post2`, the
+follow-up to `0.0.6.post1` (`v0.0.6a`). Same two-track scheme as before (see `RELEASE_NOTES.md`).
+
+**How this release was made:** the whole project was installed and exercised on a real
+**Python 3.15.0a8** with the latest **PySide6 6.12.0** (+ shiboken6 6.12.0, pyusb 1.3.1, Linux,
+offscreen Qt). Everything that already existed was green there — `pytest tests` (262 passed),
+`security_audit` (96 passed), the Node polyfill suite (34), the TypeScript check, and both end-to-end
+runners (`e2e_webengine_runner.py`, `e2e_qtwebview_runner.py`) — including with `python -X dev` and
+all warnings turned into errors (only the known upstream pyusb `ctypes` `_pack_` DeprecationWarning,
+scheduled to become an error in Python 3.19, is filtered). So none of the fixes below is a Python 3.15
+regression: the first is a PySide6 6.12 packaging change that only shows in a *clean* install
+(a dev venv made with `pip install PySide6` has WebEngine and hides it), the rest are bugs the
+existing tests did not cover, found by reading the v0.0.6 `native_messaging` code against the
+Chrome/Firefox documentation and by trying the CLI with bad input. Each new test was run against the unfixed `0.0.6.post1` tree and fails there.
+
+### Fixed — a clean `pip install pyside6-webusb` had no QtWebEngine on PySide6 6.12
+
+PySide6 6.12 moved QtWebEngine out of `PySide6-Addons` into the separate `PySide6-WebEngine`
+distribution. The package depended only on `PySide6-Essentials` + `PySide6-Addons`, so on a fresh
+environment `pip install pyside6-webusb` installed PySide6 6.12.0 **without** `QtWebEngineCore`, and
+`pyside6-webusb-doctor` reported exactly that problem (all tests still passed in the dev venv, which
+had the `PySide6` meta-package and therefore WebEngine). Now `dependencies` has
+`PySide6-Addons[webengine]>=6.5` — the official extra that Addons 6.12 provides.
+
+- Older PySide6 still works: `PySide6-Addons` < 6.12 has no such extra, so pip/uv print a one-line
+  warning (`... does not provide the extra 'webengine'`) and install normally; QtWebEngine is still
+  inside Addons there (checked with PySide6 6.8.3 on Python 3.12: installs, doctor reports no problems).
+- `PySide6-WebEngine` is deliberately **not** a direct dependency: PyPI has `6.12.0.140` *and* a
+  `0.0.1` placeholder release, which a resolver could pick on interpreters that lack a 6.12 wheel.
+- New `tests/test_packaging.py` pins this (and that `pyproject.toml` and `__version__` agree).
+  Verified in clean Python 3.15.0a8 venvs from both the wheel and the sdist: installs PySide6 6.12.0 +
+  PySide6-WebEngine 6.12.0.140 and the doctor says "No problems detected".
+
+### Fixed — `pyside6_webusb.native_messaging`
+
+- **`read_message()` rejected legitimate messages over 1 MiB.** The documented limits are
+  asymmetric: **host → browser is 1 MiB**, but **browser → host is up to 4 GiB** (the length prefix is
+  an unsigned 32-bit integer). `read_message()` reused the 1 MiB host→browser limit, so a perfectly valid
+  larger message from the extension raised `NativeMessagingError`. Now: `DEFAULT_MAX_MESSAGE_BYTES`
+  (1 MiB, name kept) stays the **write** limit, and the new `DEFAULT_MAX_INCOMING_BYTES` (64 MiB) is the
+  default **read** safety cap (a memory guard, not a protocol limit; override with `max_bytes=`).
+- **`validate_native_messaging_manifest()` accepted manifests the browsers refuse.**
+  - A **relative `path`** was resolved against the manifest's directory on every OS and reported as fine,
+    and the error text claimed browsers do this. Per the docs only **Windows** allows a relative `path`;
+    on Linux and macOS it must be absolute. It is now a problem on non-Windows (new message
+    `manifest_path_not_absolute`).
+  - **Invalid host `name`** (uppercase, spaces, leading/trailing/double dots, non-ASCII...) was not
+    checked. The browser then only says "native messaging host not found". Now checked against
+    `^[a-z0-9_]+(\.[a-z0-9_]+)*$` (`manifest_bad_name`).
+  - **Malformed `allowed_origins`** entries (`https://...`, missing trailing `/`, wildcards, extra
+    path, non-strings) were not checked; now each must look like `chrome-extension://<id>/`
+    (`manifest_bad_origin`).
+  - The `manifest_path_missing` text no longer states the (non-Windows-incorrect) relative-path rule.
+  - All new messages exist in en/ja/zh (the locale-parity test covers them).
+
+### Fixed — `python -m pyside6_webusb --check-native-messaging` / `-n`
+
+- With **no value** (flag last, `--check-native-messaging=`, or followed by another option), the flag was
+  silently ignored: the normal environment report ran and the exit code was `0`. And `-n --lang en`
+  treated `--lang` as the manifest path. Now it prints a usage hint to **stderr** (en/ja/zh,
+  `cli_missing_manifest_path`) and exits with **`2`**.
+
+### Changed
+
+- `pyproject.toml`: Python version classifiers `3.9` ... `3.15` and `Python :: 3 :: Only` added
+  (`requires-python` is unchanged at `>=3.9`).
+- `virtual.py` docstring example: `open()` now passes `encoding="utf-8"` and closes the file (the
+  example is also correct with the UTF-8-by-default behavior of Python 3.15, PEP 686).
+- `tests/test_native_messaging.py`: its fixtures used a relative `path`, which encoded the wrong
+  assumption above; they now use absolute paths. Net +9 tests (24 in the file, 3 in the new `test_packaging.py`; the suite went
+  from 262 to **271 passed, 2 skipped** on Python 3.15.0a8 + PySide6 6.12.0; `security_audit`: 96 passed).
+
+### Verified (and not changed)
+
+- `native/libusb_probe.c` compiles warning-free with `-Wall -Wextra -Wpedantic` against libusb 1.0.27 and
+  runs; `scripts/publish_to_pypi.sh` passes `bash -n`. `publish_to_pypi.ps1` still has not been run
+  (no PowerShell here).
+- Not verified: real USB hardware, Windows/macOS, `pythonw`, Python 3.15 **final** (this was
+  3.15.0a8, an alpha) — and the free-threaded build (PySide6 does not support it).
+
 ## [0.0.6.post1]
 
 **Versioning note:** informally this is **`v0.0.6a`** (the name of the source zip / GitHub

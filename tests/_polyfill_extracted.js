@@ -1,715 +1,1456 @@
-
-(function() {
-    'use strict';
-    if (navigator.usb) return;  // 既にネイティブAPIがあれば上書きしない（将来Qtが対応した場合の保険）
-    if (typeof qt === 'undefined' || !qt.webChannelTransport) return;  // QWebChannel未提供の文脈では何もしない
-    // 🛡️ 本物のWebUSB同様、セキュアコンテキスト(https/localhost)以外では一切定義しない。
-    if (typeof window.isSecureContext !== 'undefined' && !window.isSecureContext) return;
-
-    var _bridgeReady = new Promise(function(resolve) {
+(function () {
+'use strict';
+var CONFIG = /*CONFIG_BEGIN*/{"locale": "en", "lockNavigatorUsb": true, "nativeLookalike": true, "exposeCommands": true, "transport": "webchannel", "ws": null, "version": "", "debug": false}/*CONFIG_END*/;
+var win = window;
+var nav = win.navigator;
+if (typeof win.isSecureContext !== 'undefined' && !win.isSecureContext) return;
+if (typeof Navigator !== 'function' || !(nav instanceof Navigator)) return;
+if ('usb' in nav) return;
+if (typeof EventTarget !== 'function' || typeof Event !== 'function' ||
+    typeof Promise !== 'function' || typeof WeakMap !== 'function' ||
+    typeof Reflect !== 'object' || typeof DOMException !== 'function') return;
+var uncurryThis = Function.prototype.bind.bind(Function.prototype.call);
+var ObjectC = Object;
+var defineProperty = ObjectC.defineProperty;
+var getOwnPropertyDescriptor = ObjectC.getOwnPropertyDescriptor;
+var getPrototypeOf = ObjectC.getPrototypeOf;
+var setPrototypeOf = ObjectC.setPrototypeOf;
+var objectCreate = ObjectC.create;
+var objectFreeze = ObjectC.freeze;
+var reflectApply = Reflect.apply;
+var reflectConstruct = Reflect.construct;
+var hasOwn = uncurryThis(ObjectC.prototype.hasOwnProperty);
+var objectToString = uncurryThis(ObjectC.prototype.toString);
+var arrayPush = uncurryThis(Array.prototype.push);
+var arraySlice = uncurryThis(Array.prototype.slice);
+var arrayIndexOf = uncurryThis(Array.prototype.indexOf);
+var arrayIsArray = Array.isArray;
+var WeakMapC = WeakMap;
+var MapC = Map;
+var PromiseC = Promise;
+var wmGet = uncurryThis(WeakMapC.prototype.get);
+var wmSet = uncurryThis(WeakMapC.prototype.set);
+var wmHas = uncurryThis(WeakMapC.prototype.has);
+var mapGet = uncurryThis(MapC.prototype.get);
+var mapSet = uncurryThis(MapC.prototype.set);
+var mapHas = uncurryThis(MapC.prototype.has);
+var mapDelete = uncurryThis(MapC.prototype.delete);
+var mapForEach = uncurryThis(MapC.prototype.forEach);
+var promiseThen = uncurryThis(PromiseC.prototype.then);
+var promiseResolveFn = PromiseC.resolve;
+var promiseRejectFn = PromiseC.reject;
+function promiseResolve(v) { return reflectApply(promiseResolveFn, PromiseC, [v]); }
+function promiseReject(e) { return reflectApply(promiseRejectFn, PromiseC, [e]); }
+var jsonParse = JSON.parse;
+var jsonStringify = JSON.stringify;
+var StringC = String;
+var fromCharCode = String.fromCharCode;
+var stringIndexOf = uncurryThis(String.prototype.indexOf);
+var stringSlice = uncurryThis(String.prototype.slice);
+var charCodeAt = uncurryThis(String.prototype.charCodeAt);
+var mathFloor = Math.floor;
+var mathPow = Math.pow;
+var U8 = Uint8Array;
+var DV = DataView;
+var AB = ArrayBuffer;
+var abIsView = AB.isView;
+var abByteLength = uncurryThis(getOwnPropertyDescriptor(AB.prototype, 'byteLength').get);
+var u8Subarray = uncurryThis(U8.prototype.subarray);
+var u8Set = uncurryThis(U8.prototype.set);
+var TypeErrorC = TypeError;
+var RangeErrorC = RangeError;
+var DOMExceptionC = DOMException;
+var ErrorC = Error;
+var EventC = Event;
+var EventTargetC = EventTarget;
+var etAddEventListener = EventTargetC.prototype.addEventListener;
+var etDispatchEvent = EventTargetC.prototype.dispatchEvent;
+var symToStringTag = Symbol.toStringTag;
+var symIterator = Symbol.iterator;
+var origFnToString = Function.prototype.toString;
+var captureStackTrace = (typeof ErrorC.captureStackTrace === 'function') ? ErrorC.captureStackTrace : null;
+var consoleRef = win.console;
+var atobFn = win.atob;
+var btoaFn = win.btoa;
+var setTimeoutFn = win.setTimeout;
+var WebSocketC = win.WebSocket;
+function logWarn(msg) {
+    try { if (consoleRef && consoleRef.warn) reflectApply(consoleRef.warn, consoleRef, [msg]); } catch (e) { /* ignore */ }
+}
+function logDebug(msg) {
+    try { if (consoleRef && consoleRef.debug) reflectApply(consoleRef.debug, consoleRef, ['[pyside6-webusb] ' + msg]); } catch (e) { /* ignore */ }
+}
+function logInfo() {
+    try { if (consoleRef && consoleRef.log) reflectApply(consoleRef.log, consoleRef, arraySlice(arguments, 0)); } catch (e) { /* ignore */ }
+}
+var clearTimeoutFn = win.clearTimeout;
+var wsSend = WebSocketC ? WebSocketC.prototype.send : null;
+var wsClose = WebSocketC ? WebSocketC.prototype.close : null;
+var QWC_LIB = /*QWC_LIB_BEGIN*/(typeof QWebChannel === 'function' ? QWebChannel : null)/*QWC_LIB_END*/;
+function makeWebChannelTransport() {
+    var qtObj = win.qt;
+    if (!qtObj || !qtObj.webChannelTransport || typeof QWC_LIB !== 'function') return null;
+    var handlers = [];
+    function emit(type, json) {
+        for (var i = 0; i < handlers.length; i++) {
+            try { handlers[i](type, json); } catch (e) { /* a broken listener must not break the others */ }
+        }
+    }
+    var bridgePromise = new PromiseC(function (resolve) {
         try {
-            new QWebChannel(qt.webChannelTransport, function(channel) {
-                resolve(channel.objects.pyUsbBridge || null);
+            new QWC_LIB(qtObj.webChannelTransport, function (channel) {
+                var b = (channel && channel.objects && channel.objects.pyUsbBridge) || null;
+                if (b) {
+                    try {
+                        if (b.deviceConnected && b.deviceConnected.connect) {
+                            b.deviceConnected.connect(function (j) { emit('connect', j); });
+                        }
+                        if (b.deviceDisconnected && b.deviceDisconnected.connect) {
+                            b.deviceDisconnected.connect(function (j) { emit('disconnect', j); });
+                        }
+                    } catch (e) { /* signals are optional */ }
+                }
+                resolve(b);
             });
         } catch (e) { resolve(null); }
     });
-
-    function callBridge(method) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        return _bridgeReady.then(function(bridge) {
-            if (!bridge) throw new Error('WebUSB bridge unavailable');
-            return new Promise(function(resolve) {
-                bridge[method].apply(bridge, args.concat([function(res) { resolve(JSON.parse(res)); }]));
+    return {
+        kind: 'webchannel',
+        ready: promiseThen(bridgePromise, function (b) { return !!b; }),
+        callRaw: function (method, args) {
+            return promiseThen(bridgePromise, function (b) {
+                if (!b || typeof b[method] !== 'function') throw new ErrorC('WebUSB bridge unavailable');
+                return new PromiseC(function (resolve) {
+                    var a = arraySlice(args, 0);
+                    arrayPush(a, function (res) { resolve(res); });
+                    reflectApply(b[method], b, a);
+                });
             });
-        });
-    }
-
-    // 🛡️ frame_origin.FrameOriginTracker がPython側から
-    //    runJavaScript('window.__pyUsbFrameToken = "...";') で書き込む値。
-    //    これをPython側のオリジン判定(WebUSBBridge._current_origin())へ渡すことで、
-    //    このフレームが本当は誰なのかをQt/Chromium自身の判定に基づいて特定できる
-    //    (このスクリプト自身がwindow.location.originを自己申告するのではない --
-    //    素のQWebChannelオブジェクトを直接叩く敵対的なコードに対しても安全)。
-    //    ページ読み込み直後、トークンがまだ届いていない短い時間帯は空文字になり、
-    //    その間の呼び出しはPython側で「オリジン不明」として安全に拒否される。
-    function _frameToken() {
-        return window.__pyUsbFrameToken || '';
-    }
-
-    // 🚚 大容量転送対応(v0.0.4a0, WebADB等を想定): 旧実装はhex文字列
-    //    (1バイト→2文字、2倍膨張)でブリッジとやり取りしていたが、base64
-    //    (1バイト→約1.33文字)に切り替えて往復するJSON文字列サイズを抑える。
-    //    ⚠️ チャンク分割が必須: String.fromCharCode.apply(null, bytes)へ配列を
-    //    「分割せず丸ごと」渡すと、各バイトが個別の関数引数として展開される
-    //    ため、エンジンの引数上限(V8実測: 数十万バイト規模で
-    //    'RangeError: Maximum call stack size exceeded')を超えて例外になる。
-    //    WebADBのような数百KB〜数MB級のペイロードは容易にこの閾値を超える
-    //    ため、0x8000バイトずつのチャンクに分けて処理する。
-    function bytesToBase64(view) {
-        var arr = view instanceof ArrayBuffer ? new Uint8Array(view) :
-                   (view.buffer ? new Uint8Array(view.buffer, view.byteOffset || 0, view.byteLength) : new Uint8Array(view));
-        var binary = '';
-        var chunkSize = 0x8000;
-        for (var i = 0; i < arr.length; i += chunkSize) {
-            binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunkSize));
+        },
+        send: function (method, args) {
+            promiseThen(bridgePromise, function (b) {
+                if (b && typeof b[method] === 'function') reflectApply(b[method], b, arraySlice(args, 0));
+            });
+        },
+        onEvent: function (fn) { arrayPush(handlers, fn); },
+        frameToken: function () {
+            var t = win.__pyUsbFrameToken;
+            return typeof t === 'string' ? t : '';
         }
-        return btoa(binary);
-    }
-    function base64ToUint8(b64) {
-        var binary = atob(b64 || '');
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return bytes;
-    }
-
-    // 🛡️ 実仕様(wicg.github.io/webusb#dom-usb-requestdevice)の
-    //    「A USBDeviceFilter filter is valid」をそのまま再現。より上位の
-    //    フィールドを伴わない下位フィールドの指定はTypeErrorで拒否する対象
-    //    (例: vendorId無しでproductIdだけを指定 等)。
-    function isValidUsbDeviceFilter(f) {
-        if (!f || typeof f !== 'object') return false;
-        if (('productId' in f) && !('vendorId' in f)) return false;
-        if (('subclassCode' in f) && !('classCode' in f)) return false;
-        if (('protocolCode' in f) && !('subclassCode' in f)) return false;
-        if (('vendorId' in f) && (typeof f.vendorId !== 'number' || f.vendorId < 0 || f.vendorId > 0xFFFF || Math.floor(f.vendorId) !== f.vendorId)) return false;
-        if (('productId' in f) && (typeof f.productId !== 'number' || f.productId < 0 || f.productId > 0xFFFF || Math.floor(f.productId) !== f.productId)) return false;
-        if (('classCode' in f) && (typeof f.classCode !== 'number' || f.classCode < 0 || f.classCode > 0xFF || Math.floor(f.classCode) !== f.classCode)) return false;
-        if (('subclassCode' in f) && (typeof f.subclassCode !== 'number' || f.subclassCode < 0 || f.subclassCode > 0xFF || Math.floor(f.subclassCode) !== f.subclassCode)) return false;
-        if (('protocolCode' in f) && (typeof f.protocolCode !== 'number' || f.protocolCode < 0 || f.protocolCode > 0xFF || Math.floor(f.protocolCode) !== f.protocolCode)) return false;
-        if (('serialNumber' in f) && typeof f.serialNumber !== 'string') return false;
-        return true;
-    }
-
-    // 🛡️ 実WebUSB仕様(wicg.github.io/webusb)を確認して比較した結果に基づく修正。
-    //    claimInterface()は仕様上「保護対象クラスによる拒否」だけがSecurityError、
-    //    それ以外(ハンドル不正・libusb側のclaim失敗等)はNetworkErrorが正しい
-    //    (open()の「ブロックリスト機器による拒否」も同様にSecurityErrorが正しい)。
-    //    requestDeviceChooser()の「チューザーが既に開いている」再入防止ガードは
-    //    InvalidStateErrorが正しい(操作を受け付けられる状態ではない、という
-    //    一般的なDOMException用法に合わせた)。
-    //    Python側はこれらの拒否理由の場合にだけエラー文字列の先頭へ対応する
-    //    "XxxError:"を付けて返す取り決めなので、ここではそのプレフィックスだけを見て
-    //    DOMExceptionの種別を仕様どおりに振り分ける。それ以外の失敗はメソッドごとの
-    //    デフォルト(通常はNetworkError)のままにする。
-    // 🛡️ バグ修正(v0.0.4b2, 実Chrome/Blinkソース精査中に発覚): このリストは
-    //    元々'SecurityError:'/'InvalidStateError:'の2つしか無く、Python側
-    //    (errors.py)が実際に生成しうる 'NotFoundError:' / 'InvalidAccessError:' /
-    //    'IndexSizeError:' / 'DataError:' が一切ここで振り分けられていなかった。
-    //    該当した場合、DOMExceptionの.nameが(呼び出し元がdefaultErrorNameを
-    //    明示していない限り)本来と違う既定値(通常'NetworkError')になり、
-    //    かつ.messageの先頭に"IndexSizeError: "のような接頭辞がそのまま
-    //    残ってしまう(=ページ側が.nameで正しく分岐できず、メッセージ文面も
-    //    おかしい)という実害のあるバグだった。errors.py側で定義している
-    //    プレフィックスを漏れなくここに列挙するのが正しい対処であり、
-    //    個々の呼び出し箇所でdefaultErrorNameを都度指定する方式は今回のように
-    //    漏れが生まれやすいため採らない。
-    // 🛡️ security_audit No.2b: Python側(requestDeviceChooser)がfilters/
-    //    exclusionFiltersの構造検証を素のQWebChannel直叩きに対する最終防衛
-    //    として追加したことに伴う対応。実仕様(wicg.github.io/webusb)では、
-    //    無効なUSBDeviceFilterは(下のisValidUsbDeviceFilterによるJS側の
-    //    正規チェックと同様)DOMExceptionではなく組み込みの TypeError に
-    //    なるべきものなので、'TypeError:'プレフィックスだけは他と扱いを分け、
-    //    DOMExceptionではなく本物のTypeErrorとしてthrowする。
-    var KNOWN_ERROR_PREFIXES = [
-        'SecurityError:', 'InvalidStateError:', 'NotFoundError:',
-        'InvalidAccessError:', 'IndexSizeError:', 'DataError:',
-    ];
-    function throwFromResult(res, defaultMessage, defaultErrorName) {
-        var msg = (res && res.error) || defaultMessage;
-        var name = defaultErrorName || 'NetworkError';
-        if (typeof msg === 'string' && msg.indexOf('TypeError:') === 0) {
-            throw new TypeError(msg.slice('TypeError:'.length).trim());
+    };
+}
+function makeWebSocketTransport() {
+    var cfg = CONFIG.ws;
+    if (!cfg || !WebSocketC || !wsSend) return null;
+    var url = 'ws://' + cfg.host + ':' + cfg.port + '/pyusb/' + cfg.secret;
+    var sock = null, opening = null, state = 'closed', nextId = 1, everOpen = false, backoff = 1000, reconnects = 0;
+    var pending = new MapC();
+    var handlers = [];
+    function emit(type, json) {
+        for (var i = 0; i < handlers.length; i++) {
+            try { handlers[i](type, json); } catch (e) { /* ignore */ }
         }
-        if (typeof msg === 'string') {
-            for (var i = 0; i < KNOWN_ERROR_PREFIXES.length; i++) {
-                var prefix = KNOWN_ERROR_PREFIXES[i];
-                if (msg.indexOf(prefix) === 0) {
-                    name = prefix.slice(0, -1); // 末尾の ':' を落とす
-                    msg = msg.slice(prefix.length).trim();
-                    break;
+    }
+    function unavailable() { return new ErrorC('WebUSB bridge unavailable'); }
+    function failAll(err) {
+        var old = pending;
+        pending = new MapC();
+        mapForEach(old, function (entry) { entry.reject(err); });
+    }
+    function scheduleReconnect() {
+        if (!everOpen || reconnects >= 6) return;
+        reconnects++;
+        var delay = backoff;
+        backoff = backoff < 30000 ? backoff * 2 : 30000;
+        reflectApply(setTimeoutFn, win, [function () {
+            if (state === 'closed') promiseThen(open(), function () { /* ok */ }, function () { scheduleReconnect(); });
+        }, delay]);
+    }
+    function open() {
+        if (state === 'open') return promiseResolve(sock);
+        if (opening) return opening;
+        opening = new PromiseC(function (resolve, reject) {
+            var s, done = false, timer = null;
+            function fail() {
+                if (done) return;
+                done = true;
+                if (timer !== null) reflectApply(clearTimeoutFn, win, [timer]);
+                state = 'closed'; sock = null; opening = null;
+                reject(unavailable());
+            }
+            try { s = new WebSocketC(url); } catch (e) { opening = null; reject(unavailable()); return; }
+            state = 'connecting';
+            timer = reflectApply(setTimeoutFn, win, [function () {
+                if (!done) { try { reflectApply(wsClose, s, []); } catch (e) { /* ignore */ } fail(); }
+            }, 8000]);
+            s.onmessage = function (ev) {
+                var msg;
+                try { msg = jsonParse(ev.data); } catch (e) { return; }
+                if (!msg || typeof msg !== 'object') return;
+                if (msg.hello) {
+                    if (!done) {
+                        done = true;
+                        reflectApply(clearTimeoutFn, win, [timer]);
+                        state = 'open'; sock = s; opening = null; everOpen = true; backoff = 1000; reconnects = 0;
+                        resolve(s);
+                    }
+                    return;
                 }
-            }
-        }
-        throw new DOMException(msg, name);
-    }
-
-    // 🛡️ 実仕様のUSBInterface.alternate/.claimedを再現する。
-    //    Python側(webusb_hardening.build_configurations_tree)はinterfaceNumberごとに
-    //    alternates配列だけを組み立てて返すため、「今どのalternateが有効か」
-    //    「このインターフェースは今claim済みか」はJS側で補う必要がある。
-    //    MDN: 「USBInterface.alternate ... By default this is the USBAlternateInterface
-    //    from alternates with alternateSetting equal to 0.」を再現(先頭要素決め打ちではなく
-    //    alternateSetting===0を探す。無ければ安全側で先頭にフォールバック)。
-    function deriveInterfaceState(configurations) {
-        (configurations || []).forEach(function(cfg) {
-            (cfg.interfaces || []).forEach(function(iface) {
-                var alts = iface.alternates || [];
-                var zero = alts.filter(function(a) { return a.alternateSetting === 0; })[0];
-                iface.alternate = zero || alts[0] || null;
-                if (typeof iface.claimed !== 'boolean') iface.claimed = false;
-            });
-        });
-        return configurations;
-    }
-
-    function setInterfaceClaimed(device, interfaceNumber, claimed) {
-        var iface = ((device.configuration && device.configuration.interfaces) || [])
-            .filter(function(i) { return i.interfaceNumber === interfaceNumber; })[0];
-        if (iface) iface.claimed = claimed;
-    }
-
-    function OpenWebUSBDevice(info) {
-        info = info || {};
-        this.vendorId = info.vendorId;
-        this.productId = info.productId;
-        this.productName = info.productName || null;
-        this.manufacturerName = info.manufacturerName || null;
-        this.serialNumber = info.serialNumber || null;
-        this.deviceClass = info.deviceClass || 0;
-        this.deviceSubclass = info.deviceSubclass || 0;
-        this.deviceProtocol = info.deviceProtocol || 0;
-        this.usbVersionMajor = info.usbVersionMajor || 0;
-        this.usbVersionMinor = info.usbVersionMinor || 0;
-        this.usbVersionSubminor = info.usbVersionSubminor || 0;
-        this.deviceVersionMajor = info.deviceVersionMajor || 0;
-        this.deviceVersionMinor = info.deviceVersionMinor || 0;
-        this.deviceVersionSubminor = info.deviceVersionSubminor || 0;
-        this.configurations = deriveInterfaceState(info.configurations || []);
-        // 実仕様のconfiguration getterは「bConfigurationValueが現在値と一致するもの」を
-        // 都度探す形。Python側(dev.get_active_configuration())が実機の値を
-        // activeConfigurationValueとして渡してくればそれを使い、取得できなかった
-        // 場合(古いデバイス等)のみ従来どおり先頭要素へ安全側フォールバックする。
-        var activeMatch = null;
-        if (info.activeConfigurationValue !== undefined && info.activeConfigurationValue !== null) {
-            activeMatch = (this.configurations || []).filter(function(c) {
-                return c.configurationValue === info.activeConfigurationValue;
-            })[0] || null;
-        }
-        this.configuration = activeMatch || (this.configurations && this.configurations[0]) || null;
-        this.opened = false;
-        this._handle = null;
-    }
-    OpenWebUSBDevice.prototype.open = function() {
-        // 🛡️ 実Chrome(usb_device.ccのUSBDevice::open())を確認して判明した欠落:
-        //    「すでにopened済みなら即座に成功解決する」という冪等性が無かった。
-        //    このままだとJS側でopen()を2回呼ぶたびにPython側で新しいハンドルが
-        //    発行され続け、1回目のハンドル(claim済みインターフェースの情報を
-        //    含む)は self._handle が上書きされて二度と参照できなくなり、
-        //    Python側に開いたままのpyusbデバイスリソースとして孤立してしまう
-        //    (closeDevice()を呼ぶ手段が失われるリーク)。
-        if (this.opened) return Promise.resolve();
-        var self = this;
-        return callBridge('openDevice', this.vendorId, this.productId, _frameToken(), this.serialNumber || '').then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to open device');
-            self._handle = res.handle;
-            self.opened = true;
-        });
-    };
-    // 🐛 バグ修正(v0.0.5a3、実仕様のUSBDevice.close()/selectConfiguration()/
-    //    reset()アルゴリズムを実際に取得して確認): この3つはいずれも、成功後は
-    //    [[claimedInterface]]を全interfaceにわたって全てfalseへリセットすると
-    //    定めている(close()は「全claim済みinterfaceに対してreleaseInterface()が
-    //    呼ばれたのと同じ状態」、selectConfiguration()/reset()は明示的に
-    //    [[claimedInterface]]を全てfalseで埋め直す)。旧実装はPython側
-    //    (bridge.py)ではこれを正しく行っていたが、JS側のOpenWebUSBDeviceオブジェクト
-    //    自身が持つ各interfaceの.claimed/.alternateはどの経路でもリセットして
-    //    いなかった。結果として、例えば「interface 0をclaimし、
-    //    selectConfiguration()で別のconfigurationへ移り、元のconfigurationへ
-    //    selectConfiguration()で戻る」といった操作をすると、Python側は
-    //    正しくclaimed_interfacesを空に戻しているにもかかわらず、JS側の
-    //    device.configuration.interfaces[0].claimedはtrueのまま残り続け、
-    //    ページ側のコードが「既にclaim済みのはず」と誤認したままbulk/interrupt
-    //    転送を試みてNotFoundError(claim済みかつ選択中のalternateとしては
-    //    見つからない)になる、という実害のある状態不整合だった。
-    function resetAllClaimedInterfaces(device) {
-        (device.configurations || []).forEach(function(cfg) {
-            (cfg.interfaces || []).forEach(function(iface) {
-                iface.claimed = false;
-                var alts = iface.alternates || [];
-                var zero = alts.filter(function(a) { return a.alternateSetting === 0; })[0];
-                iface.alternate = zero || alts[0] || null;
-            });
-        });
-    }
-    OpenWebUSBDevice.prototype.close = function() {
-        // 🛡️ 実仕様: openedがfalse(既に閉じている/一度も開いていない)なら
-        //    ブリッジへは何も送らず、即座に成功解決するno-op。
-        if (!this.opened) return Promise.resolve();
-        var self = this;
-        return _bridgeReady.then(function(bridge) {
-            // 🛡️ バグ修正(v0.0.4): frame_tokenを渡し忘れていた。closeDevice()は
-            //    Python側で @Slot(int, str) として2引数必須で登録されているため、
-            //    1引数(handleのみ)で呼ぶとQWebChannelがスロット呼び出しを黙って
-            //    dispatchせず(実機のQWebChannel往復で検証済み)、Python側の
-            //    closeDevice()が一度も実行されないままだった。結果としてpyusbの
-            //    デバイスハンドルが実際には一切解放されず(_open_devicesにも
-            //    残り続け)、close()を呼んでも何も起きていなかった。
-            if (bridge && self._handle != null) bridge.closeDevice(self._handle, _frameToken());
-            self.opened = false;
-            self._handle = null;
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.selectConfiguration = function(configurationValue) {
-        var self = this;
-        return callBridge('selectConfiguration', this._handle, configurationValue, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to select configuration');
-            // 実仕様どおり、選択成功後はconfigurationが新しい設定を指すよう更新する。
-            var match = (self.configurations || []).filter(function(c) { return c.configurationValue === configurationValue; })[0];
-            if (match) self.configuration = match;
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.claimInterface = function(n) {
-        var self = this;
-        return callBridge('claimInterface', this._handle, n, _frameToken()).then(function(res) {
-            // 保護対象クラスによる拒否だけがSecurityError、それ以外(ハンドル不正・
-            // libusb側のclaim失敗)はNetworkErrorが実仕様どおりの振り分け。
-            if (!res.success) throwFromResult(res, 'Failed to claim interface');
-            setInterfaceClaimed(self, n, true);
-        });
-    };
-    OpenWebUSBDevice.prototype.releaseInterface = function(n) {
-        var self = this;
-        return callBridge('releaseInterface', this._handle, n, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to release interface');
-            setInterfaceClaimed(self, n, false);
-        });
-    };
-    OpenWebUSBDevice.prototype.selectAlternateInterface = function(interfaceNumber, alternateSetting) {
-        var self = this;
-        return callBridge('selectAlternateInterface', this._handle, interfaceNumber, alternateSetting, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to select alternate interface');
-            var iface = ((self.configuration && self.configuration.interfaces) || [])
-                .filter(function(i) { return i.interfaceNumber === interfaceNumber; })[0];
-            if (iface) {
-                var alt = (iface.alternates || []).filter(function(a) { return a.alternateSetting === alternateSetting; })[0];
-                if (alt) iface.alternate = alt;
-            }
-        });
-    };
-    OpenWebUSBDevice.prototype.reset = function() {
-        var self = this;
-        return callBridge('resetDevice', this._handle, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to reset device');
-            resetAllClaimedInterfaces(self);
-        });
-    };
-    OpenWebUSBDevice.prototype.clearHalt = function(direction, endpointNumber) {
-        return callBridge('clearHalt', this._handle, direction, endpointNumber, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Failed to clear halt');
-        });
-    };
-    OpenWebUSBDevice.prototype.forget = function() {
-        var self = this;
-        return callBridge('forgetGrantedDevice', this.vendorId, this.productId, _frameToken()).then(function() {
-            self.opened = false;
-        });
-    };
-    OpenWebUSBDevice.prototype.transferIn = function(endpoint, length) {
-        return callBridge('bulkTransferIn', this._handle, endpoint, length, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Transfer failed');
-            // 🛡️ 実仕様(USBTransferStatus): STALLはrejectではなくstatus:'stall'を
-            //    伴う成功resolveとして返る。Python側がstall検出時はres.statusに
-            //    'stall'を入れてくる(それ以外はres.status==='ok')。
-            // 🔓 v0.0.4b2: res.warningがあれば(=実Chromeの32MiB上限を超えた等)
-            //    DevTools consoleへ警告として転送する。実Chromeを騙るのではなく、
-            //    「実Chromeならここでエラーになるが、これはpyside6-webusbなので
-            //    続行している」という相違を透明に説明するためのもの
-            //    (chrome_transfer_limit_warning()、hardening.py参照)。
-            if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-            var bytes = base64ToUint8(res.data || '');
-            return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
-        });
-    };
-    OpenWebUSBDevice.prototype.transferOut = function(endpoint, data) {
-        var b64 = bytesToBase64(data);
-        return callBridge('bulkTransferOut', this._handle, endpoint, b64, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Transfer failed');
-            return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
-        });
-    };
-    // 🛡️ spec: isochronousTransferIn/Outはどちらも「対象endpointを探し、
-    //    見つからなければNotFoundError、typeがisochronousでなければ
-    //    InvalidAccessError」という事前チェックを実機へ問い合わせる前に行う
-    //    (USBDevice.isochronousTransferIn(endpointNumber, packetLengths)の
-    //    アルゴリズム手順4-6相当)。claim済みのalternateだけを対象にする
-    //    (未claimのインターフェースのendpointはそもそも見つからない扱い)。
-    function _findClaimedEndpoint(device, endpointNumber, direction) {
-        var cfg = device.configuration;
-        if (!cfg) return null;
-        var interfaces = cfg.interfaces || [];
-        for (var i = 0; i < interfaces.length; i++) {
-            var iface = interfaces[i];
-            if (!iface.claimed) continue;
-            var alternates = iface.alternates || [];
-            for (var j = 0; j < alternates.length; j++) {
-                var endpoints = alternates[j].endpoints || [];
-                for (var k = 0; k < endpoints.length; k++) {
-                    var ep = endpoints[k];
-                    if (ep.endpointNumber === endpointNumber && ep.direction === direction) {
-                        return ep;
+                if (msg.ev) { emit(msg.ev, msg.d); return; }
+                if (typeof msg.i === 'number') {
+                    var entry = mapGet(pending, msg.i);
+                    if (entry) {
+                        mapDelete(pending, msg.i);
+                        if (hasOwn(msg, 'e')) entry.reject(new ErrorC(StringC(msg.e)));
+                        else entry.resolve(msg.r);
                     }
                 }
-            }
-        }
-        return null;
-    }
-
-    OpenWebUSBDevice.prototype.isochronousTransferIn = function(endpointNumber, packetLengths) {
-        var ep = _findClaimedEndpoint(this, endpointNumber, 'in');
-        if (!ep) {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not part of a claimed and selected alternate interface.',
-                'NotFoundError'));
-        }
-        if (ep.type !== 'isochronous') {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError'));
-        }
-        return callBridge('isochronousTransferIn', this._handle, endpointNumber, JSON.stringify(packetLengths), _frameToken())
-            .then(function(res) {
-                if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
-                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-                var totalLength = 0;
-                var packetBytes = (res.packets || []).map(function(p) {
-                    var b = base64ToUint8(p.data || '');
-                    totalLength += b.length;
-                    return b;
-                });
-                var combined = new Uint8Array(totalLength);
-                var offset = 0;
-                var packets = packetBytes.map(function(b, i) {
-                    combined.set(b, offset);
-                    var view = new DataView(combined.buffer, offset, b.length);
-                    offset += b.length;
-                    return { data: view, status: (res.packets[i] && res.packets[i].status) || 'ok' };
-                });
-                return { data: new DataView(combined.buffer), packets: packets };
-            });
-    };
-    OpenWebUSBDevice.prototype.isochronousTransferOut = function(endpointNumber, data, packetLengths) {
-        var ep = _findClaimedEndpoint(this, endpointNumber, 'out');
-        if (!ep) {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not part of a claimed and selected alternate interface.',
-                'NotFoundError'));
-        }
-        if (ep.type !== 'isochronous') {
-            return Promise.reject(new DOMException(
-                'The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError'));
-        }
-        var b64 = bytesToBase64(data);
-        return callBridge('isochronousTransferOut', this._handle, endpointNumber, b64, JSON.stringify(packetLengths), _frameToken())
-            .then(function(res) {
-                if (!res.success) throwFromResult(res, 'Isochronous transfer failed');
-                if (res.warning && typeof console !== 'undefined' && console.warn) console.warn(res.warning);
-                return { packets: res.packets || [] };
-            });
-    };
-    OpenWebUSBDevice.prototype.controlTransferIn = function(setup, length) {
-        var reqType = (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
-                      (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00) |
-                      0x80; // Device-to-host
-        return callBridge('controlTransferIn', this._handle, reqType, setup.request, setup.value, setup.index, length, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Control transfer failed');
-            var bytes = base64ToUint8(res.data || '');
-            return { status: res.status || 'ok', data: new DataView(bytes.buffer) };
+            };
+            s.onclose = function () {
+                var wasOpen = (state === 'open');
+                if (!done) { fail(); }
+                state = 'closed'; sock = null; opening = null;
+                failAll(unavailable());
+                if (wasOpen) scheduleReconnect();
+            };
+            s.onerror = function () { /* onclose always follows */ };
         });
-    };
-    OpenWebUSBDevice.prototype.controlTransferOut = function(setup, data) {
-        var reqType = (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
-                      (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00);
-        var b64 = data ? bytesToBase64(data) : '';
-        return callBridge('controlTransferOut', this._handle, reqType, setup.request, setup.value, setup.index, b64, _frameToken()).then(function(res) {
-            if (!res.success) throwFromResult(res, 'Control transfer failed');
-            return { status: res.status || 'ok', bytesWritten: res.bytesWritten };
-        });
-    };
-
-    // --- navigator.usb 本体、及びconnect/disconnect イベント ---
-    // Python側(PyUsbBridge)がホットプラグ監視タイマーで差分検出し、許可済み
-    // オリジンに関係するデバイスの抜き挿しだけをQtシグナルとして送ってくる。
-    // 🐛 バグ修正(v0.0.5a3、実DevTools上で `navigator.usb instanceof EventTarget`
-    //    が false になることを確認して発覚): 旧実装はEventTargetを継承する
-    //    代わりに、addEventListener/removeEventListener/on(connect|disconnect)
-    //    プロパティへ個別対応した独自の最小ディスパッチャを実装していた
-    //    (types/webusb-polyfill.d.tsは`interface USB extends EventTarget`と
-    //    宣言しているにもかかわらず、実行時の実体はただのオブジェクトリテラルで
-    //    EventTargetを継承していなかった)。QtWebEngine(実質Chromium)を含む
-    //    現代的なJSエンジンはグローバルのEventTargetコンストラクタを持つため、
-    //    それを実際に継承したUSBクラス(及びEventを継承した本物の
-    //    USBConnectionEvent)へ差し替える。EventTarget自体が存在しない
-    //    (極めて古い/簡易な)実行環境向けに、その場合だけ従来の独自
-    //    ディスパッチャへフォールバックする防御的な作りにしてある。
-    var _HasNativeEventTarget = typeof EventTarget === 'function';
-
-    // ⚠️ EventTarget/EventはES5の「コンストラクタ借用」(Parent.call(this))では
-    //    継承できないネイティブのクラスコンストラクタ(`new`無しで呼ぶと
-    //    TypeErrorになる実機/Node.js双方で確認済み)。このファイルの他の部分は
-    //    意図的にES5関数式スタイルで統一しているが、ネイティブEventTarget/Event
-    //    を実際に継承するにはES6の`class ... extends`構文が必須なため、ここだけ
-    //    (_HasNativeEventTargetがtrueの、モダンなエンジンだと確定している枝の中でだけ)
-    //    使う。フォールバック側は従来どおりのES5スタイルを維持する。
-    var USBConnectionEvent, USB;
-    if (_HasNativeEventTarget) {
-        USBConnectionEvent = class extends Event {
-            constructor(type, eventInitDict) {
-                super(type, eventInitDict || {});
-                this.device = (eventInitDict || {}).device;
-            }
-        };
-        USB = class extends EventTarget {
-            constructor() {
-                super();
-                this.onconnect = null;
-                this.ondisconnect = null;
-            }
-        };
-    } else {
-        // フォールバック: 素のEventTargetが無い環境向けの最小限の自前実装
-        // (instanceof EventTargetにはならないが、機能自体はここまでと同じく動く)。
-        USBConnectionEvent = function(type, eventInitDict) {
-            var init = eventInitDict || {};
-            this.type = type;
-            this.device = init.device;
-        };
-        USB = function() {
-            this.onconnect = null;
-            this.ondisconnect = null;
-        };
-        var _fallbackListeners = { connect: [], disconnect: [] };
-        USB.prototype.addEventListener = function(type, fn) {
-            if (_fallbackListeners[type] && typeof fn === 'function') _fallbackListeners[type].push(fn);
-        };
-        USB.prototype.removeEventListener = function(type, fn) {
-            if (_fallbackListeners[type]) {
-                _fallbackListeners[type] = _fallbackListeners[type].filter(function(f) { return f !== fn; });
-            }
-        };
-        USB.prototype.dispatchEvent = function(evt) {
-            (_fallbackListeners[evt.type] || []).forEach(function(fn) {
-                try { fn(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
-            });
-            return true;
-        };
+        return opening;
     }
-
-    navigator.usb = new USB();
-
-    function _dispatchUsbEvent(type, device) {
-        var evt = new USBConnectionEvent(type, { device: device });
-        try { navigator.usb.dispatchEvent(evt); } catch (e) { /* リスナー内の例外はここで握りつぶす(1つの失敗で他を止めない) */ }
-        var handlerProp = 'on' + type;
-        if (typeof navigator.usb[handlerProp] === 'function') {
-            try { navigator.usb[handlerProp](evt); } catch (e) { /* 同上 */ }
-        }
-    }
-    _bridgeReady.then(function(bridge) {
-        if (!bridge) return;
-        // 🛡️ security_audit No.5: Python側のdeviceConnected/deviceDisconnected
-        // シグナルは、QWebChannelにフレーム単位配信の仕組みが無いため、ページ内の
-        // 全フレームへブロードキャストされる。発火条件も「トップレベルページの
-        // 許可状況」だけで、"このイベントを受け取っている個々のフレーム自身"の
-        // オリジンは一切見ていない(bridge.pyの_poll_hotplug()のコメント参照)。
-        // その結果、トップレベルページが許可したデバイスの抜き挿しが、同じページに
-        // 埋め込まれた無関係なクロスオリジンiframe(そのデバイスへの許可を一度も
-        // 得ていない第三者広告等)にまで届いてしまう。
-        // QWebChannel/Qt Signal自体をフレーム単位配信に作り直すことはできないが、
-        // 受け取った側であるここで、getDevices()と同じ判定(=このフレーム自身の
-        // オリジンが実際にこのvendorId/productIdへの許可を持っているか)を
-        // isGrantedToThisFrame()で再検証し、許可が無ければpageへdispatchせずに
-        // 静かに捨てる。これによりobservableな挙動としては正しく
-        // フレームごとにスコープされる。
-        function _dispatchIfGrantedToThisFrame(type, info) {
-            try {
-                bridge.isGrantedToThisFrame(info.vendorId, info.productId, _frameToken(), function(granted) {
-                    if (granted) _dispatchUsbEvent(type, new OpenWebUSBDevice(info));
+    return {
+        kind: 'websocket',
+        ready: promiseThen(open(), function () { return true; }, function () { return false; }),
+        callRaw: function (method, args) {
+            return promiseThen(open(), function (s) {
+                return new PromiseC(function (resolve, reject) {
+                    var id = nextId++;
+                    mapSet(pending, id, { resolve: resolve, reject: reject });
+                    try { reflectApply(wsSend, s, [jsonStringify({ i: id, m: method, a: args })]); }
+                    catch (e) { mapDelete(pending, id); reject(unavailable()); }
                 });
-            } catch (e) { /* 判定できなければ安全側(dispatchしない) */ }
-        }
-        if (bridge.deviceConnected && bridge.deviceConnected.connect) {
-            bridge.deviceConnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('connect', JSON.parse(infoJson)); } catch (e) {}
             });
+        },
+        send: function (method, args) {
+            promiseThen(open(), function (s) {
+                try { reflectApply(wsSend, s, [jsonStringify({ m: method, a: args })]); } catch (e) { /* ignore */ }
+            }, function () { /* ignore */ });
+        },
+        onEvent: function (fn) { arrayPush(handlers, fn); },
+        frameToken: function () { return ''; }   /* the server binds the origin to the connection */
+    };
+}
+var transport = (CONFIG.transport === 'websocket') ? makeWebSocketTransport() : makeWebChannelTransport();
+if (!transport) return;
+var nativeText = new WeakMapC();
+function nativeSource(name) { return 'function ' + name + '() { [native code] }'; }
+function maskFunction(fn, text) { wmSet(nativeText, fn, text); return fn; }
+function trimStack(err, skipFn) {
+    if (captureStackTrace && typeof skipFn === 'function') {
+        try { captureStackTrace(err, skipFn); } catch (e) { /* ignore */ }
+    }
+    return err;
+}
+function makeTypeError(msg, skipFn) { return trimStack(new TypeErrorC(msg), skipFn); }
+function makeDOMException(msg, name, skipFn) { return trimStack(new DOMExceptionC(msg, name), skipFn); }
+function failedExecute(iface, method, detail) { return "Failed to execute '" + method + "' on '" + iface + "': " + detail; }
+function failedConstruct(iface, detail) { return "Failed to construct '" + iface + "': " + detail; }
+function notEnoughArgs(required, present) {
+    return required + ' argument' + (required === 1 ? '' : 's') + ' required, but only ' + present + ' present.';
+}
+var NEW_OPERATOR_MSG = "Please use the 'new' operator, this DOM object constructor cannot be called as a function.";
+function isObjectLike(v) { var t = typeof v; return (t === 'object' && v !== null) || t === 'function'; }
+function truncateToBits(num, bits) {
+    if (num !== num || num === Infinity || num === -Infinity) return 0;
+    var n = num < 0 ? -mathFloor(-num) : mathFloor(num);
+    var m = mathPow(2, bits);
+    n = n % m;
+    if (n < 0) n += m;
+    return n + 0;
+}
+function cvtOctet(v) { return truncateToBits(+v, 8); }
+function cvtUShort(v) { return truncateToBits(+v, 16); }
+function cvtULong(v) { return truncateToBits(+v, 32); }
+function cvtDOMString(v) { return '' + v; }   /* throws for Symbol, like ToString */
+function cvtEnum(v, allowed, enumName) {
+    var s = '' + v;
+    if (arrayIndexOf(allowed, s) < 0) {
+        throw new TypeErrorC("The provided value '" + s + "' is not a valid enum value of type " + enumName + '.');
+    }
+    return s;
+}
+function wrapMember(dictName, member, fn) {
+    try { return fn(); } catch (e) {
+        if (e && getPrototypeOf(e) === TypeErrorC.prototype) {
+            throw new TypeErrorC("Failed to read the '" + member + "' property from '" + dictName + "': " + e.message);
         }
-        if (bridge.deviceDisconnected && bridge.deviceDisconnected.connect) {
-            bridge.deviceDisconnected.connect(function(infoJson) {
-                try { _dispatchIfGrantedToThisFrame('disconnect', JSON.parse(infoJson)); } catch (e) {}
-            });
+        throw e;
+    }
+}
+function cvtSequence(value, elem) {
+    if (!isObjectLike(value)) throw new TypeErrorC('The provided value cannot be converted to a sequence.');
+    var method = value[symIterator];
+    if (typeof method !== 'function') throw new TypeErrorC('The object must have a callable @@iterator property.');
+    var it = reflectApply(method, value, []);
+    if (!isObjectLike(it)) throw new TypeErrorC('The object must have a callable @@iterator property.');
+    var next = it.next, out = [];
+    for (;;) {
+        var step = reflectApply(next, it, []);
+        if (!isObjectLike(step)) throw new TypeErrorC('Iterator result ' + step + ' is not an object');
+        if (step.done) break;
+        arrayPush(out, elem(step.value));
+    }
+    return out;
+}
+function cvtDictionary(v, dictName, members, notObjectMsg) {
+    if (!isObjectLike(v)) throw new TypeErrorC(notObjectMsg || ("The provided value is not of type '" + dictName + "'."));
+    var out = {};
+    for (var i = 0; i < members.length; i++) {
+        var name = members[i][0], conv = members[i][1], required = members[i][2];
+        var raw = v[name];
+        if (raw === undefined) {
+            if (required) throw new TypeErrorC("Failed to read the '" + name + "' property from '" + dictName + "': Required member is undefined.");
+            continue;
+        }
+        out[name] = wrapMember(dictName, name, function () { return conv(raw); });
+    }
+    return out;
+}
+var FILTER_MEMBERS = [
+    ['classCode', cvtOctet, false], ['productId', cvtUShort, false], ['protocolCode', cvtOctet, false],
+    ['serialNumber', cvtDOMString, false], ['subclassCode', cvtOctet, false], ['vendorId', cvtUShort, false]
+];
+function cvtFilter(v) { return cvtDictionary(v, 'USBDeviceFilter', FILTER_MEMBERS); }
+function cvtRequestOptions(v) {
+    if (!isObjectLike(v)) throw new TypeErrorC("The provided value is not of type 'USBDeviceRequestOptions'.");
+    var out = { filters: [], exclusionFilters: [] };
+    var excl = v.exclusionFilters;
+    if (excl !== undefined) {
+        out.exclusionFilters = wrapMember('USBDeviceRequestOptions', 'exclusionFilters', function () { return cvtSequence(excl, cvtFilter); });
+    }
+    var filt = v.filters;
+    if (filt === undefined) {
+        throw new TypeErrorC("Failed to read the 'filters' property from 'USBDeviceRequestOptions': Required member is undefined.");
+    }
+    out.filters = wrapMember('USBDeviceRequestOptions', 'filters', function () { return cvtSequence(filt, cvtFilter); });
+    return out;
+}
+var SETUP_MEMBERS = [
+    ['index', cvtUShort, true],
+    ['recipient', function (x) { return cvtEnum(x, ['device', 'interface', 'endpoint', 'other'], 'USBRecipient'); }, true],
+    ['request', cvtOctet, true],
+    ['requestType', function (x) { return cvtEnum(x, ['standard', 'class', 'vendor'], 'USBRequestType'); }, true],
+    ['value', cvtUShort, true]
+];
+function cvtControlSetup(v) { return cvtDictionary(v, 'USBControlTransferParameters', SETUP_MEMBERS); }
+function cvtDirection(v) { return cvtEnum(v, ['in', 'out'], 'USBDirection'); }
+function cvtTransferStatus(v) { return cvtEnum(v, ['ok', 'stall', 'babble'], 'USBTransferStatus'); }
+function isArrayBuffer(v) {
+    if (!isObjectLike(v)) return false;
+    try { abByteLength(v); return true; } catch (e) { return false; }
+}
+function cvtBufferSource(v) {
+    if (!(abIsView(v) || isArrayBuffer(v))) {
+        throw new TypeErrorC("The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.");
+    }
+    return v;
+}
+function bufferSourceBytes(v) {
+    if (abIsView(v)) return new U8(v.buffer, v.byteOffset, v.byteLength);
+    return new U8(v);
+}
+function isDataView(v) { return isObjectLike(v) && abIsView(v) && objectToString(v) === '[object DataView]'; }
+function bytesToBase64(view) {
+    var arr = bufferSourceBytes(view), binary = '', chunk = 0x8000;
+    for (var i = 0; i < arr.length; i += chunk) {
+        binary += reflectApply(fromCharCode, StringC, u8Subarray(arr, i, i + chunk));
+    }
+    return reflectApply(btoaFn, win, [binary]);
+}
+function base64ToU8(b64) {
+    var binary = reflectApply(atobFn, win, [b64 || '']);
+    var bytes = new U8(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = charCodeAt(binary, i);
+    return bytes;
+}
+function makeOperation(brand, ifaceName, name, length, impl) {
+    var op = ({ [name]() {
+        var self = this, args = arguments;
+        try {
+            if (!brand(self)) throw makeTypeError(failedExecute(ifaceName, name, 'Illegal invocation'), op);
+            return impl(self, args, op);
+        } catch (e) {
+            return promiseReject(e);
+        }
+    } })[name];
+    defineProperty(op, 'length', { value: length, configurable: true });
+    maskFunction(op, nativeSource(name));
+    return { value: op, writable: true, enumerable: true, configurable: true };
+}
+function makeGetter(brand, name, read) {
+    var holder = { get [name]() {
+        if (!brand(this)) throw makeTypeError('Illegal invocation', getterFn);
+        return read(this);
+    } };
+    var getterFn = getOwnPropertyDescriptor(holder, name).get;
+    maskFunction(getterFn, nativeSource('get ' + name));
+    return getterFn;
+}
+function makeAttribute(brand, name, read) {
+    return { get: makeGetter(brand, name, read), set: undefined, enumerable: true, configurable: true };
+}
+function assembleInterface(Ctor, tag, ctorParent, protoParent, members, order) {
+    if (ctorParent) setPrototypeOf(Ctor, ctorParent);
+    var proto = Ctor.prototype;
+    if (protoParent) setPrototypeOf(proto, protoParent);
+    delete proto.constructor;
+    for (var i = 0; i < order.length; i++) {
+        var n = order[i];
+        if (n === 'constructor') {
+            defineProperty(proto, 'constructor', { value: Ctor, writable: true, enumerable: false, configurable: true });
+        } else {
+            defineProperty(proto, n, members[n]);
+        }
+    }
+    defineProperty(proto, symToStringTag, { value: tag, writable: false, enumerable: false, configurable: true });
+    defineProperty(Ctor, 'prototype', { writable: false });
+    maskFunction(Ctor, nativeSource(tag));
+}
+var stringTrim = uncurryThis(String.prototype.trim);
+var K_OPEN_REQUIRED = 'The device must be opened first.';
+var K_DISCONNECTED = 'The device was disconnected.';
+var K_DEVICE_CHANGING = 'An operation that changes the device state is in progress.';
+var K_IFACE_CHANGING = 'An operation that changes interface state is in progress.';
+var K_IFACE_NOT_FOUND = 'The interface number provided is not supported by the device in its current configuration.';
+var K_ALT_NOT_FOUND = 'The alternate setting provided is not supported by the device in its current configuration.';
+var K_NO_CONFIG = 'The device must have a configuration selected.';
+var K_IFACE_NOT_CLAIMED = 'The specified interface has not been claimed.';
+var K_EP_RANGE = 'The specified endpoint number is out of range.';
+var K_EP_NOT_AVAILABLE = 'The specified endpoint is not part of a claimed and selected alternate interface.';
+var K_PACKETS_TOO_BIG = 'The total packet length exceeded the maximum size.';
+var K_BUFFER_MISMATCH = 'The data buffer size must match the total packet length.';
+var usbSlots = new WeakMapC(), deviceSlots = new WeakMapC(), configSlots = new WeakMapC(),
+    ifaceSlots = new WeakMapC(), altSlots = new WeakMapC(), endpointSlots = new WeakMapC(),
+    eventSlots = new WeakMapC(), inResultSlots = new WeakMapC(), outResultSlots = new WeakMapC(),
+    isoInPacketSlots = new WeakMapC(), isoInResultSlots = new WeakMapC(),
+    isoOutPacketSlots = new WeakMapC(), isoOutResultSlots = new WeakMapC();
+function ctorGuard(iface, skip, newTarget, given, required) {
+    if (!newTarget) throw makeTypeError(failedConstruct(iface, NEW_OPERATOR_MSG), skip);
+    if (given < required) throw makeTypeError(failedConstruct(iface, notEnoughArgs(required, given)), skip);
+}
+function ctorConvert(iface, fn, skip) {
+    try { return fn(); } catch (e) {
+        if (e && getPrototypeOf(e) === TypeErrorC.prototype) throw makeTypeError(failedConstruct(iface, e.message), skip);
+        throw e;
+    }
+}
+function convertArg(iface, method, fn, skip) {
+    try { return fn(); } catch (e) {
+        if (e && getPrototypeOf(e) === TypeErrorC.prototype) throw makeTypeError(failedExecute(iface, method, e.message), skip);
+        throw e;
+    }
+}
+function needArgs(args, n, iface, method, skip) {
+    if (args.length < n) throw makeTypeError(failedExecute(iface, method, notEnoughArgs(n, args.length)), skip);
+}
+function freezeCopy(arr) { return objectFreeze(arraySlice(arr, 0)); }
+function toInt(v) { return (typeof v === 'number' && v === v) ? v : 0; }
+function toStrOrNull(v) { return (typeof v === 'string') ? v : null; }
+function normalizeEndpoint(e) {
+    e = e || {};
+    return {
+        endpointNumber: toInt(e.endpointNumber),
+        direction: e.direction === 'out' ? 'out' : 'in',
+        type: (e.type === 'interrupt' || e.type === 'isochronous') ? e.type : 'bulk',
+        packetSize: toInt(e.packetSize)
+    };
+}
+function normalizeAlternate(a) {
+    a = a || {};
+    var eps = [], src = arrayIsArray(a.endpoints) ? a.endpoints : [];
+    for (var i = 0; i < src.length; i++) arrayPush(eps, normalizeEndpoint(src[i]));
+    return {
+        alternateSetting: toInt(a.alternateSetting), interfaceClass: toInt(a.interfaceClass),
+        interfaceSubclass: toInt(a.interfaceSubclass), interfaceProtocol: toInt(a.interfaceProtocol),
+        interfaceName: toStrOrNull(a.interfaceName), endpoints: eps
+    };
+}
+function normalizeInterface(f) {
+    f = f || {};
+    var alts = [], src = arrayIsArray(f.alternates) ? f.alternates : [];
+    for (var i = 0; i < src.length; i++) arrayPush(alts, normalizeAlternate(src[i]));
+    if (!alts.length) arrayPush(alts, normalizeAlternate({ alternateSetting: 0 }));
+    return { interfaceNumber: toInt(f.interfaceNumber), alternates: alts };
+}
+function normalizeConfiguration(c) {
+    c = c || {};
+    var ifs = [], src = arrayIsArray(c.interfaces) ? c.interfaces : [];
+    for (var i = 0; i < src.length; i++) arrayPush(ifs, normalizeInterface(src[i]));
+    return { configurationValue: toInt(c.configurationValue), configurationName: toStrOrNull(c.configurationName), interfaces: ifs };
+}
+function normalizeInfo(raw) {
+    raw = raw || {};
+    var cfgs = [], src = arrayIsArray(raw.configurations) ? raw.configurations : [];
+    for (var i = 0; i < src.length; i++) arrayPush(cfgs, normalizeConfiguration(src[i]));
+    return {
+        vendorId: toInt(raw.vendorId), productId: toInt(raw.productId),
+        productName: toStrOrNull(raw.productName), manufacturerName: toStrOrNull(raw.manufacturerName),
+        serialNumber: toStrOrNull(raw.serialNumber),
+        deviceClass: toInt(raw.deviceClass), deviceSubclass: toInt(raw.deviceSubclass), deviceProtocol: toInt(raw.deviceProtocol),
+        usbVersionMajor: toInt(raw.usbVersionMajor), usbVersionMinor: toInt(raw.usbVersionMinor), usbVersionSubminor: toInt(raw.usbVersionSubminor),
+        deviceVersionMajor: toInt(raw.deviceVersionMajor), deviceVersionMinor: toInt(raw.deviceVersionMinor), deviceVersionSubminor: toInt(raw.deviceVersionSubminor),
+        configurations: cfgs,
+        activeConfigurationValue: (typeof raw.activeConfigurationValue === 'number') ? raw.activeConfigurationValue : null
+    };
+}
+function findConfigIndex(info, value) {
+    for (var i = 0; i < info.configurations.length; i++) if (info.configurations[i].configurationValue === value) return i;
+    return -1;
+}
+function makeDeviceState(info, key) {
+    var ds = {
+        info: info, key: key, handle: null, opened: false, disconnected: false,
+        activeConfigIndex: -1, claimed: objectCreate(null), alt: objectCreate(null),
+        changing: false, ifaceChanging: objectCreate(null), configs: null
+    };
+    var idx = -1;
+    if (info.activeConfigurationValue !== null) idx = findConfigIndex(info, info.activeConfigurationValue);
+    if (idx < 0 && info.configurations.length) idx = 0;   /* legacy: assume the first configuration */
+    ds.activeConfigIndex = idx;
+    return ds;
+}
+function resetInterfaceState(ds) {
+    ds.claimed = objectCreate(null); ds.alt = objectCreate(null); ds.ifaceChanging = objectCreate(null);
+}
+function markClosed(ds) { ds.opened = false; ds.handle = null; ds.changing = false; resetInterfaceState(ds); }
+function markDisconnected(ds) { ds.disconnected = true; markClosed(ds); }
+function findInterfaceIndex(ds, number) {
+    if (ds.activeConfigIndex < 0) return -1;
+    var ifs = ds.info.configurations[ds.activeConfigIndex].interfaces;
+    for (var i = 0; i < ifs.length; i++) if (ifs[i].interfaceNumber === number) return i;
+    return -1;
+}
+function selectedAlternateIndex(iface, setting) {
+    var want = (setting === undefined) ? 0 : setting;
+    for (var i = 0; i < iface.alternates.length; i++) if (iface.alternates[i].alternateSetting === want) return i;
+    return 0;
+}
+function anyInterfaceChanging(ds) {
+    for (var k in ds.ifaceChanging) if (ds.ifaceChanging[k] === true) return true;
+    return false;
+}
+function ensureNoDeviceChange(ds) {
+    if (ds.disconnected) throw makeDOMException(K_DISCONNECTED, 'NotFoundError');
+    if (ds.changing) throw makeDOMException(K_DEVICE_CHANGING, 'InvalidStateError');
+}
+function ensureNoDeviceOrInterfaceChange(ds) {
+    ensureNoDeviceChange(ds);
+    if (anyInterfaceChanging(ds)) throw makeDOMException(K_IFACE_CHANGING, 'InvalidStateError');
+}
+function ensureConfigured(ds) {
+    ensureNoDeviceChange(ds);
+    if (!ds.opened) throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    if (ds.activeConfigIndex < 0) throw makeDOMException(K_NO_CONFIG, 'InvalidStateError');
+}
+function ensureInterfaceClaimed(ds, number) {
+    ensureConfigured(ds);
+    var idx = findInterfaceIndex(ds, number);
+    if (idx < 0) throw makeDOMException(K_IFACE_NOT_FOUND, 'NotFoundError');
+    if (ds.ifaceChanging[number] === true) throw makeDOMException(K_IFACE_CHANGING, 'InvalidStateError');
+    if (ds.claimed[number] !== true) throw makeDOMException(K_IFACE_NOT_CLAIMED, 'InvalidStateError');
+    return idx;
+}
+function availableEndpoint(ds, inTransfer, number) {
+    if (ds.activeConfigIndex < 0) return null;
+    var ifs = ds.info.configurations[ds.activeConfigIndex].interfaces;
+    for (var i = 0; i < ifs.length; i++) {
+        var iface = ifs[i];
+        if (ds.claimed[iface.interfaceNumber] !== true || ds.ifaceChanging[iface.interfaceNumber] === true) continue;
+        var alt = iface.alternates[selectedAlternateIndex(iface, ds.alt[iface.interfaceNumber])];
+        for (var j = 0; j < alt.endpoints.length; j++) {
+            var e = alt.endpoints[j];
+            if (e.endpointNumber === number && (e.direction === 'in') === inTransfer) return e;
+        }
+    }
+    return null;
+}
+function ensureEndpointAvailable(ds, inTransfer, number) {
+    ensureConfigured(ds);
+    if (number === 0 || number >= 16) throw makeDOMException(K_EP_RANGE, 'IndexSizeError');
+    var ep = availableEndpoint(ds, inTransfer, number);
+    if (!ep) throw makeDOMException(K_EP_NOT_AVAILABLE, 'NotFoundError');
+    return ep;
+}
+var KNOWN_ERROR_NAMES = ['SecurityError', 'InvalidStateError', 'NotFoundError', 'InvalidAccessError', 'IndexSizeError',
+                         'DataError', 'NotSupportedError', 'NetworkError', 'AbortError', 'TimeoutError'];
+function transportError(err) {
+    if (err && getPrototypeOf(err) === ErrorC.prototype) {
+        return new DOMExceptionC('The implementation did not support the requested type of object or operation.', 'NotSupportedError');
+    }
+    return err;
+}
+function callRawChecked(method, args) {
+    return promiseThen(transport.callRaw(method, args), undefined, function (err) { throw transportError(err); });
+}
+function callJson(method, args) {
+    return promiseThen(callRawChecked(method, args), function (res) {
+        if (typeof res === 'string') {
+            try { return jsonParse(res); } catch (e) { return { success: false, error: 'invalid bridge response' }; }
+        }
+        return res;
+    });
+}
+function throwBridge(ds, res, defaultName, nativeMessage) {
+    var msg = (res && typeof res.error === 'string') ? res.error : '';
+    if (msg === 'Invalid device handle' && ds) {
+        markClosed(ds);
+        throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    }
+    if (stringIndexOf(msg, 'TypeError:') === 0) throw new TypeErrorC(stringTrim(stringSlice(msg, 10)));
+    for (var i = 0; i < KNOWN_ERROR_NAMES.length; i++) {
+        var p = KNOWN_ERROR_NAMES[i] + ':';
+        if (stringIndexOf(msg, p) === 0) throw new DOMExceptionC(stringTrim(stringSlice(msg, p.length)), KNOWN_ERROR_NAMES[i]);
+    }
+    if (msg) logDebug(msg);   /* raw backend text is kept out of the page-visible error */
+    throw new DOMExceptionC(nativeMessage, defaultName);
+}
+function checkOk(ds, res, defaultName, nativeMessage) {
+    if (!res || res.success !== true) throwBridge(ds, res, defaultName, nativeMessage);
+}
+function warnIfNeeded(res) { if (res && typeof res.warning === 'string') logWarn(res.warning); }
+function withDeviceChange(ds, promise, onOk) {
+    ds.changing = true;
+    return promiseThen(promise, function (v) { ds.changing = false; return onOk(v); },
+                                function (e) { ds.changing = false; throw e; });
+}
+function withInterfaceChange(ds, number, promise, onOk) {
+    ds.ifaceChanging[number] = true;
+    return promiseThen(promise, function (v) { delete ds.ifaceChanging[number]; return onOk(v); },
+                                function (e) { delete ds.ifaceChanging[number]; throw e; });
+}
+function statusOf(res) { return res && res.status === 'stall' ? 'stall' : (res && res.status === 'babble' ? 'babble' : 'ok'); }
+function USBInTransferResult(status, data = undefined) {
+    ctorGuard('USBInTransferResult', USBInTransferResult, new.target, arguments.length, 1);
+    var st = ctorConvert('USBInTransferResult', function () { return cvtTransferStatus(status); }, USBInTransferResult);
+    var dv = null;
+    if (data !== undefined && data !== null) {
+        if (!isDataView(data)) throw makeTypeError(failedConstruct('USBInTransferResult', "parameter 2 is not of type 'DataView'."), USBInTransferResult);
+        dv = data;
+    }
+    var self = objectCreate(new.target.prototype);
+    wmSet(inResultSlots, self, { status: st, data: dv });
+    return self;
+}
+function USBOutTransferResult(status, bytesWritten = 0) {
+    ctorGuard('USBOutTransferResult', USBOutTransferResult, new.target, arguments.length, 1);
+    var st = ctorConvert('USBOutTransferResult', function () { return cvtTransferStatus(status); }, USBOutTransferResult);
+    var n = ctorConvert('USBOutTransferResult', function () { return cvtULong(bytesWritten); }, USBOutTransferResult);
+    var self = objectCreate(new.target.prototype);
+    wmSet(outResultSlots, self, { status: st, bytesWritten: n });
+    return self;
+}
+function USBIsochronousInTransferPacket(status, data = undefined) {
+    ctorGuard('USBIsochronousInTransferPacket', USBIsochronousInTransferPacket, new.target, arguments.length, 1);
+    var st = ctorConvert('USBIsochronousInTransferPacket', function () { return cvtTransferStatus(status); }, USBIsochronousInTransferPacket);
+    var dv = null;
+    if (data !== undefined && data !== null) {
+        if (!isDataView(data)) throw makeTypeError(failedConstruct('USBIsochronousInTransferPacket', "parameter 2 is not of type 'DataView'."), USBIsochronousInTransferPacket);
+        dv = data;
+    }
+    var self = objectCreate(new.target.prototype);
+    wmSet(isoInPacketSlots, self, { status: st, data: dv });
+    return self;
+}
+function USBIsochronousInTransferResult(packets, data = undefined) {
+    ctorGuard('USBIsochronousInTransferResult', USBIsochronousInTransferResult, new.target, arguments.length, 1);
+    var list = ctorConvert('USBIsochronousInTransferResult', function () {
+        return cvtSequence(packets, function (p) {
+            if (!wmHas(isoInPacketSlots, p)) throw new TypeErrorC("The provided value is not of type 'USBIsochronousInTransferPacket'.");
+            return p;
+        });
+    }, USBIsochronousInTransferResult);
+    var dv = null;
+    if (data !== undefined && data !== null) {
+        if (!isDataView(data)) throw makeTypeError(failedConstruct('USBIsochronousInTransferResult', "parameter 2 is not of type 'DataView'."), USBIsochronousInTransferResult);
+        dv = data;
+    }
+    var self = objectCreate(new.target.prototype);
+    wmSet(isoInResultSlots, self, { packets: objectFreeze(list), data: dv });
+    return self;
+}
+function USBIsochronousOutTransferPacket(status, bytesWritten = 0) {
+    ctorGuard('USBIsochronousOutTransferPacket', USBIsochronousOutTransferPacket, new.target, arguments.length, 1);
+    var st = ctorConvert('USBIsochronousOutTransferPacket', function () { return cvtTransferStatus(status); }, USBIsochronousOutTransferPacket);
+    var n = ctorConvert('USBIsochronousOutTransferPacket', function () { return cvtULong(bytesWritten); }, USBIsochronousOutTransferPacket);
+    var self = objectCreate(new.target.prototype);
+    wmSet(isoOutPacketSlots, self, { status: st, bytesWritten: n });
+    return self;
+}
+function USBIsochronousOutTransferResult(packets) {
+    ctorGuard('USBIsochronousOutTransferResult', USBIsochronousOutTransferResult, new.target, arguments.length, 1);
+    var list = ctorConvert('USBIsochronousOutTransferResult', function () {
+        return cvtSequence(packets, function (p) {
+            if (!wmHas(isoOutPacketSlots, p)) throw new TypeErrorC("The provided value is not of type 'USBIsochronousOutTransferPacket'.");
+            return p;
+        });
+    }, USBIsochronousOutTransferResult);
+    var self = objectCreate(new.target.prototype);
+    wmSet(isoOutResultSlots, self, { packets: objectFreeze(list) });
+    return self;
+}
+function slotGetter(map, key) { return function (self) { return wmGet(map, self)[key]; }; }
+function brandOf(map) { return function (v) { return wmHas(map, v); }; }
+function attrs(map, names) {
+    var m = {}, brand = brandOf(map);
+    for (var i = 0; i < names.length; i++) m[names[i]] = makeAttribute(brand, names[i], slotGetter(map, names[i]));
+    return m;
+}
+function simpleInterface(Ctor, tag, map, names) {
+    var m = attrs(map, names);
+    assembleInterface(Ctor, tag, null, null, m, names.concat(['constructor']));
+}
+simpleInterface(USBInTransferResult, 'USBInTransferResult', inResultSlots, ['data', 'status']);
+simpleInterface(USBOutTransferResult, 'USBOutTransferResult', outResultSlots, ['bytesWritten', 'status']);
+simpleInterface(USBIsochronousInTransferPacket, 'USBIsochronousInTransferPacket', isoInPacketSlots, ['status', 'data']);
+simpleInterface(USBIsochronousInTransferResult, 'USBIsochronousInTransferResult', isoInResultSlots, ['data', 'packets']);
+simpleInterface(USBIsochronousOutTransferPacket, 'USBIsochronousOutTransferPacket', isoOutPacketSlots, ['bytesWritten', 'status']);
+simpleInterface(USBIsochronousOutTransferResult, 'USBIsochronousOutTransferResult', isoOutResultSlots, ['packets']);
+function isClaimed(ds, cfgIndex, number) { return ds.claimed[number] === true && ds.activeConfigIndex === cfgIndex; }
+function buildEndpoint(ds, c, f, a, e, proto) {
+    var obj = objectCreate(proto || USBEndpoint.prototype);
+    wmSet(endpointSlots, obj, { ds: ds, c: c, f: f, a: a, e: e, node: ds.info.configurations[c].interfaces[f].alternates[a].endpoints[e] });
+    return obj;
+}
+function buildAlternate(ds, c, f, a, proto) {
+    var obj = objectCreate(proto || USBAlternateInterface.prototype);
+    var node = ds.info.configurations[c].interfaces[f].alternates[a];
+    var eps = [];
+    for (var i = 0; i < node.endpoints.length; i++) arrayPush(eps, buildEndpoint(ds, c, f, a, i));
+    wmSet(altSlots, obj, { ds: ds, c: c, f: f, a: a, node: node, endpoints: objectFreeze(eps) });
+    return obj;
+}
+function buildInterface(ds, c, f, proto) {
+    var obj = objectCreate(proto || USBInterface.prototype);
+    var node = ds.info.configurations[c].interfaces[f];
+    var alts = [];
+    for (var i = 0; i < node.alternates.length; i++) arrayPush(alts, buildAlternate(ds, c, f, i));
+    wmSet(ifaceSlots, obj, { ds: ds, c: c, f: f, node: node, alternates: objectFreeze(alts) });
+    return obj;
+}
+function buildConfiguration(ds, c, proto) {
+    var obj = objectCreate(proto || USBConfiguration.prototype);
+    var node = ds.info.configurations[c];
+    var ifs = [];
+    for (var i = 0; i < node.interfaces.length; i++) arrayPush(ifs, buildInterface(ds, c, i));
+    wmSet(configSlots, obj, { ds: ds, c: c, node: node, interfaces: objectFreeze(ifs) });
+    return obj;
+}
+function getConfigs(ds) {
+    if (ds.configs === null) {
+        var arr = [];
+        for (var i = 0; i < ds.info.configurations.length; i++) arrayPush(arr, buildConfiguration(ds, i));
+        ds.configs = objectFreeze(arr);
+    }
+    return ds.configs;
+}
+function USBConfiguration(device, configurationValue) {
+    ctorGuard('USBConfiguration', USBConfiguration, new.target, arguments.length, 2);
+    var ds = wmGet(deviceSlots, device);
+    if (!ds) throw makeTypeError(failedConstruct('USBConfiguration', "parameter 1 is not of type 'USBDevice'."), USBConfiguration);
+    var value = ctorConvert('USBConfiguration', function () { return cvtOctet(configurationValue); }, USBConfiguration);
+    var idx = findConfigIndex(ds.info, value);
+    if (idx < 0) throw new RangeErrorC(failedConstruct('USBConfiguration', 'Invalid configuration value.'));
+    return buildConfiguration(ds, idx, new.target.prototype);
+}
+function USBInterface(configuration, interfaceNumber) {
+    ctorGuard('USBInterface', USBInterface, new.target, arguments.length, 2);
+    var cs = wmGet(configSlots, configuration);
+    if (!cs) throw makeTypeError(failedConstruct('USBInterface', "parameter 1 is not of type 'USBConfiguration'."), USBInterface);
+    var number = ctorConvert('USBInterface', function () { return cvtOctet(interfaceNumber); }, USBInterface);
+    var ifs = cs.node.interfaces;
+    for (var i = 0; i < ifs.length; i++) {
+        if (ifs[i].interfaceNumber === number) return buildInterface(cs.ds, cs.c, i, new.target.prototype);
+    }
+    throw new RangeErrorC(failedConstruct('USBInterface', 'Invalid interface index.'));
+}
+function USBAlternateInterface(deviceInterface, alternateSetting) {
+    ctorGuard('USBAlternateInterface', USBAlternateInterface, new.target, arguments.length, 2);
+    var fs = wmGet(ifaceSlots, deviceInterface);
+    if (!fs) throw makeTypeError(failedConstruct('USBAlternateInterface', "parameter 1 is not of type 'USBInterface'."), USBAlternateInterface);
+    var setting = ctorConvert('USBAlternateInterface', function () { return cvtOctet(alternateSetting); }, USBAlternateInterface);
+    var alts = fs.node.alternates;
+    for (var i = 0; i < alts.length; i++) {
+        if (alts[i].alternateSetting === setting) return buildAlternate(fs.ds, fs.c, fs.f, i, new.target.prototype);
+    }
+    throw new RangeErrorC(failedConstruct('USBAlternateInterface', 'Invalid alternate setting.'));
+}
+function USBEndpoint(alternate, endpointNumber, direction) {
+    ctorGuard('USBEndpoint', USBEndpoint, new.target, arguments.length, 3);
+    var as = wmGet(altSlots, alternate);
+    if (!as) throw makeTypeError(failedConstruct('USBEndpoint', "parameter 1 is not of type 'USBAlternateInterface'."), USBEndpoint);
+    var number = ctorConvert('USBEndpoint', function () { return cvtOctet(endpointNumber); }, USBEndpoint);
+    var dir = ctorConvert('USBEndpoint', function () { return cvtDirection(direction); }, USBEndpoint);
+    var eps = as.node.endpoints;
+    for (var i = 0; i < eps.length; i++) {
+        if (eps[i].endpointNumber === number && eps[i].direction === dir) return buildEndpoint(as.ds, as.c, as.f, as.a, i, new.target.prototype);
+    }
+    throw new RangeErrorC(failedConstruct('USBEndpoint', 'No such endpoint exists in the given alternate interface.'));
+}
+(function () {
+    var bCfg = brandOf(configSlots), bIf = brandOf(ifaceSlots), bAlt = brandOf(altSlots), bEp = brandOf(endpointSlots);
+    assembleInterface(USBConfiguration, 'USBConfiguration', null, null, {
+        configurationValue: makeAttribute(bCfg, 'configurationValue', function (s) { return wmGet(configSlots, s).node.configurationValue; }),
+        configurationName: makeAttribute(bCfg, 'configurationName', function (s) { return wmGet(configSlots, s).node.configurationName; }),
+        interfaces: makeAttribute(bCfg, 'interfaces', function (s) { return wmGet(configSlots, s).interfaces; })
+    }, ['configurationValue', 'configurationName', 'interfaces', 'constructor']);
+    assembleInterface(USBInterface, 'USBInterface', null, null, {
+        interfaceNumber: makeAttribute(bIf, 'interfaceNumber', function (s) { return wmGet(ifaceSlots, s).node.interfaceNumber; }),
+        alternate: makeAttribute(bIf, 'alternate', function (s) {
+            var fs = wmGet(ifaceSlots, s);
+            var setting = isClaimed(fs.ds, fs.c, fs.node.interfaceNumber) ? fs.ds.alt[fs.node.interfaceNumber] : undefined;
+            return fs.alternates[selectedAlternateIndex(fs.node, setting)];
+        }),
+        alternates: makeAttribute(bIf, 'alternates', function (s) { return wmGet(ifaceSlots, s).alternates; }),
+        claimed: makeAttribute(bIf, 'claimed', function (s) { var fs = wmGet(ifaceSlots, s); return isClaimed(fs.ds, fs.c, fs.node.interfaceNumber); })
+    }, ['interfaceNumber', 'alternate', 'alternates', 'claimed', 'constructor']);
+    assembleInterface(USBAlternateInterface, 'USBAlternateInterface', null, null, {
+        alternateSetting: makeAttribute(bAlt, 'alternateSetting', function (s) { return wmGet(altSlots, s).node.alternateSetting; }),
+        interfaceClass: makeAttribute(bAlt, 'interfaceClass', function (s) { return wmGet(altSlots, s).node.interfaceClass; }),
+        interfaceSubclass: makeAttribute(bAlt, 'interfaceSubclass', function (s) { return wmGet(altSlots, s).node.interfaceSubclass; }),
+        interfaceProtocol: makeAttribute(bAlt, 'interfaceProtocol', function (s) { return wmGet(altSlots, s).node.interfaceProtocol; }),
+        interfaceName: makeAttribute(bAlt, 'interfaceName', function (s) { return wmGet(altSlots, s).node.interfaceName; }),
+        endpoints: makeAttribute(bAlt, 'endpoints', function (s) { return wmGet(altSlots, s).endpoints; })
+    }, ['alternateSetting', 'interfaceClass', 'interfaceSubclass', 'interfaceProtocol', 'interfaceName', 'endpoints', 'constructor']);
+    assembleInterface(USBEndpoint, 'USBEndpoint', null, null, {
+        endpointNumber: makeAttribute(bEp, 'endpointNumber', function (s) { return wmGet(endpointSlots, s).node.endpointNumber; }),
+        direction: makeAttribute(bEp, 'direction', function (s) { return wmGet(endpointSlots, s).node.direction; }),
+        type: makeAttribute(bEp, 'type', function (s) { return wmGet(endpointSlots, s).node.type; }),
+        packetSize: makeAttribute(bEp, 'packetSize', function (s) { return wmGet(endpointSlots, s).node.packetSize; })
+    }, ['endpointNumber', 'direction', 'type', 'packetSize', 'constructor']);
+})();
+function USBDevice() { throw makeTypeError(new.target ? failedConstruct('USBDevice', 'Illegal constructor') : 'Illegal constructor', USBDevice); }
+var isDevice = brandOf(deviceSlots);
+function devState(self) { return wmGet(deviceSlots, self); }
+function opOpen(self) {
+    var ds = devState(self);
+    ensureNoDeviceChange(ds);
+    if (ds.opened) return promiseResolve(undefined);
+    return withDeviceChange(ds, callJson('openDevice', [ds.info.vendorId, ds.info.productId, transport.frameToken(), ds.info.serialNumber || '']), function (res) {
+        checkOk(ds, res, 'SecurityError', 'Access denied.');
+        ds.handle = res.handle; ds.opened = true;
+    });
+}
+function opClose(self) {
+    var ds = devState(self);
+    ensureNoDeviceChange(ds);
+    if (!ds.opened) return promiseResolve(undefined);
+    var handle = ds.handle;
+    markClosed(ds);
+    transport.send('closeDevice', [handle, transport.frameToken()]);
+    return promiseResolve(undefined);
+}
+function opForget(self) {
+    var ds = devState(self);
+    if (ds.opened && ds.handle !== null) transport.send('closeDevice', [ds.handle, transport.frameToken()]);
+    markClosed(ds);
+    mapDelete(deviceCache, ds.key);
+    return promiseThen(callJson('forgetGrantedDevice', [ds.info.vendorId, ds.info.productId, transport.frameToken()]), function () { return undefined; });
+}
+function opSelectConfiguration(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 1, 'USBDevice', 'selectConfiguration', op);
+    var value = convertArg('USBDevice', 'selectConfiguration', function () { return cvtOctet(args[0]); }, op);
+    ensureNoDeviceOrInterfaceChange(ds);
+    if (!ds.opened) throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    var idx = findConfigIndex(ds.info, value);
+    if (idx < 0) throw makeDOMException('The configuration value provided is not supported by the device.', 'NotFoundError');
+    if (ds.activeConfigIndex === idx) return promiseResolve(undefined);
+    return withDeviceChange(ds, callJson('selectConfiguration', [ds.handle, value, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to set device configuration.');
+        ds.activeConfigIndex = idx; resetInterfaceState(ds);
+    });
+}
+function opClaimInterface(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 1, 'USBDevice', 'claimInterface', op);
+    var n = convertArg('USBDevice', 'claimInterface', function () { return cvtOctet(args[0]); }, op);
+    ensureConfigured(ds);
+    if (findInterfaceIndex(ds, n) < 0) throw makeDOMException(K_IFACE_NOT_FOUND, 'NotFoundError');
+    if (ds.ifaceChanging[n] === true) throw makeDOMException(K_IFACE_CHANGING, 'InvalidStateError');
+    if (ds.claimed[n] === true) return promiseResolve(undefined);
+    return withInterfaceChange(ds, n, callJson('claimInterface', [ds.handle, n, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to claim interface.');
+        ds.claimed[n] = true; delete ds.alt[n];
+    });
+}
+function opReleaseInterface(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 1, 'USBDevice', 'releaseInterface', op);
+    var n = convertArg('USBDevice', 'releaseInterface', function () { return cvtOctet(args[0]); }, op);
+    ensureConfigured(ds);
+    if (findInterfaceIndex(ds, n) < 0) throw makeDOMException(K_IFACE_NOT_FOUND, 'NotFoundError');
+    if (ds.ifaceChanging[n] === true) throw makeDOMException(K_IFACE_CHANGING, 'InvalidStateError');
+    if (ds.claimed[n] !== true) return promiseResolve(undefined);
+    return withInterfaceChange(ds, n, callJson('releaseInterface', [ds.handle, n, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to release interface.');
+        delete ds.claimed[n]; delete ds.alt[n];
+    });
+}
+function opSelectAlternateInterface(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'selectAlternateInterface', op);
+    var n = convertArg('USBDevice', 'selectAlternateInterface', function () { return cvtOctet(args[0]); }, op);
+    var a = convertArg('USBDevice', 'selectAlternateInterface', function () { return cvtOctet(args[1]); }, op);
+    var fi = ensureInterfaceClaimed(ds, n);
+    var iface = ds.info.configurations[ds.activeConfigIndex].interfaces[fi];
+    var found = false;
+    for (var i = 0; i < iface.alternates.length; i++) if (iface.alternates[i].alternateSetting === a) found = true;
+    if (!found) throw makeDOMException(K_ALT_NOT_FOUND, 'NotFoundError');
+    return withInterfaceChange(ds, n, callJson('selectAlternateInterface', [ds.handle, n, a, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to set device interface.');
+        ds.alt[n] = a;
+    });
+}
+function ensureControlAllowed(ds, setup) {
+    if (setup.recipient === 'interface') ensureInterfaceClaimed(ds, setup.index & 0xff);
+    else if (setup.recipient === 'endpoint') ensureEndpointAvailable(ds, (setup.index & 0x80) !== 0, setup.index & 0x0f);
+}
+function requestTypeByte(setup, dirIn) {
+    return (setup.requestType === 'standard' ? 0x00 : setup.requestType === 'class' ? 0x20 : 0x40) |
+           (setup.recipient === 'interface' ? 0x01 : setup.recipient === 'endpoint' ? 0x02 : setup.recipient === 'other' ? 0x03 : 0x00) |
+           (dirIn ? 0x80 : 0x00);
+}
+function opControlTransferIn(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'controlTransferIn', op);
+    var setup = convertArg('USBDevice', 'controlTransferIn', function () { return cvtControlSetup(args[0]); }, op);
+    var length = convertArg('USBDevice', 'controlTransferIn', function () { return cvtUShort(args[1]); }, op);
+    ensureNoDeviceOrInterfaceChange(ds);
+    if (!ds.opened) throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    ensureControlAllowed(ds, setup);
+    return promiseThen(callJson('controlTransferIn', [ds.handle, requestTypeByte(setup, true), setup.request, setup.value, setup.index, length, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        var bytes = base64ToU8(res.data || '');
+        return new USBInTransferResult(statusOf(res), new DV(bytes.buffer));
+    });
+}
+function opControlTransferOut(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 1, 'USBDevice', 'controlTransferOut', op);
+    var setup = convertArg('USBDevice', 'controlTransferOut', function () { return cvtControlSetup(args[0]); }, op);
+    var data = null;
+    if (args.length > 1 && args[1] !== undefined) data = convertArg('USBDevice', 'controlTransferOut', function () { return cvtBufferSource(args[1]); }, op);
+    ensureNoDeviceOrInterfaceChange(ds);
+    if (!ds.opened) throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    ensureControlAllowed(ds, setup);
+    var b64 = data ? bytesToBase64(data) : '';
+    return promiseThen(callJson('controlTransferOut', [ds.handle, requestTypeByte(setup, false), setup.request, setup.value, setup.index, b64, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        return new USBOutTransferResult(statusOf(res), toInt(res.bytesWritten));
+    });
+}
+function opClearHalt(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'clearHalt', op);
+    var dir = convertArg('USBDevice', 'clearHalt', function () { return cvtDirection(args[0]); }, op);
+    var n = convertArg('USBDevice', 'clearHalt', function () { return cvtOctet(args[1]); }, op);
+    ensureEndpointAvailable(ds, dir === 'in', n);
+    return promiseThen(callJson('clearHalt', [ds.handle, dir, n, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to clear endpoint.');
+    });
+}
+function opTransferIn(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'transferIn', op);
+    var n = convertArg('USBDevice', 'transferIn', function () { return cvtOctet(args[0]); }, op);
+    var length = convertArg('USBDevice', 'transferIn', function () { return cvtULong(args[1]); }, op);
+    ensureEndpointAvailable(ds, true, n);
+    return promiseThen(callJson('bulkTransferIn', [ds.handle, n, length, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        warnIfNeeded(res);
+        var bytes = base64ToU8(res.data || '');
+        return new USBInTransferResult(statusOf(res), new DV(bytes.buffer));
+    });
+}
+function opTransferOut(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'transferOut', op);
+    var n = convertArg('USBDevice', 'transferOut', function () { return cvtOctet(args[0]); }, op);
+    var data = convertArg('USBDevice', 'transferOut', function () { return cvtBufferSource(args[1]); }, op);
+    ensureEndpointAvailable(ds, false, n);
+    var b64 = bytesToBase64(data);
+    return promiseThen(callJson('bulkTransferOut', [ds.handle, n, b64, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        warnIfNeeded(res);
+        return new USBOutTransferResult(statusOf(res), toInt(res.bytesWritten));
+    });
+}
+function totalPacketLength(lengths) {
+    var total = 0;
+    for (var i = 0; i < lengths.length; i++) {
+        if (4294967295 - total < lengths[i]) return -1;
+        total += lengths[i];
+    }
+    return total;
+}
+function opIsochronousTransferIn(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 2, 'USBDevice', 'isochronousTransferIn', op);
+    var n = convertArg('USBDevice', 'isochronousTransferIn', function () { return cvtOctet(args[0]); }, op);
+    var lengths = convertArg('USBDevice', 'isochronousTransferIn', function () { return cvtSequence(args[1], cvtULong); }, op);
+    var ep = ensureEndpointAvailable(ds, true, n);
+    if (totalPacketLength(lengths) < 0) throw makeDOMException(K_PACKETS_TOO_BIG, 'DataError');
+    if (ep.type !== 'isochronous') throw makeDOMException('The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError');
+    return promiseThen(callJson('isochronousTransferIn', [ds.handle, n, jsonStringify(lengths), transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        warnIfNeeded(res);
+        var list = arrayIsArray(res.packets) ? res.packets : [];
+        var chunks = [], total = 0, i;
+        for (i = 0; i < list.length; i++) { var b = base64ToU8(list[i] && list[i].data || ''); arrayPush(chunks, b); total += b.length; }
+        var combined = new U8(total), offset = 0, packets = [];
+        for (i = 0; i < chunks.length; i++) {
+            u8Set(combined, chunks[i], offset);
+            arrayPush(packets, new USBIsochronousInTransferPacket(statusOf(list[i]), new DV(combined.buffer, offset, chunks[i].length)));
+            offset += chunks[i].length;
+        }
+        return new USBIsochronousInTransferResult(packets, new DV(combined.buffer));
+    });
+}
+function opIsochronousTransferOut(self, args, op) {
+    var ds = devState(self);
+    needArgs(args, 3, 'USBDevice', 'isochronousTransferOut', op);
+    var n = convertArg('USBDevice', 'isochronousTransferOut', function () { return cvtOctet(args[0]); }, op);
+    var data = convertArg('USBDevice', 'isochronousTransferOut', function () { return cvtBufferSource(args[1]); }, op);
+    var lengths = convertArg('USBDevice', 'isochronousTransferOut', function () { return cvtSequence(args[2], cvtULong); }, op);
+    var ep = ensureEndpointAvailable(ds, false, n);
+    var total = totalPacketLength(lengths);
+    if (total < 0) throw makeDOMException(K_PACKETS_TOO_BIG, 'DataError');
+    if (total !== bufferSourceBytes(data).length) throw makeDOMException(K_BUFFER_MISMATCH, 'DataError');
+    if (ep.type !== 'isochronous') throw makeDOMException('The specified endpoint is not an isochronous endpoint.', 'InvalidAccessError');
+    var b64 = bytesToBase64(data);
+    return promiseThen(callJson('isochronousTransferOut', [ds.handle, n, b64, jsonStringify(lengths), transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'A transfer error has occurred.');
+        warnIfNeeded(res);
+        var list = arrayIsArray(res.packets) ? res.packets : [], packets = [];
+        for (var i = 0; i < list.length; i++) arrayPush(packets, new USBIsochronousOutTransferPacket(statusOf(list[i]), toInt(list[i] && list[i].bytesWritten)));
+        return new USBIsochronousOutTransferResult(packets);
+    });
+}
+function opReset(self) {
+    var ds = devState(self);
+    ensureNoDeviceOrInterfaceChange(ds);
+    if (!ds.opened) throw makeDOMException(K_OPEN_REQUIRED, 'InvalidStateError');
+    return withDeviceChange(ds, callJson('resetDevice', [ds.handle, transport.frameToken()]), function (res) {
+        checkOk(ds, res, 'NetworkError', 'Unable to reset the device.');
+        resetInterfaceState(ds);
+    });
+}
+(function () {
+    var m = {};
+    function attr(name, read) { m[name] = makeAttribute(isDevice, name, function (s) { return read(devState(s)); }); }
+    var infoAttrs = ['usbVersionMajor', 'usbVersionMinor', 'usbVersionSubminor', 'deviceClass', 'deviceSubclass', 'deviceProtocol',
+                     'vendorId', 'productId', 'deviceVersionMajor', 'deviceVersionMinor', 'deviceVersionSubminor',
+                     'manufacturerName', 'productName', 'serialNumber'];
+    infoAttrs.forEach(function (name) { attr(name, function (ds) { return ds.info[name]; }); });
+    attr('configuration', function (ds) { return ds.activeConfigIndex >= 0 ? getConfigs(ds)[ds.activeConfigIndex] : null; });
+    attr('configurations', function (ds) { return getConfigs(ds); });
+    attr('opened', function (ds) { return ds.opened; });
+    var ops = [
+        ['open', 0, opOpen], ['close', 0, opClose], ['forget', 0, opForget],
+        ['selectConfiguration', 1, opSelectConfiguration], ['claimInterface', 1, opClaimInterface],
+        ['releaseInterface', 1, opReleaseInterface], ['selectAlternateInterface', 2, opSelectAlternateInterface],
+        ['controlTransferIn', 2, opControlTransferIn], ['controlTransferOut', 1, opControlTransferOut],
+        ['clearHalt', 2, opClearHalt], ['transferIn', 2, opTransferIn], ['transferOut', 2, opTransferOut],
+        ['isochronousTransferIn', 2, opIsochronousTransferIn], ['isochronousTransferOut', 3, opIsochronousTransferOut],
+        ['reset', 0, opReset]
+    ];
+    var opNames = [];
+    ops.forEach(function (o) { m[o[0]] = makeOperation(isDevice, 'USBDevice', o[0], o[1], o[2]); arrayPush(opNames, o[0]); });
+    opNames.sort();   /* Blink installs operations in alphabetical order */
+    assembleInterface(USBDevice, 'USBDevice', null, null, m, infoAttrs.concat(['configuration', 'configurations', 'opened'], opNames, ['constructor']));
+})();
+function USBConnectionEvent(type, eventInitDict) {
+    ctorGuard('USBConnectionEvent', USBConnectionEvent, new.target, arguments.length, 2);
+    var t = ctorConvert('USBConnectionEvent', function () { return cvtDOMString(type); }, USBConnectionEvent);
+    if (!isObjectLike(eventInitDict)) {
+        throw makeTypeError(failedConstruct('USBConnectionEvent', "The provided value is not of type 'USBConnectionEventInit'."), USBConnectionEvent);
+    }
+    var init = { bubbles: !!eventInitDict.bubbles, cancelable: !!eventInitDict.cancelable, composed: !!eventInitDict.composed };
+    var dev = eventInitDict.device;
+    if (dev === undefined) {
+        throw makeTypeError(failedConstruct('USBConnectionEvent', "Failed to read the 'device' property from 'USBConnectionEventInit': Required member is undefined."), USBConnectionEvent);
+    }
+    if (!isDevice(dev)) {
+        throw makeTypeError(failedConstruct('USBConnectionEvent', "Failed to read the 'device' property from 'USBConnectionEventInit': Failed to convert value to 'USBDevice'."), USBConnectionEvent);
+    }
+    var ev = reflectConstruct(EventC, [t, init], new.target);
+    wmSet(eventSlots, ev, { device: dev });
+    return ev;
+}
+assembleInterface(USBConnectionEvent, 'USBConnectionEvent', EventC, EventC.prototype, {
+    device: makeAttribute(brandOf(eventSlots), 'device', function (s) { return wmGet(eventSlots, s).device; })
+}, ['device', 'constructor']);
+function USB() { throw makeTypeError(new.target ? failedConstruct('USB', 'Illegal constructor') : 'Illegal constructor', USB); }
+var isUSB = brandOf(usbSlots);
+var deviceCache = new MapC();
+function getOrCreateDevice(info, ordinal) {
+    var key = info.vendorId + ':' + info.productId + ':' + (info.serialNumber || '') + '#' + (ordinal || 0);
+    var existing = mapGet(deviceCache, key);
+    if (existing) return existing;
+    var dev = objectCreate(USBDevice.prototype);
+    wmSet(deviceSlots, dev, makeDeviceState(info, key));
+    mapSet(deviceCache, key, dev);
+    return dev;
+}
+function findCachedDevice(info) {
+    return mapGet(deviceCache, info.vendorId + ':' + info.productId + ':' + (info.serialNumber || '') + '#0');
+}
+function handlerAttribute(type) {
+    var name = 'on' + type;
+    var getter = makeGetter(isUSB, name, function (self) { return wmGet(usbSlots, self)[name]; });
+    var holder = { set [name](value) {
+        if (!isUSB(this)) throw makeTypeError('Illegal invocation', setterFn);
+        var s = wmGet(usbSlots, this), self = this;
+        var v = isObjectLike(value) ? value : null;
+        s[name] = v;
+        if (v !== null && !s.registered[type]) {
+            s.registered[type] = true;
+            reflectApply(etAddEventListener, self, [type, function (ev) {
+                var h = s[name];
+                if (typeof h === 'function') reflectApply(h, self, [ev]);
+            }]);
+        }
+    } };
+    var setterFn = getOwnPropertyDescriptor(holder, name).set;
+    maskFunction(setterFn, nativeSource('set ' + name));
+    return { get: getter, set: setterFn, enumerable: true, configurable: true };
+}
+function opGetDevices() {
+    return promiseThen(callJson('listDevices', [transport.frameToken()]), function (res) {
+        var out = [], counts = {}, list = (res && arrayIsArray(res.devices)) ? res.devices : [];
+        for (var i = 0; i < list.length; i++) {
+            var info = normalizeInfo(list[i]);
+            var base = info.vendorId + ':' + info.productId + ':' + (info.serialNumber || '');
+            var ord = counts[base] || 0;
+            counts[base] = ord + 1;
+            arrayPush(out, getOrCreateDevice(info, ord));
+        }
+        return out;
+    });
+}
+var ExtraGuardRef = win.__pysideWebUSBExtraGuard;   /* captured once: the page cannot swap it out later */
+function runExtraGuard(filters, exclusionFilters) {
+    if (typeof ExtraGuardRef !== 'function') return true;
+    try {
+        return reflectApply(ExtraGuardRef, win, [{
+            origin: (win.location && win.location.origin) ? win.location.origin : '',
+            filters: filters, exclusionFilters: exclusionFilters
+        }]) !== false;
+    } catch (e) { return false; }
+}
+function opRequestDevice(self, args, op) {
+    needArgs(args, 1, 'USB', 'requestDevice', op);
+    var options = convertArg('USB', 'requestDevice', function () { return cvtRequestOptions(args[0]); }, op);
+    var ua = nav.userActivation;
+    if (ua && ua.isActive === false) {
+        throw makeDOMException(failedExecute('USB', 'requestDevice', 'Must be handling a user gesture to show a permission request.'), 'SecurityError');
+    }
+    var all = [], k;
+    for (k = 0; k < options.filters.length; k++) arrayPush(all, options.filters[k]);
+    for (k = 0; k < options.exclusionFilters.length; k++) arrayPush(all, options.exclusionFilters[k]);
+    for (var i = 0; i < all.length; i++) {
+        var f = all[i];
+        if (hasOwn(f, 'productId') && !hasOwn(f, 'vendorId')) throw new TypeErrorC('A filter containing a productId must also contain a vendorId.');
+        if (hasOwn(f, 'subclassCode') && !hasOwn(f, 'classCode')) throw new TypeErrorC('A filter containing a subclassCode must also contain a classCode.');
+        if (hasOwn(f, 'protocolCode') && !hasOwn(f, 'subclassCode')) throw new TypeErrorC('A filter containing a protocolCode must also contain a subclassCode.');
+    }
+    if (!runExtraGuard(options.filters, options.exclusionFilters)) {
+        throw makeDOMException("Rejected by this page's configured WebUSB guard (extra_guard_js).", 'SecurityError');
+    }
+    var payload = jsonStringify({ filters: options.filters, exclusionFilters: options.exclusionFilters });
+    var chosen = promiseThen(callRawChecked('mintGestureToken', []), function (gesture) {
+        return callJson('requestDeviceChooser', [payload, transport.frameToken(), (typeof gesture === 'string') ? gesture : '']);
+    });
+    return promiseThen(chosen, function (res) {
+        if (res && res.cancelled) {
+            if (res.error) throwBridge(null, res, 'NotFoundError', 'No device selected.');
+            throw new DOMExceptionC('No device selected.', 'NotFoundError');
+        }
+        if (!res || !res.device) throw new DOMExceptionC('No device selected.', 'NotFoundError');
+        var info = normalizeInfo(res.device);
+        return findCachedDevice(info) || getOrCreateDevice(info, 0);
+    });
+}
+(function () {
+    assembleInterface(USB, 'USB', EventTargetC, EventTargetC.prototype, {
+        onconnect: handlerAttribute('connect'),
+        ondisconnect: handlerAttribute('disconnect'),
+        getDevices: makeOperation(isUSB, 'USB', 'getDevices', 0, opGetDevices),
+        requestDevice: makeOperation(isUSB, 'USB', 'requestDevice', 1, opRequestDevice)
+    }, ['onconnect', 'ondisconnect', 'getDevices', 'constructor', 'requestDevice']);
+})();
+var usbInstance = reflectConstruct(EventTargetC, [], USB);
+wmSet(usbSlots, usbInstance, { onconnect: null, ondisconnect: null, registered: objectCreate(null) });
+function deviceKey(info, ordinal) {
+    return info.vendorId + ':' + info.productId + ':' + (info.serialNumber || '') + '#' + (ordinal || 0);
+}
+function enumerateGranted() {
+    return promiseThen(callJson('listDevices', [transport.frameToken()]), function (res) {
+        var list = (res && arrayIsArray(res.devices)) ? res.devices : [], counts = {}, out = [];
+        for (var i = 0; i < list.length; i++) {
+            var info = normalizeInfo(list[i]);
+            var base = info.vendorId + ':' + info.productId + ':' + (info.serialNumber || '');
+            var ord = counts[base] || 0;
+            counts[base] = ord + 1;
+            arrayPush(out, { info: info, ordinal: ord, key: deviceKey(info, ord) });
+        }
+        return out;
+    });
+}
+function dispatchUsbEvent(type, device) {
+    var ev = new USBConnectionEvent(type, { device: device });
+    try { reflectApply(etDispatchEvent, usbInstance, [ev]); } catch (e) { /* listeners never break the bridge */ }
+}
+function announceConnected(vid, pid) {
+    return promiseThen(enumerateGranted(), function (rows) {
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (r.info.vendorId !== vid || r.info.productId !== pid || mapHas(deviceCache, r.key)) continue;
+            dispatchUsbEvent('connect', getOrCreateDevice(r.info, r.ordinal));
         }
     });
-
-    // 🐛 v0.0.5a3: 以前はここでnavigator.usbをオブジェクトリテラルとして丸ごと
-    // 代入していたが、今はnavigator.usb自体は既に(上でEventTargetを継承した
-    // USBのインスタンスとして)生成済みなので、残りのメソッドをその
-    // インスタンスへ生やす形にする。addEventListener/removeEventListener/
-    // dispatchEventはUSB.prototype側(EventTarget由来、またはフォールバック)に
-    // 既にあるため、ここで再定義しない。
-    navigator.usb.getDevices = function() {
-        return callBridge('listDevices', _frameToken()).then(function(res) {
-            return (res.devices || []).map(function(d) { return new OpenWebUSBDevice(d); });
+}
+function announceDisconnected(vid, pid) {
+    return promiseThen(enumerateGranted(), function (rows) {
+        var present = objectCreate(null), gone = [];
+        for (var i = 0; i < rows.length; i++) present[rows[i].key] = true;
+        mapForEach(deviceCache, function (dev, key) {
+            var ds = wmGet(deviceSlots, dev);
+            if (ds.info.vendorId === vid && ds.info.productId === pid && present[key] !== true) arrayPush(gone, [key, dev]);
         });
-    };
-    navigator.usb.requestDevice = function(_options) {
-            // 🛡️ 実仕様: USBDeviceRequestOptions.filtersは必須(required)フィールド。
-            //    省略された場合、実ブラウザではWebIDLの辞書変換の時点でTypeErrorになる
-            //    (wicg.github.io/webusb の USBDeviceRequestOptions定義)。旧実装は
-            //    optionsを一切見ておらず、常に全デバイスをチューザーに表示していた。
-            if (!_options || !Array.isArray(_options.filters)) {
-                return Promise.reject(new TypeError(
-                    "Failed to execute 'requestDevice' on 'USB': required member filters is undefined."));
-            }
-            var exclusionFilters = Array.isArray(_options.exclusionFilters) ? _options.exclusionFilters : [];
-            // 🛡️ 実仕様: filters/exclusionFiltersの各要素が「A USBDeviceFilter filter
-            //    is valid」に反する場合はTypeErrorで拒否する(例: vendorId無しで
-            //    productIdだけを指定 等)。
-            var allFilters = _options.filters.concat(exclusionFilters);
-            for (var fi = 0; fi < allFilters.length; fi++) {
-                if (!isValidUsbDeviceFilter(allFilters[fi])) {
-                    return Promise.reject(new TypeError(
-                        "Failed to execute 'requestDevice' on 'USB': the provided filter value is invalid."));
-                }
-            }
-            // 🆕 v0.0.5b3: install()のextra_guard_js=フック。ホストアプリが
-            //    window.__pysideWebUSBExtraGuard をfunctionとして定義していれば、
-            //    チューザーダイアログを開く(=ブリッジへ到達する)前にここで必ず
-            //    呼び出し、ドメイン固有の追加ガード条件を課せるようにする。
-            //    厳密に false を返した場合のみ拒否する(true/undefined/例外は
-            //    「このフックでは追加の制限をしない」の意味——このフック単体で
-            //    既存の検証を緩めることはできない、純粋な追加の絞り込みとして
-            //    設計してある)。ガード自身が例外を投げた場合は安全側(拒否)に倒す。
-            if (typeof window.__pysideWebUSBExtraGuard === 'function') {
-                var _guardResult;
-                try {
-                    _guardResult = window.__pysideWebUSBExtraGuard({
-                        origin: (typeof window.location !== 'undefined' && window.location) ? window.location.origin : '',
-                        filters: _options.filters,
-                        exclusionFilters: exclusionFilters,
-                    });
-                } catch (eGuard) {
-                    _guardResult = false;
-                }
-                if (_guardResult === false) {
-                    return Promise.reject(new DOMException(
-                        "Rejected by this page's configured WebUSB guard (extra_guard_js).", 'SecurityError'));
-                }
-            }
-            // 🛡️ 本物のWebUSB同様、信頼できるユーザー操作(クリック等)のハンドラ内から
-            //    呼ばれた場合のみ受け付ける。navigator.userActivationが無い古い/簡易な
-            //    エンジンでは判定できないため、その場合はチェックをスキップする
-            //    (その場合でも実際のデバイス選択にはネイティブのチューザーダイアログでの
-            //    明示的なユーザー操作が別途必要であり、無許可アクセスには繋がらない)。
-            if (typeof navigator.userActivation !== 'undefined' && navigator.userActivation &&
-                navigator.userActivation.isActive === false) {
-                return Promise.reject(new DOMException(
-                    'Must be handling a user gesture to call navigator.usb.requestDevice().', 'SecurityError'));
-            }
-            // 🛡️ security_audit No.2: 直前で確認した「本物のユーザー操作から
-            //    呼ばれている」という事実を、Python側(requestDeviceChooser)が
-            //    独立に検証できる形にするため、短命・使い切りのトークンを
-            //    発行してもらってから渡す(see: bridge.pyのmintGestureToken/
-            //    __init__のself._gesture_tokensのコメント、および既知の限界)。
-            //    mintGestureTokenはJSONではなく生のトークン文字列を返す設計
-            //    なので、常にJSON.parseする callBridge は使わず直接呼ぶ。
-            return _bridgeReady.then(function(bridge) {
-                return new Promise(function(resolve) {
-                    if (!bridge) return resolve('');
-                    bridge.mintGestureToken(function(token) { resolve(token || ''); });
+        if (!gone.length) {
+            var ghost = objectCreate(USBDevice.prototype);
+            var gs = makeDeviceState(normalizeInfo({ vendorId: vid, productId: pid }), 'ghost:' + vid + ':' + pid);
+            markDisconnected(gs);
+            wmSet(deviceSlots, ghost, gs);
+            arrayPush(gone, [null, ghost]);
+        }
+        for (var j = 0; j < gone.length; j++) {
+            if (gone[j][0] !== null) mapDelete(deviceCache, gone[j][0]);
+            markDisconnected(wmGet(deviceSlots, gone[j][1]));
+            dispatchUsbEvent('disconnect', gone[j][1]);
+        }
+    });
+}
+var eventChain = promiseResolve(undefined);
+transport.onEvent(function (type, json) {
+    var raw;
+    try { raw = jsonParse(json); } catch (e) { return; }
+    if (!raw || typeof raw.vendorId !== 'number' || typeof raw.productId !== 'number') return;
+    var vid = raw.vendorId, pid = raw.productId;
+    eventChain = promiseThen(eventChain, function () {
+        return promiseThen(callRawChecked('isGrantedToThisFrame', [vid, pid, transport.frameToken()]), function (granted) {
+            if (granted !== true) return undefined;
+            return (type === 'connect') ? announceConnected(vid, pid) : announceDisconnected(vid, pid);
+        });
+    });
+    eventChain = promiseThen(eventChain, undefined, function () { /* keep the chain alive */ });
+});
+var usbGetter = makeGetter(function (self) { return self === nav; }, 'usb', function () { return usbInstance; });
+defineProperty(Navigator.prototype, 'usb', {
+    get: usbGetter, set: undefined, enumerable: true, configurable: !CONFIG.lockNavigatorUsb
+});
+var EXPORTED = [
+    ['USB', USB], ['USBConnectionEvent', USBConnectionEvent], ['USBDevice', USBDevice],
+    ['USBInTransferResult', USBInTransferResult], ['USBOutTransferResult', USBOutTransferResult],
+    ['USBIsochronousInTransferPacket', USBIsochronousInTransferPacket],
+    ['USBIsochronousInTransferResult', USBIsochronousInTransferResult],
+    ['USBIsochronousOutTransferPacket', USBIsochronousOutTransferPacket],
+    ['USBIsochronousOutTransferResult', USBIsochronousOutTransferResult],
+    ['USBConfiguration', USBConfiguration], ['USBInterface', USBInterface],
+    ['USBAlternateInterface', USBAlternateInterface], ['USBEndpoint', USBEndpoint]
+];
+for (var gi = 0; gi < EXPORTED.length; gi++) {
+    if (!hasOwn(win, EXPORTED[gi][0])) {
+        defineProperty(win, EXPORTED[gi][0], { value: EXPORTED[gi][1], writable: true, enumerable: false, configurable: true });
+    }
+}
+if (CONFIG.nativeLookalike) {
+    var patchedToString = new Proxy(origFnToString, {
+        apply: function (target, thisArg, argList) {
+            if (isObjectLike(thisArg) && wmHas(nativeText, thisArg)) return wmGet(nativeText, thisArg);
+            return reflectApply(target, thisArg, argList);
+        }
+    });
+    wmSet(nativeText, patchedToString, nativeSource('toString'));
+    defineProperty(Function.prototype, 'toString', {
+        value: patchedToString, writable: true, enumerable: false, configurable: true
+    });
+}
+var STRINGS = {
+    en: {
+        transferLimits: function (l) {
+            return '[pyside6-webusb] Transfer size policy: transfers up to ' + l.hostSafetyHardLimit +
+                ' bytes are allowed here. Real Chrome would reject anything over ' + l.chromeCompatibleWarnThreshold +
+                ' bytes with DataError -- this implementation instead logs a console.warn() on that specific transfer ' +
+                'and lets it proceed, since it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
+                'implementation with its own, more permissive extensions. See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
+        },
+        help: '[pyside6-webusb] Available __pysideWebUSB commands: listGrantedDevices() - devices already granted to this origin; ' +
+            "bridgeInfo() - this bridge's own version/backend/acceleration status; explainTransferLimits() - this implementation's " +
+            'transfer size policy vs real Chrome; locale() - the language of this debug output; platform() - host OS / architecture / ' +
+            'capability summary; transport() - how this page reaches Python (webchannel or websocket); version() - polyfill and ' +
+            'bridge versions; diagnose() - environment report (libusb, permissions hints); selfTest() - checks that the WebUSB ' +
+            'interfaces look and behave like a native browser.',
+        selfTestDone: function (ok, total) { return '[pyside6-webusb] selfTest: ' + ok + '/' + total + ' checks passed.'; }
+    },
+    ja: {
+        transferLimits: function (l) {
+            return '[pyside6-webusb] 転送サイズの方針: ここでは ' + l.hostSafetyHardLimit + ' バイトまでの転送を許可しています。' +
+                '実際のChromeなら ' + l.chromeCompatibleWarnThreshold + ' バイトを超えるとDataErrorで拒否しますが、この実装ではその転送に' +
+                '対してconsole.warn()を出すだけで処理は継続します——これはChromeの完全な代替品を目指したものではなく、より寛容な独自拡張を持つ' +
+                'WebUSB互換の実装だからです。詳しい理由はpyside6-webusbのREADME/CHANGELOG(v0.0.4b2)を参照してください。';
+        },
+        help: '[pyside6-webusb] __pysideWebUSBで使えるコマンド: listGrantedDevices() - このオリジンに既に許可済みのデバイス一覧 / ' +
+            'bridgeInfo() - このブリッジ自身のバージョン・バックエンド・アクセラレーション状況 / explainTransferLimits() - この実装の' +
+            '転送サイズ方針と実Chromeとの違い / locale() - このデバッグ出力の言語 / platform() - ホストOS・アーキテクチャ・機能の概要 / ' +
+            'transport() - このページがPythonへ到達する方式(webchannelかwebsocket) / version() - ポリフィルとブリッジのバージョン / ' +
+            'diagnose() - 環境レポート(libusb・権限のヒント) / selfTest() - WebUSBの各インターフェースがネイティブのブラウザと同じ見た目・' +
+            '挙動かを確認します。',
+        selfTestDone: function (ok, total) { return '[pyside6-webusb] selfTest: ' + total + ' 件中 ' + ok + ' 件が合格しました。'; }
+    },
+    zh: {
+        transferLimits: function (l) {
+            return '[pyside6-webusb] 传输大小策略: 此处允许最多 ' + l.hostSafetyHardLimit + ' 字节的传输。真正的 Chrome 会对超过 ' +
+                l.chromeCompatibleWarnThreshold + ' 字节的传输以 DataError 拒绝,而本实现只会针对该次传输输出 console.warn() 并允许其继续——' +
+                '因为本实现并非要成为 Chrome 的完全替代品,而是一个带有更宽松扩展的 WebUSB 兼容实现。完整原因请参阅 pyside6-webusb 的 README/CHANGELOG(v0.0.4b2)。';
+        },
+        help: '[pyside6-webusb] __pysideWebUSB 可用命令: listGrantedDevices() - 列出已授权给此来源的设备 / bridgeInfo() - 本桥接自身的版本/后端/加速状态 / ' +
+            'explainTransferLimits() - 本实现的传输大小策略与真实 Chrome 的差异 / locale() - 此调试输出的语言 / platform() - 主机操作系统、架构与功能概要 / ' +
+            'transport() - 此页面访问 Python 的方式(webchannel 或 websocket) / version() - polyfill 与桥接版本 / diagnose() - 环境报告(libusb、权限提示) / ' +
+            'selfTest() - 检查 WebUSB 各接口的外观与行为是否与原生浏览器一致。',
+        selfTestDone: function (ok, total) { return '[pyside6-webusb] selfTest: ' + total + ' 项中 ' + ok + ' 项通过。'; }
+    }
+};
+function strings() { return STRINGS[CONFIG.locale] || STRINGS.en; }
+function runSelfTest() {
+    var checks = [];
+    function check(name, fn) {
+        var ok = false, detail = '';
+        try { var r = fn(); ok = (r === true); if (!ok) detail = StringC(r); } catch (e) { detail = 'threw ' + (e && e.name) + ': ' + (e && e.message); }
+        arrayPush(checks, { name: name, ok: ok, detail: detail });
+    }
+    var protoDesc = getOwnPropertyDescriptor(Navigator.prototype, 'usb');
+    check('navigator.usb is a USB instance', function () { return nav.usb instanceof USB && nav.usb.constructor === USB; });
+    check('Object.prototype.toString gives [object USB]', function () { return objectToString(nav.usb) === '[object USB]'; });
+    check('navigator.usb is not an own property of navigator', function () { return !hasOwn(nav, 'usb'); });
+    check('Navigator.prototype.usb is a getter-only accessor', function () {
+        return !!protoDesc && typeof protoDesc.get === 'function' && protoDesc.set === undefined && protoDesc.enumerable === true;
+    });
+    check('delete navigator.usb does not remove it', function () {
+        var before = nav.usb, r = (delete nav.usb);
+        return r === true && nav.usb === before;
+    });
+    check('property lock matches the configured policy', function () { return !!protoDesc && protoDesc.configurable === !CONFIG.lockNavigatorUsb; });
+    check('all WebUSB interface objects exist on window', function () {
+        for (var i = 0; i < EXPORTED.length; i++) if (win[EXPORTED[i][0]] !== EXPORTED[i][1]) return EXPORTED[i][0] + ' missing or replaced';
+        return true;
+    });
+    check('Symbol.toStringTag values are correct', function () {
+        for (var i = 0; i < EXPORTED.length; i++) if (EXPORTED[i][1].prototype[symToStringTag] !== EXPORTED[i][0]) return EXPORTED[i][0];
+        return true;
+    });
+    check('USB and USBDevice have illegal constructors', function () {
+        try { new USB(); return 'USB constructible'; } catch (e) { if (!(e instanceof TypeErrorC) || e.message !== "Failed to construct 'USB': Illegal constructor") return e.message; }
+        try { new USBDevice(); return 'USBDevice constructible'; } catch (e2) { if (!(e2 instanceof TypeErrorC) || e2.message !== "Failed to construct 'USBDevice': Illegal constructor") return e2.message; }
+        try { USB(); return 'USB callable'; } catch (e3) { if (!(e3 instanceof TypeErrorC) || e3.message !== 'Illegal constructor') return e3.message; }
+        return true;
+    });
+    check('methods have no prototype and are not constructors', function () {
+        var m = nav.usb.getDevices;
+        if (hasOwn(m, 'prototype')) return 'has prototype';
+        try { new m(); return 'constructible'; } catch (e) { return e instanceof TypeErrorC; }
+    });
+    check('brand checks reject foreign receivers', function () {
+        try { reflectApply(protoDesc.get, {}, []); return 'getter accepted {}'; } catch (e) { return e instanceof TypeErrorC && e.message === 'Illegal invocation'; }
+    });
+    if (CONFIG.nativeLookalike) {
+        check('functions print as native code', function () {
+            var f = Function.prototype.toString;
+            return reflectApply(f, nav.usb.getDevices, []) === 'function getDevices() { [native code] }' &&
+                   reflectApply(f, USB, []) === 'function USB() { [native code] }' &&
+                   reflectApply(f, f, []) === 'function toString() { [native code] }';
+        });
+    }
+    var okCount = 0;
+    for (var i = 0; i < checks.length; i++) if (checks[i].ok) okCount++;
+    return { ok: okCount === checks.length, passed: okCount, total: checks.length, checks: checks };
+}
+function jsPlatformHint() {
+    var uaData = nav.userAgentData;
+    return { userAgent: StringC(nav.userAgent), platform: StringC(nav.platform || (uaData && uaData.platform) || '') };
+}
+var commands = {
+    listGrantedDevices: function () {
+        return promiseThen(nav.usb.getDevices(), function (devices) {
+            var rows = [];
+            for (var i = 0; i < devices.length; i++) {
+                var d = devices[i];
+                arrayPush(rows, {
+                    vendorId: '0x' + d.vendorId.toString(16), productId: '0x' + d.productId.toString(16),
+                    productName: d.productName, manufacturerName: d.manufacturerName,
+                    serialNumber: d.serialNumber, opened: d.opened
                 });
-            }).then(function(gestureToken) {
-                return callBridge('requestDeviceChooser', JSON.stringify({
-                    filters: _options.filters,
-                    exclusionFilters: exclusionFilters,
-                }), _frameToken(), gestureToken);
-            }).then(function(res) {
-                if (res.cancelled) {
-                    // 🛡️ res.errorがある場合(再入防止ガード発火・pyusbバックエンド不通・
-                    //    ダイアログ例外など)は実際の理由を伝える。無い場合(=ユーザーが
-                    //    素直にCancelを押した/ダイアログを閉じた)は従来どおり
-                    //    汎用のNotFoundErrorにする。
-                    if (res.error) throwFromResult(res, 'No device selected.', 'NotFoundError');
-                    throw new DOMException('No device selected.', 'NotFoundError');
-                }
-                if (!res.device) {
-                    throw new DOMException('No device selected.', 'NotFoundError');
-                }
-                return new OpenWebUSBDevice(res.device);
-            });
-    };
-
-    // 🔧 v0.0.4b2: F12(DevTools Console)向けのデバッグ用ネームスペース。
-    // ページを開発中にnavigator.usbの状態を手軽に確認できるユーティリティ集。
-    // 🛡️ 安全上の設計方針: ここで公開する情報は「オリジンに紐付かない静的情報
-    // (バージョン・Rust高速化の有無・転送上限値)」と「呼び出し元オリジン自身が
-    // 既にnavigator.usb.getDevices()経由で見えている情報を見やすく整形しただけの
-    // もの」に限定している。他オリジンの許可済みデバイス一覧のような機微情報は
-    // 絶対に含めない——install()はこのポリフィル自体をMainWorld(=ページ自身の
-    // JSと同じ実行コンテキスト)へ注入するため、ここに書いたものは事実上どの
-    // Webページからも(DevTools越しの人間だけでなく、そのページ自身のスクリプト
-    // からも)見える。listKnownDevices等の@Slotを外した理由(bridge.py参照)と
-    // 全く同じ原則がここにも適用される。
-    window.__pysideWebUSB = {
-        // 呼び出し元オリジンが既に許可済みのデバイス一覧を、DevTools上で
-        // console.table()を使って見やすく表示するショートカット。中身は
-        // navigator.usb.getDevices()と完全に同じデータ(=追加の情報開示は無い)。
-        listGrantedDevices: function() {
-            return navigator.usb.getDevices().then(function(devices) {
-                var rows = devices.map(function(d) {
-                    return {
-                        vendorId: '0x' + d.vendorId.toString(16),
-                        productId: '0x' + d.productId.toString(16),
-                        productName: d.productName,
-                        manufacturerName: d.manufacturerName,
-                        serialNumber: d.serialNumber,
-                        opened: d.opened,
-                    };
-                });
-                if (typeof console !== 'undefined' && console.table) console.table(rows);
-                return rows;
-            });
-        },
-
-        // 🆕 独自拡張(実Chromeのnavigator.usbには相当機能が無い): このブリッジ
-        // 自体の状態(バージョン・Rustアクセラレーションが実際に効いているか・
-        // 転送サイズの上限方針)。navigator.usb自体からは通常知りようがない
-        // 情報なので、getDevices()の整形と違い、これは純粋にこの実装が
-        // 追加で公開している情報。
-        bridgeInfo: function() {
-            return callBridge('isAvailable').then(function(res) {
-                if (typeof console !== 'undefined' && console.log) {
-                    console.log('[pyside6-webusb] bridge info:', res);
-                }
-                return res;
-            });
-        },
-
-        // 🆕 独自拡張: 実Chromeの32MiB上限(kUsbTransferLengthLimit)をこの
-        // 実装がどう扱っているか(拒否ではなく警告に留める方針、
-        // hardening.pyのCHROME_USB_TRANSFER_LENGTH_LIMIT/HOST_SAFETY_MAX_
-        // TRANSFER_LENGTH参照)をDevTools上で説明する。実際に上限を超えた
-        // 転送が起きた際は、この説明を読まなくてもtransferIn/Out自体が
-        // console.warn()でその都度知らせる(res.warning、上記callBridge経由の
-        // transferIn実装を参照)。
-        explainTransferLimits: function() {
-            return callBridge('isAvailable').then(function(res) {
-                var limits = res.transferLimits || {};
-                var msg = '[pyside6-webusb] Transfer size policy: transfers up to ' +
-                    limits.hostSafetyHardLimit + ' bytes are allowed here. Real Chrome ' +
-                    'would reject anything over ' + limits.chromeCompatibleWarnThreshold +
-                    ' bytes with DataError -- this implementation instead logs a ' +
-                    'console.warn() on that specific transfer and lets it proceed, since ' +
-                    'it is intentionally not a drop-in Chrome clone but a WebUSB-compatible ' +
-                    'implementation with its own, more permissive extensions. ' +
-                    'See the pyside6-webusb README/CHANGELOG (v0.0.4b2) for the full reasoning.';
-                if (typeof console !== 'undefined' && console.log) console.log(msg);
-                return limits;
-            });
-        },
-    };
-
-    // 🌐 WebUSB標準クラス群をwindowへ公開(実ブラウザ同様、Windowコンテキストから参照可能にする)
-    if (typeof window.USB === 'undefined') window.USB = USB;
-    if (typeof window.USBConnectionEvent === 'undefined') window.USBConnectionEvent = USBConnectionEvent;
-    if (typeof window.USBDevice === 'undefined') window.USBDevice = OpenWebUSBDevice;
+            }
+            try { if (consoleRef && consoleRef.table) reflectApply(consoleRef.table, consoleRef, [rows]); } catch (e) { /* ignore */ }
+            return rows;
+        });
+    },
+    bridgeInfo: function () {
+        return promiseThen(callJson('isAvailable', []), function (res) { logInfo('[pyside6-webusb] bridge info:', res); return res; });
+    },
+    explainTransferLimits: function () {
+        return promiseThen(callJson('isAvailable', []), function (res) {
+            var limits = (res && res.transferLimits) || {};
+            logInfo(strings().transferLimits(limits));
+            return limits;
+        });
+    },
+    locale: function () { return CONFIG.locale; },
+    help: function () { var msg = strings().help; logInfo(msg); return msg; },
+    platform: function () {
+        return promiseThen(callJson('isAvailable', []), function (res) {
+            var out = { host: (res && res.platform) || null, capabilities: (res && res.capabilities) || null, page: jsPlatformHint() };
+            logInfo('[pyside6-webusb] platform:', out);
+            return out;
+        });
+    },
+    transport: function () {
+        return promiseThen(transport.ready, function (ready) { return { kind: transport.kind, ready: ready === true }; });
+    },
+    version: function () {
+        return promiseThen(callJson('isAvailable', []), function (res) {
+            return { polyfill: CONFIG.version, bridge: (res && res.bridgeVersion) || null };
+        });
+    },
+    diagnose: function () {
+        return promiseThen(callJson('getDiagnostics', []), function (res) { logInfo('[pyside6-webusb] diagnostics:', res); return res; });
+    },
+    selfTest: function () {
+        var r = runSelfTest();
+        try { if (consoleRef && consoleRef.table) reflectApply(consoleRef.table, consoleRef, [r.checks]); } catch (e) { /* ignore */ }
+        logInfo(strings().selfTestDone(r.passed, r.total));
+        return r;
+    }
+};
+(function () {
+    var names = ['listGrantedDevices', 'bridgeInfo', 'explainTransferLimits', 'locale', 'help', 'platform', 'transport', 'version', 'diagnose', 'selfTest'];
+    for (var i = 0; i < names.length; i++) {
+        var fn = commands[names[i]];
+        defineProperty(fn, 'name', { value: names[i], configurable: true });
+        if (CONFIG.nativeLookalike) maskFunction(fn, nativeSource(names[i]));
+    }
+})();
+if (CONFIG.exposeCommands && !hasOwn(win, '__pysideWebUSB')) {
+    defineProperty(win, '__pysideWebUSB', { value: commands, writable: true, enumerable: false, configurable: true });
+}
 })();

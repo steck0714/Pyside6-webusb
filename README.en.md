@@ -2,13 +2,24 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — 0.0.6.post1 (informally v0.0.6a)**
+⚠️ **Experimental Beta — 0.0.6.post2 (informally v0.0.6a1)**
 
 A WebUSB API implementation for **PySide6 / QtWebEngine** applications.
 
 It combines a JavaScript polyfill, a QWebChannel bridge, and real USB access through **pyusb / libusb** to provide `navigator.usb`, which is not normally available in embedded QtWebEngine.
 
 > `0.0.6` ships as a plain version everywhere (zip / sdist / wheel / `_version.py`), with no `aN`/`bN` pre-release tag and no `.postN` suffix — unlike the `0.0.5` line, where the GitHub zip label (e.g. `v0.0.5b3`) and the actual PyPI/PEP 440 version (`0.0.5.post7`) differed. See `CHANGELOG.md` for why.
+
+## What's new in 0.0.6.post2 (v0.0.6a1)
+
+Verified on Python 3.15.0a8 + PySide6 6.12.0 (all existing tests were already green there). Bug fixes only:
+
+- A clean `pip install` on PySide6 6.12 now brings in QtWebEngine (it moved to the separate `PySide6-WebEngine` package; the dependency is now `PySide6-Addons[webengine]`).
+- `native_messaging.read_message()` no longer rejects valid browser→host messages above 1 MiB (the 1 MiB limit applies only host→browser).
+- The `manifest.json` checker (`pyside6-webusb-doctor --check-native-messaging`) now also flags a relative `path` on Linux/macOS, invalid host names, and malformed `allowed_origins`.
+- `--check-native-messaging` without a path is now an error (exit code 2) instead of silently running the normal report.
+
+See `CHANGELOG.md` for details.
 
 ## What's new in 0.0.6.post1 (v0.0.6a)
 

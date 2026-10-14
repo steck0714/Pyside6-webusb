@@ -66,6 +66,7 @@ Ed25519によるローカル認証、Tkinter製チューザーダイアログ等
 """
 import json
 import os
+import re
 import struct
 
 
@@ -85,7 +86,16 @@ class NativeMessagingError(Exception):
 # パッケージの他の箇所にあるような「実ソースで確認済み」の数値とは性質が
 # 異なる。正確な最新の上限は各ブラウザの公式ドキュメントを確認すること
 # を推奨する。呼び出し側はmax_bytes=で必要に応じて調整できる。
-DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024  # 1 MiB
+# 🛠️ 0.0.6.post2: 上限を送信側/受信側で分けた。Chrome/Firefoxの公式ドキュメント
+# (上記URL)が定める上限は方向ごとに非対称で、ホスト→ブラウザは1 MiB、
+# ブラウザ→ホストは4 GiB(長さプレフィックスが符号なし32bitのため)。
+# 以前は読み込み側にも1 MiBを適用していたため、拡張機能から届く正当な
+# 1 MiB超のメッセージをNativeMessagingErrorで拒否してしまっていた。
+# DEFAULT_MAX_MESSAGE_BYTESは(後方互換のため名前を維持した)送信側の上限、
+# DEFAULT_MAX_INCOMING_BYTESは受信側の既定の安全上限(メモリを際限なく
+# 確保しないための上限で、プロトコル上の上限ではない。必要ならmax_bytes=で変更可)。
+DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024  # 1 MiB (host -> browser)
+DEFAULT_MAX_INCOMING_BYTES = 64 * 1024 * 1024  # 64 MiB (browser -> host, 安全上限)
 
 
 def write_message(stream, obj, max_bytes=DEFAULT_MAX_MESSAGE_BYTES):
@@ -138,7 +148,7 @@ def _read_exact(stream, n):
     return b"".join(chunks)
 
 
-def read_message(stream, max_bytes=DEFAULT_MAX_MESSAGE_BYTES):
+def read_message(stream, max_bytes=DEFAULT_MAX_INCOMING_BYTES):
     """4byte長プレフィックスを読み、その長さぶんのUTF-8 JSONを読んで
     デコードして返す(通常はdict、送信側の実装次第でlist等の他のJSON型も
     あり得る)。
@@ -166,6 +176,15 @@ def read_message(stream, max_bytes=DEFAULT_MAX_MESSAGE_BYTES):
 # manifest.json の静的検査
 # ---------------------------------------------------------------------------
 _REQUIRED_MANIFEST_KEYS = ("name", "description", "path", "type")
+
+# 🛠️ 0.0.6.post2: Chrome/Firefoxの公式ドキュメントが定めるホスト名の形式
+# (小文字英数字とアンダースコアとドット。先頭・末尾・連続のドットは不可)。
+# 違反すると、ブラウザ側はmanifestをホスト名で見つけられず "Specified native
+# messaging host not found" としか言わない(原因が分かりにくい失敗の典型)。
+_HOST_NAME_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+# Chromeの allowed_origins は "chrome-extension://<id>/" のみ(末尾の/が必須、
+# ワイルドカード不可)。
+_CHROME_ORIGIN_RE = re.compile(r"^chrome-extension://[^/*]+/$")
 
 
 def validate_native_messaging_manifest(manifest, locale=None):
@@ -215,6 +234,10 @@ def validate_native_messaging_manifest(manifest, locale=None):
         if key not in manifest:
             problems.append(native_messaging_text(loc, "manifest_missing_key", missing_key=key))
 
+    name = manifest.get("name")
+    if isinstance(name, str) and not _HOST_NAME_RE.match(name):
+        problems.append(native_messaging_text(loc, "manifest_bad_name", name=name))
+
     manifest_type = manifest.get("type")
     if manifest_type is not None and manifest_type != "stdio":
         problems.append(native_messaging_text(loc, "manifest_unsupported_type", type=manifest_type))
@@ -222,7 +245,13 @@ def validate_native_messaging_manifest(manifest, locale=None):
     path = manifest.get("path")
     if isinstance(path, str) and path:
         resolved = path if os.path.isabs(path) else os.path.normpath(os.path.join(base_dir or ".", path))
-        if not os.path.exists(resolved):
+        if not os.path.isabs(path) and os.name != "nt":
+            # 🛠️ 0.0.6.post2: 公式ドキュメントでは、相対pathが許されるのはWindowsだけ
+            # (LinuxとmacOSでは絶対パス必須)。以前は全OSで相対pathを
+            # manifest基準で解決して「問題なし」と判定していたため、
+            # ブラウザが拒否するmanifestを素通りさせていた。
+            problems.append(native_messaging_text(loc, "manifest_path_not_absolute", path=path))
+        elif not os.path.exists(resolved):
             problems.append(native_messaging_text(loc, "manifest_path_missing", path=path, resolved=resolved))
         elif os.name != "nt" and not os.access(resolved, os.X_OK):
             # 🔍 Windowsではos.access(X_OK)が拡張子ベースの判定になり実行
@@ -235,6 +264,10 @@ def validate_native_messaging_manifest(manifest, locale=None):
     has_firefox_extensions = isinstance(allowed_extensions, list) and len(allowed_extensions) > 0
     if not has_chrome_origins and not has_firefox_extensions:
         problems.append(native_messaging_text(loc, "manifest_missing_allowed_list"))
+    if isinstance(allowed_origins, list):
+        for origin in allowed_origins:
+            if not isinstance(origin, str) or not _CHROME_ORIGIN_RE.match(origin):
+                problems.append(native_messaging_text(loc, "manifest_bad_origin", origin=origin))
 
     return problems, warnings
 

@@ -2,13 +2,24 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — 0.0.6.post1(开发代号 v0.0.6a)**
+⚠️ **Experimental Beta — 0.0.6.post2(开发代号 v0.0.6a1)**
 
 面向 **PySide6 / QtWebEngine** 应用程序的 WebUSB API 实现。
 
 它结合 JavaScript Polyfill、QWebChannel Bridge 以及 **pyusb / libusb** 实际 USB 通信，为 QtWebEngine 提供通常不可直接使用的 `navigator.usb`。
 
 > `0.0.6` 在 zip/sdist/wheel/`_version.py` 中统一使用不带后缀的版本号——既没有 `aN`/`bN` 预发布标签，也没有 `.postN` 后缀。这与 `0.0.5` 系列(GitHub zip 标识 `v0.0.5b3` 与 PyPI/PEP 440 实际版本 `0.0.5.post7` 不一致)不同,原因见 `CHANGELOG.md`。
+
+## 0.0.6.post2(v0.0.6a1)的变化
+
+已在 Python 3.15.0a8 + PySide6 6.12.0 上验证(现有测试一开始就全部通过)。仅包含 bug 修复:
+
+- PySide6 6.12 将 QtWebEngine 拆分为独立的 `PySide6-WebEngine` 包,导致在干净环境中 `pip install` 时缺少 QtWebEngine;现已修复(依赖改为 `PySide6-Addons[webengine]`)。
+- `native_messaging.read_message()` 不再拒绝超过 1 MiB 的合法浏览器→主机消息(1 MiB 限制只适用于主机→浏览器方向)。
+- `manifest.json` 检查器(`pyside6-webusb-doctor --check-native-messaging`)现在还能发现 Linux/macOS 上的相对 `path`、无效的主机名以及格式错误的 `allowed_origins`。
+- 不带路径的 `--check-native-messaging` 现在会报错(退出码 2),而不是悄悄运行普通诊断。
+
+详见 `CHANGELOG.md`。
 
 ## 0.0.6.post1(v0.0.6a)的变化
 

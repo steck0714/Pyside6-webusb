@@ -485,6 +485,7 @@ def log_text(locale, key, **kwargs):
 # 詳細はnative_messaging.pyのモジュールdocstring参照。
 NATIVE_MESSAGING_STRINGS = {
     "en": {
+        "cli_missing_manifest_path": "--check-native-messaging needs the path of a manifest.json, e.g. --check-native-messaging /path/to/manifest.json",
         "check_header": "Native messaging manifest check: {path}",
         "manifest_unreadable": "Could not read '{path}': {error}",
         "manifest_invalid_json": "Not valid JSON: {error}",
@@ -498,10 +499,23 @@ NATIVE_MESSAGING_STRINGS = {
         ),
         "manifest_path_missing": (
             "'path' ('{path}', resolved to '{resolved}') does not point to a file that "
-            "exists. The browser resolves a relative 'path' against the manifest's own directory."
+            "exists."
         ),
         "manifest_path_not_executable": (
             "'{path}' exists but does not look executable (missing the execute bit)."
+        ),
+        "manifest_bad_name": (
+            "'name' ('{name}') is not a valid host name. Use only lowercase letters, digits, "
+            "underscores and dots (no leading, trailing or doubled dots), e.g. 'com.example.host' -- "
+            "otherwise the browser cannot find this manifest and only reports 'host not found'."
+        ),
+        "manifest_path_not_absolute": (
+            "'path' ('{path}') is relative. On Linux and macOS Chrome and Firefox require an "
+            "absolute 'path' (only on Windows may it be relative to the manifest's directory)."
+        ),
+        "manifest_bad_origin": (
+            "'allowed_origins' entry {origin!r} is not of the form 'chrome-extension://<id>/' "
+            "(the trailing slash is required and wildcards are not allowed)."
         ),
         "manifest_missing_allowed_list": (
             "Missing 'allowed_origins' (Chrome extension IDs, as "
@@ -510,6 +524,7 @@ NATIVE_MESSAGING_STRINGS = {
         ),
     },
     "ja": {
+        "cli_missing_manifest_path": "--check-native-messaging にはmanifest.jsonのパスが必要です(例: --check-native-messaging /path/to/manifest.json)",
         "check_header": "Native messaging manifestのチェック: {path}",
         "manifest_unreadable": "'{path}' を読み込めません: {error}",
         "manifest_invalid_json": "妥当なJSONではありません: {error}",
@@ -525,10 +540,22 @@ NATIVE_MESSAGING_STRINGS = {
         ),
         "manifest_path_missing": (
             "'path'('{path}'、解決後: '{resolved}')が指すファイルが存在しません。"
-            "ブラウザは相対パスの'path'をmanifest自身のディレクトリを基準に解決します。"
         ),
         "manifest_path_not_executable": (
             "'{path}' は存在しますが実行可能に見えません(実行ビットが立っていません)。"
+        ),
+        "manifest_bad_name": (
+            "'name'('{name}')はホスト名として無効です。小文字の英数字・アンダースコア・ドット"
+            "のみ使えます(先頭・末尾・連続のドットは不可。例: 'com.example.host')——"
+            "守らないとブラウザがこのmanifestを見つけられず、'host not found'としか報告されません。"
+        ),
+        "manifest_path_not_absolute": (
+            "'path'('{path}')が相対パスです。LinuxとmacOSではChrome/Firefoxとも絶対パスが必須です"
+            "(相対パスを使えるのはWindowsのみで、その場合manifestのあるディレクトリが基準になります)。"
+        ),
+        "manifest_bad_origin": (
+            "'allowed_origins'の要素 {origin!r} が 'chrome-extension://<id>/' の形式ではありません"
+            "(末尾の'/'は必須で、ワイルドカードは使えません)。"
         ),
         "manifest_missing_allowed_list": (
             "'allowed_origins'(Chrome拡張機能のID、'chrome-extension://<id>/'の形式)"
@@ -537,6 +564,7 @@ NATIVE_MESSAGING_STRINGS = {
         ),
     },
     "zh": {
+        "cli_missing_manifest_path": "--check-native-messaging 需要 manifest.json 的路径,例如 --check-native-messaging /path/to/manifest.json",
         "check_header": "Native messaging manifest 检查: {path}",
         "manifest_unreadable": "无法读取 '{path}': {error}",
         "manifest_invalid_json": "不是有效的 JSON: {error}",
@@ -550,10 +578,22 @@ NATIVE_MESSAGING_STRINGS = {
         ),
         "manifest_path_missing": (
             "'path'('{path}',解析后为 '{resolved}')指向的文件不存在。"
-            "浏览器会以 manifest 自身所在目录为基准解析相对路径的 'path'。"
         ),
         "manifest_path_not_executable": (
             "'{path}' 存在,但看起来不可执行(缺少可执行权限位)。"
+        ),
+        "manifest_bad_name": (
+            "'name'('{name}')不是有效的主机名。只能使用小写字母、数字、下划线和点"
+            "(开头、结尾不能是点,也不能连续出现点,例如 'com.example.host')——"
+            "否则浏览器找不到此 manifest,只会报告 'host not found'。"
+        ),
+        "manifest_path_not_absolute": (
+            "'path'('{path}')是相对路径。在 Linux 和 macOS 上,Chrome 和 Firefox 要求 'path' 必须是"
+            "绝对路径(只有 Windows 才允许相对于 manifest 所在目录的相对路径)。"
+        ),
+        "manifest_bad_origin": (
+            "'allowed_origins' 中的条目 {origin!r} 不符合 'chrome-extension://<id>/' 的格式"
+            "(末尾的 '/' 必不可少,且不允许使用通配符)。"
         ),
         "manifest_missing_allowed_list": (
             "缺少 'allowed_origins'(Chrome 扩展 ID,格式为 'chrome-extension://<id>/')"

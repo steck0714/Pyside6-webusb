@@ -2,13 +2,24 @@
 
 🇯🇵 [日本語](README.ja.md) | 🇺🇸 [English](README.en.md) | 🇨🇳 [简体中文](README.zh.md)
 
-⚠️ **Experimental Beta — 0.0.6.post1(開発名 v0.0.6a)**
+⚠️ **Experimental Beta — 0.0.6.post2(開発名 v0.0.6a1)**
 
 **PySide6 / QtWebEngine** アプリケーション向けの WebUSB API 実装です。
 
 JavaScript ポリフィル、QWebChannel ブリッジ、**pyusb / libusb** による実USB通信を組み合わせ、QtWebEngine では標準提供されていない `navigator.usb` を提供します。
 
 > `0.0.6` はzip/sdist/wheel/`_version.py`のすべてで素のバージョン文字列を使います——`aN`/`bN`のプレリリースタグも、その上に付ける`.postN`も無し。`0.0.5`系列(GitHub上のzip表記`v0.0.5b3`とPyPI/PEP 440上の実際のバージョン`0.0.5.post7`が異なっていた)とは違う扱いです。理由は`CHANGELOG.md`参照。
+
+## 0.0.6.post2(v0.0.6a1)の変更点
+
+Python 3.15.0a8 + PySide6 6.12.0で検証(既存のテストは最初から全て通っていました)。バグ修正のみです:
+
+- PySide6 6.12でQtWebEngineが別パッケージ`PySide6-WebEngine`へ分離されたため、クリーン環境での`pip install`でQtWebEngineが入らなかった問題を修正(依存を`PySide6-Addons[webengine]`に変更)。
+- `native_messaging.read_message()`が、1 MiBを超える正当なブラウザ→ホストのメッセージを拒否していた問題を修正(1 MiBの上限はホスト→ブラウザ方向だけ)。
+- `manifest.json`チェッカー(`pyside6-webusb-doctor --check-native-messaging`)が、Linux/macOSでの相対`path`・不正なホスト名・不正な`allowed_origins`も検出するように。
+- パス無しの`--check-native-messaging`は、黙って通常の診断を実行せず、エラー(終了コード2)になるように。
+
+詳細は`CHANGELOG.md`を参照してください。
 
 ## 0.0.6.post1(v0.0.6a)の変更点
 

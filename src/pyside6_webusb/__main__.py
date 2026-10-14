@@ -54,13 +54,25 @@ def _extract_native_messaging_manifest_path(argv):
     """🆕 v0.0.6: --check-native-messaging/-n の値(manifest.jsonのパス)を
     argvから取り出す(あれば)。_extract_lang()と全く同じ、
     '--check-native-messaging=path'/'--check-native-messaging path'の
-    両対応。"""
+    両対応。
+
+    🛠️ 0.0.6.post2: フラグはあるが値が無い場合(末尾でフラグだけ、または次の
+    トークンが別のオプション)を、以前のようにフラグごと黙って無視して通常の
+    環境診断を終了コード0で実行したり、次のオプション('--lang'等)をパスと
+    取り違えたりせず、_MISSING_VALUEを返して呼び出し側でエラーにする。
+    戻り値: パス(str) / 指定なしならNone / 値が欠けていればMISSING_VALUE。"""
     for i, tok in enumerate(argv):
         if tok.startswith("--check-native-messaging="):
-            return tok.split("=", 1)[1]
-        if tok in ("--check-native-messaging", "-n") and i + 1 < len(argv):
-            return argv[i + 1]
+            value = tok.split("=", 1)[1]
+            return value if value else _MISSING_VALUE
+        if tok in ("--check-native-messaging", "-n"):
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                return argv[i + 1]
+            return _MISSING_VALUE
     return None
+
+
+_MISSING_VALUE = object()
 
 
 def main(argv=None) -> int:
@@ -69,6 +81,10 @@ def main(argv=None) -> int:
     lang = _extract_lang(argv)
 
     manifest_path = _extract_native_messaging_manifest_path(argv)
+    if manifest_path is _MISSING_VALUE:
+        from .i18n import native_messaging_text
+        print(native_messaging_text(lang, "cli_missing_manifest_path"), file=sys.stderr)
+        return 2
     if manifest_path is not None:
         # 🆕 v0.0.6: 通常の環境診断とは別モード。native_messaging.pyの
         # モジュールdocstring参照。

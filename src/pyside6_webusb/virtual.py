@@ -289,10 +289,12 @@ class VirtualUsbDevice:
         典型的な使い方:
             # 1) 実機を挿した状態で一度だけ記述子を取得して保存しておく
             descriptor = json.loads(bridge.listDevices())["devices"][0]
-            json.dump(descriptor, open("my_device.json", "w"))
+            with open("my_device.json", "w", encoding="utf-8") as f:
+                json.dump(descriptor, f)
 
             # 2) 以降は実機無しで、保存した記述子から仮想デバイスを再生する
-            descriptor = json.load(open("my_device.json"))
+            with open("my_device.json", encoding="utf-8") as f:
+                descriptor = json.load(f)
             dev = VirtualUsbDevice.from_descriptor(descriptor)
             bridge = WebUSBBridge(usb_backend=make_virtual_usb_backend([dev]))
 

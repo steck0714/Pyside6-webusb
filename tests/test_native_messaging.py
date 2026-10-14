@@ -116,7 +116,9 @@ def _write_manifest(directory, **overrides):
     data = {
         "name": "com.example.fox_webusb_host",
         "description": "test host",
-        "path": "host.py",
+        # 🛠️ 0.0.6.post2: LinuxとmacOSでは絶対パスが必須(相対pathはWindowsのみ)のため、
+        # 既定は絶対パスにする。
+        "path": os.path.join(directory, "host.py"),
         "type": "stdio",
         "allowed_extensions": ["fox-webusb@example.com"],
     }
@@ -175,16 +177,100 @@ def test_validate_manifest_rejects_unsupported_type():
     print("test_validate_manifest_rejects_unsupported_type: OK")
 
 
-def test_validate_manifest_flags_missing_path_and_resolves_relative_paths():
-    """pathが存在しない場合は問題として報告し、相対pathはmanifest自身の
-    ディレクトリを基準に解決する(実際のブラウザの解決規則と同じ——
-    validate_native_messaging_manifest()のdocstring参照)。"""
+def test_validate_manifest_flags_missing_path():
     with tempfile.TemporaryDirectory() as d:
-        manifest_path = _write_manifest(d, path="no_such_host.py")
+        missing = os.path.join(d, "no_such_host.py")
+        manifest_path = _write_manifest(d, path=missing)
         problems, _ = validate_native_messaging_manifest(manifest_path)
         assert len(problems) == 1
         assert "no_such_host.py" in problems[0]
-    print("test_validate_manifest_flags_missing_path_and_resolves_relative_paths: OK")
+    print("test_validate_manifest_flags_missing_path: OK")
+
+
+def test_validate_manifest_relative_path_depends_on_os():
+    """🛠️ 0.0.6.post2: 相対pathが許されるのはWindowsだけ(Chrome/Firefoxの公式
+    ドキュメント)。LinuxとmacOSでは、実在するファイルを指していても
+    相対pathは問題として報告する(以前は全OSでmanifest基準に解決して
+    「問題なし」と誤判定していた)。Windowsではmanifestのディレクトリ基準で解決する。"""
+    with tempfile.TemporaryDirectory() as d:
+        host_path = os.path.join(d, "host.py")
+        with open(host_path, "w") as f:
+            f.write("# host\n")
+        os.chmod(host_path, 0o755)
+        manifest_path = _write_manifest(d, path="host.py")
+        problems, _ = validate_native_messaging_manifest(manifest_path, locale="en")
+        if os.name == "nt":
+            assert problems == [], problems
+        else:
+            assert len(problems) == 1 and "relative" in problems[0], problems
+    print("test_validate_manifest_relative_path_depends_on_os: OK")
+
+
+def test_validate_manifest_rejects_invalid_host_names():
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "host.py"), "w") as f:
+            f.write("# host\n")
+        os.chmod(os.path.join(d, "host.py"), 0o755)
+        for bad in ("My Host!", "Com.Example", ".leading", "trailing.", "dou..ble", "", "ホスト"):
+            manifest_path = _write_manifest(d, name=bad)
+            problems, _ = validate_native_messaging_manifest(manifest_path, locale="en")
+            assert any("host name" in p for p in problems), (bad, problems)
+        for good in ("a", "com.example.host", "fox_webusb_host", "x1.y2.z_3"):
+            manifest_path = _write_manifest(d, name=good)
+            problems, _ = validate_native_messaging_manifest(manifest_path, locale="en")
+            assert not any("host name" in p for p in problems), (good, problems)
+    print("test_validate_manifest_rejects_invalid_host_names: OK")
+
+
+def test_validate_manifest_checks_allowed_origins_format():
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "host.py"), "w") as f:
+            f.write("# host\n")
+        os.chmod(os.path.join(d, "host.py"), 0o755)
+        for bad in ("https://evil.example/", "chrome-extension://abc", "chrome-extension://*/",
+                    "chrome-extension://abc/path", 5):
+            manifest_path = _write_manifest(
+                d, allowed_extensions=[], allowed_origins=["chrome-extension://abc/", bad])
+            problems, _ = validate_native_messaging_manifest(manifest_path, locale="en")
+            assert len(problems) == 1 and "allowed_origins" in problems[0], (bad, problems)
+        manifest_path = _write_manifest(
+            d, allowed_extensions=[], allowed_origins=["chrome-extension://abc/", "chrome-extension://def/"])
+        problems, _ = validate_native_messaging_manifest(manifest_path, locale="en")
+        assert problems == [], problems
+    print("test_validate_manifest_checks_allowed_origins_format: OK")
+
+
+def test_new_manifest_messages_exist_in_all_locales_and_format_cleanly():
+    from pyside6_webusb.i18n import SUPPORTED_LOCALES, native_messaging_text
+    for loc in SUPPORTED_LOCALES:
+        assert "x.y" in native_messaging_text(loc, "manifest_bad_name", name="x.y")
+        assert "rel/p" in native_messaging_text(loc, "manifest_path_not_absolute", path="rel/p")
+        assert "bad://o" in native_messaging_text(loc, "manifest_bad_origin", origin="bad://o")
+    print("test_new_manifest_messages_exist_in_all_locales_and_format_cleanly: OK")
+
+
+def test_read_accepts_messages_above_the_one_mib_host_to_browser_limit():
+    """🛠️ 0.0.6.post2: 1 MiBの上限があるのはホスト→ブラウザ方向だけ。ブラウザ→
+    ホスト方向(read_message)は既定で1 MiBを超える正当なメッセージも受け取れる。
+    一方write_message(ホスト→ブラウザ)は従来どおり1 MiBで拒否する。"""
+    big = {"blob": "a" * (2 * 1024 * 1024)}
+    payload = json.dumps(big).encode("utf-8")
+    assert read_message(io.BytesIO(struct.pack("=I", len(payload)) + payload)) == big
+    try:
+        write_message(io.BytesIO(), big)
+        raise AssertionError("ホスト→ブラウザの1 MiB超が拒否されなかった")
+    except NativeMessagingError:
+        pass
+    from pyside6_webusb.native_messaging import DEFAULT_MAX_INCOMING_BYTES, DEFAULT_MAX_MESSAGE_BYTES
+    assert DEFAULT_MAX_MESSAGE_BYTES == 1024 * 1024
+    assert DEFAULT_MAX_INCOMING_BYTES > DEFAULT_MAX_MESSAGE_BYTES
+    # 受信側の安全上限自体は引き続き有効
+    try:
+        read_message(io.BytesIO(struct.pack("=I", DEFAULT_MAX_INCOMING_BYTES + 1)))
+        raise AssertionError("受信上限超過が拒否されなかった")
+    except NativeMessagingError:
+        pass
+    print("test_read_accepts_messages_above_the_one_mib_host_to_browser_limit: OK")
 
 
 def test_validate_manifest_warns_on_non_executable_path():
@@ -216,7 +302,7 @@ def test_validate_manifest_requires_allowed_origins_or_extensions():
         manifest_path2 = os.path.join(d, "manifest2.json")
         with open(manifest_path2, "w", encoding="utf-8") as f:
             json.dump({
-                "name": "com.example.host", "description": "d", "path": "host.py",
+                "name": "com.example.host", "description": "d", "path": host_path,
                 "type": "stdio", "allowed_origins": ["chrome-extension://abc/"],
             }, f)
         problems2, _ = validate_native_messaging_manifest(manifest_path2)
@@ -310,6 +396,24 @@ def test_cli_check_native_messaging_flag_end_to_end(capsys):
     print("test_cli_check_native_messaging_flag_end_to_end: OK")
 
 
+def test_cli_check_native_messaging_without_a_path_is_an_error(capsys):
+    """🛠️ 0.0.6.post2: --check-native-messaging(-n)に値が無い場合は、以前のように
+    フラグごと黙って無視して通常の環境診断を終了コード0で実行したり、次の
+    オプション(--lang等)をパスと取り違えたりせず、stderrへ案内を出して終了コード2で
+    終わる。"""
+    from pyside6_webusb.__main__ import main
+
+    capsys.readouterr()  # 直前までの出力(他テストの"OK"表示など)を捨てる
+    for argv in (["--check-native-messaging"], ["-n"], ["--check-native-messaging="],
+                 ["-n", "--lang", "en"], ["--lang", "en", "--check-native-messaging"]):
+        rc = main(argv)
+        captured = capsys.readouterr()
+        assert rc == 2, (argv, rc)
+        assert "manifest.json" in captured.err, (argv, captured.err)
+        assert captured.out == "", (argv, captured.out)
+    print("test_cli_check_native_messaging_without_a_path_is_an_error: OK")
+
+
 if __name__ == "__main__":
     test_every_supported_locale_has_the_same_native_messaging_keys()
     test_write_then_read_message_round_trips()
@@ -322,7 +426,12 @@ if __name__ == "__main__":
     test_validate_manifest_accepts_an_already_loaded_dict()
     test_validate_manifest_reports_missing_required_keys()
     test_validate_manifest_rejects_unsupported_type()
-    test_validate_manifest_flags_missing_path_and_resolves_relative_paths()
+    test_validate_manifest_flags_missing_path()
+    test_validate_manifest_relative_path_depends_on_os()
+    test_validate_manifest_rejects_invalid_host_names()
+    test_validate_manifest_checks_allowed_origins_format()
+    test_new_manifest_messages_exist_in_all_locales_and_format_cleanly()
+    test_read_accepts_messages_above_the_one_mib_host_to_browser_limit()
     test_validate_manifest_warns_on_non_executable_path()
     test_validate_manifest_requires_allowed_origins_or_extensions()
     test_validate_manifest_reports_invalid_json_and_non_object()
@@ -330,31 +439,40 @@ if __name__ == "__main__":
     test_format_manifest_check_reuses_diagnostics_headers_across_locales()
 
     class _FakeCapsys:
-        """pytestなしで走らせる場合のcapsysの簡易代役。標準出力をStringIOへ
-        差し替えて溜め、readouterr().outで取り出せるようにするだけの
+        """pytestなしで走らせる場合のcapsysの簡易代役。標準出力・標準エラーを
+        StringIOへ差し替えて溜め、readouterr().out/.errで取り出せるようにするだけの
         最小限の実装。"""
         def __init__(self):
             import io as _io
-            self._buf = _io.StringIO()
+            self._out = _io.StringIO()
+            self._err = _io.StringIO()
             self._real_stdout = sys.stdout
-            sys.stdout = self._buf
+            self._real_stderr = sys.stderr
+            sys.stdout = self._out
+            sys.stderr = self._err
 
         def readouterr(self):
             import io as _io
-            captured = self._buf.getvalue()
-            self._buf = _io.StringIO()
-            sys.stdout = self._buf
+            captured_out = self._out.getvalue()
+            captured_err = self._err.getvalue()
+            self._out = _io.StringIO()
+            self._err = _io.StringIO()
+            sys.stdout = self._out
+            sys.stderr = self._err
 
             class _R:
-                out = captured
+                out = captured_out
+                err = captured_err
             return _R()
 
         def restore(self):
             sys.stdout = self._real_stdout
+            sys.stderr = self._real_stderr
 
     fake_capsys = _FakeCapsys()
     try:
         test_cli_check_native_messaging_flag_end_to_end(fake_capsys)
+        test_cli_check_native_messaging_without_a_path_is_an_error(fake_capsys)
     finally:
         fake_capsys.restore()
     print("ALL NATIVE MESSAGING TESTS PASSED")
